@@ -50,7 +50,7 @@ install:
 	cd modules/hwarang-api && poetry install
 	cd modules/hwarang-cli && poetry install
 	cd modules/hwarang-web && pnpm install
-	pip install datasets tqdm
+	pip install datasets tqdm --break-system-packages
 	@echo ""
 	@echo "All dependencies installed!"
 
