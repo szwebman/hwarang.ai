@@ -1,0 +1,75 @@
+# ============================================================
+# Hwarang 스토리지 설정
+# ============================================================
+#
+# 디스크가 여러 개일 때 용도별로 경로를 분배합니다.
+#
+# 예시 (4TB × 3):
+#   디스크 1 (/mnt/nvme0): OS + 학습 데이터 + 체크포인트
+#   디스크 2 (/mnt/nvme1): Raw 데이터 (다운로드/크롤링)
+#   디스크 3 (/mnt/nvme2): 모델 서빙 + 백업
+#
+# 사용법:
+#   1. 이 파일을 수정
+#   2. 모든 스크립트가 이 파일의 경로를 참조
+#   3. 또는 환경변수로 오버라이드 가능
+#
+# ============================================================
+
+# 디스크 1: OS + 학습 (가장 빠른 NVMe)
+train:
+  # 토큰화된 학습 데이터 (.bin)
+  data_dir: /mnt/nvme0/hwarang/train_data
+  # 학습 중 체크포인트 (자주 쓰기 발생)
+  checkpoint_dir: /mnt/nvme0/hwarang/checkpoints
+  # 토크나이저 출력
+  tokenizer_dir: /mnt/nvme0/hwarang/tokenizer
+
+# 디스크 2: Raw 데이터 (대용량 읽기/쓰기)
+data:
+  # 공개 데이터셋 다운로드
+  download_dir: /mnt/nvme1/hwarang/downloads
+  # GitHub 크롤링 결과
+  github_dir: /mnt/nvme1/hwarang/raw/github
+  # 블로그 스크래핑 결과
+  blog_dir: /mnt/nvme1/hwarang/raw/blogs
+  # AI Hub 수동 다운로드
+  aihub_dir: /mnt/nvme1/hwarang/raw/aihub
+  # 정제된 데이터 (중간 단계)
+  processed_dir: /mnt/nvme1/hwarang/processed
+  # SFT/DPO 데이터
+  sft_dir: /mnt/nvme1/hwarang/sft
+  dpo_dir: /mnt/nvme1/hwarang/dpo
+
+# 디스크 3: 서빙 + 백업 (안정성 중요)
+serve:
+  # 최종 내보낸 모델 (추론 서버가 읽는 곳)
+  model_dir: /mnt/nvme2/hwarang/models
+  # LoRA 어댑터
+  lora_dir: /mnt/nvme2/hwarang/lora_adapters
+  # Vector DB (RAG용)
+  vectordb_dir: /mnt/nvme2/hwarang/vectordb
+  # 백업
+  backup_dir: /mnt/nvme2/hwarang/backup
+
+# ============================================================
+# 단일 디스크용 간편 설정 (디스크 1개일 때)
+# ============================================================
+# 아래 주석을 해제하면 모든 경로가 하나의 디렉토리 아래로
+#
+# single_disk:
+#   base_dir: ./data
+#   # 이 설정이 있으면 위의 개별 경로를 무시하고
+#   # base_dir 아래에 자동으로 하위 디렉토리 생성
+
+# ============================================================
+# 환경변수 오버라이드
+# ============================================================
+# 환경변수가 설정되어 있으면 이 파일의 값을 덮어씁니다.
+#
+# HWARANG_TRAIN_DATA_DIR=/mnt/fast/data
+# HWARANG_CHECKPOINT_DIR=/mnt/fast/checkpoints
+# HWARANG_DOWNLOAD_DIR=/mnt/large/downloads
+# HWARANG_MODEL_DIR=/mnt/stable/models
+# HWARANG_VECTORDB_DIR=/mnt/stable/vectordb
+# HWARANG_BACKUP_DIR=/mnt/stable/backup

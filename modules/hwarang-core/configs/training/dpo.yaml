@@ -1,0 +1,14 @@
+learning_rate: 5.0e-7
+weight_decay: 0.01
+max_grad_norm: 1.0
+warmup_steps: 50
+max_steps: 2000
+lr_scheduler: cosine
+batch_size: 2
+gradient_accumulation_steps: 16
+num_workers: 4
+save_steps: 500
+eval_steps: 200
+log_steps: 10
+output_dir: ./checkpoints/dpo
+dtype: bfloat16

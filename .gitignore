@@ -1,0 +1,69 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+*.so
+.venv/
+venv/
+env/
+
+# Poetry
+poetry.lock
+
+# PyTorch
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+
+# Node
+node_modules/
+.next/
+out/
+.pnpm-store/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.production
+
+# Data
+data/
+*.jsonl
+*.parquet
+*.arrow
+
+# Logs
+logs/
+*.log
+wandb/
+runs/
+
+# Model artifacts
+checkpoints/
+models/
+tokenizer_output/
+
+# Database
+*.db
+*.sqlite3
+
+# Docker
+docker-compose.override.yml

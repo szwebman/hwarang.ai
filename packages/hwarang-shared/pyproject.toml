@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "hwarang-shared"
+version = "0.1.0"
+description = "Shared schemas and protocols for Hwarang AI System"
+authors = ["Hwarang Team"]
+packages = [{include = "hwarang_shared", from = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+pydantic = "^2.7"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+ruff = "^0.4"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

@@ -1,0 +1,203 @@
+{
+  "name": "hwarang-vscode",
+  "displayName": "Hwarang AI",
+  "description": "AI coding assistant for VS Code - chat, file editing, code generation, terminal execution",
+  "version": "0.1.0",
+  "publisher": "hwarang",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "AI",
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "ai",
+    "assistant",
+    "code generation",
+    "chat",
+    "hwarang"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "icon": "media/icon.png",
+  "contributes": {
+    "commands": [
+      {
+        "command": "hwarang.login",
+        "title": "Hwarang: Login",
+        "icon": "$(sign-in)"
+      },
+      {
+        "command": "hwarang.logout",
+        "title": "Hwarang: Logout",
+        "icon": "$(sign-out)"
+      },
+      {
+        "command": "hwarang.showTokenStatus",
+        "title": "Hwarang: Token Status",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "hwarang.openChat",
+        "title": "Hwarang: Open Chat",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "hwarang.newChat",
+        "title": "Hwarang: New Chat"
+      },
+      {
+        "command": "hwarang.explainSelection",
+        "title": "Hwarang: Explain Selection"
+      },
+      {
+        "command": "hwarang.fixSelection",
+        "title": "Hwarang: Fix Selection"
+      },
+      {
+        "command": "hwarang.refactorSelection",
+        "title": "Hwarang: Refactor Selection"
+      },
+      {
+        "command": "hwarang.generateTests",
+        "title": "Hwarang: Generate Tests"
+      },
+      {
+        "command": "hwarang.inlineChat",
+        "title": "Hwarang: Inline Chat (Ctrl+I)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "hwarang-sidebar",
+          "title": "Hwarang AI",
+          "icon": "media/sidebar-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "hwarang-sidebar": [
+        {
+          "type": "webview",
+          "id": "hwarang.chatView",
+          "name": "Chat"
+        }
+      ]
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "submenu": "hwarang.editorContext",
+          "group": "hwarang"
+        }
+      ],
+      "hwarang.editorContext": [
+        {
+          "command": "hwarang.explainSelection",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "hwarang.fixSelection",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "hwarang.refactorSelection",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "hwarang.generateTests",
+          "when": "editorHasSelection"
+        }
+      ]
+    },
+    "submenus": [
+      {
+        "id": "hwarang.editorContext",
+        "label": "Hwarang AI"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "hwarang.openChat",
+        "key": "ctrl+shift+h",
+        "mac": "cmd+shift+h"
+      },
+      {
+        "command": "hwarang.inlineChat",
+        "key": "ctrl+i",
+        "mac": "cmd+i",
+        "when": "editorTextFocus"
+      }
+    ],
+    "configuration": {
+      "title": "Hwarang AI",
+      "properties": {
+        "hwarang.provider": {
+          "type": "string",
+          "default": "hwarang",
+          "enum": ["hwarang", "openai", "anthropic"],
+          "description": "LLM provider to use"
+        },
+        "hwarang.apiUrl": {
+          "type": "string",
+          "default": "http://localhost:8000",
+          "description": "Hwarang API server URL"
+        },
+        "hwarang.model": {
+          "type": "string",
+          "default": "hwarang-small",
+          "description": "Model to use for completions"
+        },
+        "hwarang.openaiApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "OpenAI API key (if using OpenAI provider)"
+        },
+        "hwarang.anthropicApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Anthropic API key (if using Anthropic provider)"
+        },
+        "hwarang.temperature": {
+          "type": "number",
+          "default": 0.7,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Sampling temperature"
+        },
+        "hwarang.maxTokens": {
+          "type": "number",
+          "default": 4096,
+          "description": "Maximum tokens in response"
+        },
+        "hwarang.autoApplyEdits": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically apply file edits without confirmation"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
+    "watch": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --watch",
+    "lint": "eslint src/",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.90.0",
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.21.0",
+    "typescript": "^5.5.0",
+    "@vscode/vsce": "^2.27.0",
+    "eslint": "^9.0.0"
+  },
+  "dependencies": {}
+}

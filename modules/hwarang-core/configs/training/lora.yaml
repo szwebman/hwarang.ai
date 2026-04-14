@@ -1,0 +1,32 @@
+# LoRA 어댑터 학습 설정
+# 도메인별 어댑터 학습 (Tax, Legal, Code 등)
+# RTX 4090 1장에서 학습 가능
+
+# Optimization (LoRA는 풀 파인튜닝보다 큰 LR 가능)
+learning_rate: 2.0e-4
+weight_decay: 0.0
+max_grad_norm: 1.0
+adam_beta1: 0.9
+adam_beta2: 0.999
+adam_eps: 1.0e-8
+
+# Schedule
+warmup_steps: 100
+max_steps: 3000
+lr_scheduler: cosine
+
+# Batching (RTX 4090 24GB 기준)
+batch_size: 4
+gradient_accumulation_steps: 4  # 실효 배치 = 16
+num_workers: 4
+
+# Checkpointing
+save_steps: 500
+eval_steps: 200
+log_steps: 10
+output_dir: ./lora_adapters/output
+
+# Hardware
+device: cuda
+dtype: bfloat16
+compile_model: false  # LoRA는 compile 호환성 주의

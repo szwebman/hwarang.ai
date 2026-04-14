@@ -1,0 +1,137 @@
+// Hwarang 고속 추론 gRPC 프로토콜
+//
+// Redis 대신 서버 간 직접 통신으로 지연 시간 최소화
+// - 일반 요청: ~100μs (Redis: ~200μs)
+// - 스트리밍: 바이너리 직접 전송 (JSON 변환 불필요)
+// - Tensor 교환: Tensor Parallelism 시 GPU 간 데이터 전송
+//
+// 컴파일:
+//   python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. inference.proto
+
+syntax = "proto3";
+
+package hwarang;
+
+// ============================================================
+// 추론 서비스 (마스터 → 서브)
+// ============================================================
+
+service InferenceService {
+  // 비스트리밍 추론
+  rpc Generate (GenerateRequest) returns (GenerateResponse);
+
+  // 스트리밍 추론 (서버 → 클라이언트 스트림)
+  rpc GenerateStream (GenerateRequest) returns (stream StreamChunk);
+
+  // Worker 상태 확인
+  rpc HealthCheck (Empty) returns (WorkerStatus);
+
+  // 로드된 모델 목록
+  rpc ListModels (Empty) returns (ModelList);
+}
+
+// ============================================================
+// Tensor Parallel 서비스 (서브 ↔ 서브)
+// ============================================================
+
+service TensorExchangeService {
+  // 레이어 출력 텐서 전송 (Pipeline Parallelism)
+  rpc SendActivation (TensorData) returns (TensorAck);
+
+  // 양방향 텐서 교환 (Tensor Parallelism)
+  rpc ExchangeTensor (stream TensorData) returns (stream TensorData);
+
+  // KV Cache 동기화
+  rpc SyncKVCache (KVCacheData) returns (TensorAck);
+}
+
+// ============================================================
+// 메시지 정의
+// ============================================================
+
+message Empty {}
+
+// --- 추론 요청/응답 ---
+
+message ChatMessage {
+  string role = 1;     // "system", "user", "assistant", "tool"
+  string content = 2;
+}
+
+message GenerateRequest {
+  string request_id = 1;
+  string model = 2;
+  repeated ChatMessage messages = 3;
+  float temperature = 4;
+  float top_p = 5;
+  int32 max_tokens = 6;
+  bool stream = 7;
+  int32 priority = 8;       // 0=normal, 1=high, 2=urgent
+}
+
+message GenerateResponse {
+  string request_id = 1;
+  string worker_id = 2;
+  string content = 3;
+  string finish_reason = 4;  // "stop", "length"
+  int32 prompt_tokens = 5;
+  int32 completion_tokens = 6;
+  float latency_ms = 7;
+  string error = 8;          // 빈 문자열이면 성공
+}
+
+message StreamChunk {
+  string request_id = 1;
+  string content = 2;        // 부분 텍스트
+  string finish_reason = 3;  // 빈 문자열이면 계속
+  int32 index = 4;           // 청크 순서
+}
+
+// --- Worker 상태 ---
+
+message WorkerStatus {
+  string worker_id = 1;
+  string host = 2;
+  int32 port = 3;
+  string status = 4;         // "idle", "busy", "draining"
+  repeated string models = 5;
+  int32 gpu_count = 6;
+  int64 gpu_memory_mb = 7;
+  int32 active_requests = 8;
+  double last_heartbeat = 9;
+}
+
+message ModelList {
+  repeated ModelInfo models = 1;
+}
+
+message ModelInfo {
+  string model_id = 1;
+  int64 param_count = 2;
+  int32 max_context = 3;
+}
+
+// --- Tensor 교환 (Tensor Parallelism) ---
+
+message TensorData {
+  string tensor_id = 1;       // "layer_15_output" 등
+  int32 layer_index = 2;
+  repeated int64 shape = 3;   // [batch, seq_len, hidden_size]
+  string dtype = 4;           // "float16", "bfloat16"
+  bytes data = 5;             // 텐서 바이너리 데이터
+  int32 source_gpu = 6;
+  int32 target_gpu = 7;
+}
+
+message TensorAck {
+  bool success = 1;
+  string error = 2;
+}
+
+message KVCacheData {
+  int32 layer_index = 1;
+  bytes key_cache = 2;        // 바이너리
+  bytes value_cache = 3;
+  repeated int64 shape = 4;
+  string dtype = 5;
+}

@@ -1,0 +1,56 @@
+name: CI - API
+
+on:
+  push:
+    paths:
+      - "modules/hwarang-api/**"
+      - "packages/hwarang-shared/**"
+  pull_request:
+    paths:
+      - "modules/hwarang-api/**"
+      - "packages/hwarang-shared/**"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: hwarang_test
+          POSTGRES_USER: hwarang
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432:5432
+        options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      - name: Install dependencies
+        run: |
+          cd packages/hwarang-shared && poetry install
+          cd ../../modules/hwarang-core && poetry install
+          cd ../hwarang-api && poetry install
+
+      - name: Lint
+        run: cd modules/hwarang-api && poetry run ruff check src/
+
+      - name: Test
+        run: cd modules/hwarang-api && poetry run pytest -v
+        env:
+          HWARANG_DATABASE_URL: postgresql+asyncpg://hwarang:test@localhost:5432/hwarang_test
+          HWARANG_REDIS_URL: redis://localhost:6379

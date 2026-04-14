@@ -1,0 +1,28 @@
+[tool.poetry]
+name = "hwarang-cli"
+version = "0.1.0"
+description = "Hwarang CLI - Terminal AI Agent"
+authors = ["Hwarang Team"]
+packages = [{include = "hwarang_cli", from = "src"}]
+
+[tool.poetry.scripts]
+hwarang = "hwarang_cli.main:app"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+typer = {extras = ["all"], version = "^0.12"}
+rich = "^13.7"
+httpx = "^0.27"
+prompt-toolkit = "^3.0"
+openai = "^1.30"
+anthropic = "^0.28"
+hwarang-shared = {path = "../../packages/hwarang-shared", develop = true}
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+pytest-asyncio = "^0.23"
+ruff = "^0.4"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

@@ -1,0 +1,37 @@
+{
+  "name": "hwarang-web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "next": "^15.0",
+    "react": "^19.0",
+    "react-dom": "^19.0",
+    "next-auth": "^5.0",
+    "react-markdown": "^9.0",
+    "remark-gfm": "^4.0",
+    "rehype-highlight": "^7.0",
+    "lucide-react": "^0.400",
+    "clsx": "^2.1",
+    "tailwind-merge": "^2.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0",
+    "@types/react": "^19.0",
+    "@types/react-dom": "^19.0",
+    "typescript": "^5.5",
+    "tailwindcss": "^4.0",
+    "@tailwindcss/postcss": "^4.0",
+    "postcss": "^8.4",
+    "vitest": "^2.0",
+    "@testing-library/react": "^16.0",
+    "eslint": "^9.0",
+    "eslint-config-next": "^15.0"
+  }
+}

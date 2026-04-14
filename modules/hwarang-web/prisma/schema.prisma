@@ -1,0 +1,291 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// 사용자
+// ============================================================
+
+model User {
+  id             String         @id @default(cuid())
+  email          String         @unique
+  name           String?
+  hashedPassword String
+  image          String?
+  role           UserRole       @default(USER)
+
+  // 관계
+  plan           Plan?          @relation(fields: [planId], references: [id])
+  planId         String?
+  tokenBalance   TokenBalance?
+  apiKeys        ApiKey[]
+  conversations  Conversation[]
+  usageRecords   UsageRecord[]
+  payments       Payment[]
+
+  // 상태
+  isActive       Boolean        @default(true)
+  emailVerified  DateTime?
+
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  @@index([email])
+  @@index([planId])
+}
+
+enum UserRole {
+  USER
+  ADMIN
+  SUPER_ADMIN
+}
+
+// ============================================================
+// 플랜 (구독 상품)
+// ============================================================
+
+model Plan {
+  id          String     @id @default(cuid())
+  name        String     @unique            // "free", "starter", "pro", "business", "enterprise"
+  displayName String                        // "Free", "Starter", "Pro", "Business", "Enterprise"
+  description String?
+
+  // 가격
+  priceMonthly  Int      @default(0)        // 월 가격 (원)
+  priceYearly   Int      @default(0)        // 연 가격 (원)
+
+  // ⭐ 토큰 기반 제한 (핵심!)
+  tokensIncluded    Int  @default(10000)    // 플랜에 포함된 월 토큰 수
+  dailyTokenLimit   Int  @default(5000)     // 하루 최대 소진 토큰 (폭주 방지)
+  maxTokensPerReq   Int  @default(2048)     // 요청 1회당 최대 토큰
+  concurrentReqs    Int  @default(1)        // 동시 요청 수
+  apiKeysAllowed    Int  @default(1)        // API 키 개수
+
+  // 초과 토큰 단가 (원, 1K 토큰당)
+  overagePrice7b    Int  @default(0)        // 7B 초과 단가 (0이면 초과 불가)
+  overagePrice30b   Int  @default(0)        // 30B 초과 단가
+
+  // 기능 접근
+  models            String[]               // 사용 가능한 모델 ["7b", "30b"]
+  features          String[]               // 기능 ["chat", "api", "code", "legal", "tax"]
+  supportLevel      String @default("community") // "community", "email", "priority", "dedicated"
+
+  // 상태
+  isActive          Boolean @default(true)
+  isPublic          Boolean @default(true)
+
+  users             User[]
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+// ============================================================
+// 사용자 토큰 잔액 (충전/차감 방식)
+// ============================================================
+
+model TokenBalance {
+  id          String   @id @default(cuid())
+  userId      String   @unique
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // 잔액
+  balance     Int      @default(0)           // 현재 남은 토큰 수
+  totalUsed   Int      @default(0)           // 누적 사용 토큰
+  totalCharged Int     @default(0)           // 누적 충전 토큰
+
+  // ⭐ 하루 소진 관리
+  dailyUsed       Int  @default(0)           // 오늘 사용한 토큰
+  dailyLimit      Int  @default(5000)        // 오늘 최대 소진 가능 (플랜에서 가져옴)
+  dailyResetAt    DateTime?                  // 오늘 리셋 시간 (자정)
+
+  // 월간 리셋 (구독 플랜용)
+  monthlyReset    Boolean @default(true)     // 매월 토큰 리셋 여부
+  lastResetAt     DateTime?                  // 마지막 리셋 시간
+  nextResetAt     DateTime?                  // 다음 리셋 시간
+
+  updatedAt   DateTime @updatedAt
+}
+
+// ============================================================
+// 토큰 거래 내역 (충전/사용/환불 추적)
+// ============================================================
+
+model TokenTransaction {
+  id          String           @id @default(cuid())
+  userId      String
+  type        TokenTransactionType
+  amount      Int                           // 토큰 수 (양수: 충전, 음수: 사용)
+  balance     Int                           // 거래 후 잔액
+  description String                        // "월간 플랜 충전", "API 호출 (30B)", "토큰 구매"
+  metadata    Json?                         // 추가 정보 (모델명, 요청ID 등)
+  createdAt   DateTime         @default(now())
+
+  @@index([userId, createdAt(sort: Desc)])
+}
+
+enum TokenTransactionType {
+  PLAN_CREDIT      // 플랜 구독으로 토큰 충전 (매월)
+  PURCHASE         // 토큰 직접 구매
+  USAGE            // API 호출로 토큰 사용
+  REFUND           // 환불
+  BONUS            // 프로모션/이벤트 보너스
+  ADMIN_ADJUST     // 관리자 수동 조정
+  GRID_REWARD      // ⭐ GPU 기여 보상 (Hwarang Grid)
+  GRID_STREAK      // Grid 연속 참여 보너스
+  REFERRAL         // 친구 초대 보상
+}
+
+// ============================================================
+// API 키
+// ============================================================
+
+model ApiKey {
+  id          String     @id @default(cuid())
+  userId      String
+  user        User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name        String                        // "Production", "Development" 등
+  keyHash     String     @unique            // SHA-256 해시 (실제 키는 저장 안 함)
+  keyPrefix   String                        // "hk-a1b2c3..." (앞 8자, 식별용)
+
+  // 권한
+  permissions String[]   @default(["chat"]) // ["chat", "api", "code", "legal", "tax"]
+  rateLimit   Int        @default(60)       // 분당 요청 수
+
+  // 상태
+  isActive    Boolean    @default(true)
+  lastUsedAt  DateTime?
+  expiresAt   DateTime?
+
+  // 사용 기록
+  usageRecords UsageRecord[]
+
+  createdAt   DateTime   @default(now())
+
+  @@index([userId])
+  @@index([keyHash])
+}
+
+// ============================================================
+// 사용량 기록
+// ============================================================
+
+model UsageRecord {
+  id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  apiKeyId        String?
+  apiKey          ApiKey?  @relation(fields: [apiKeyId], references: [id])
+
+  // 요청 정보
+  model           String                   // "hwarang-code-7b", "hwarang-code-30b"
+  endpoint        String                   // "/v1/chat/completions"
+  promptTokens    Int
+  completionTokens Int
+  totalTokens     Int
+  latencyMs       Int
+  statusCode      Int      @default(200)
+
+  // 도메인
+  domain          String?                  // "code", "legal", "tax"
+
+  createdAt       DateTime @default(now())
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([apiKeyId, createdAt(sort: Desc)])
+  @@index([createdAt(sort: Desc)])
+}
+
+// ============================================================
+// 결제
+// ============================================================
+
+model Payment {
+  id          String        @id @default(cuid())
+  userId      String
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // 결제 정보
+  amount      Int                           // 결제 금액 (원)
+  currency    String        @default("KRW")
+  status      PaymentStatus @default(PENDING)
+  method      String?                       // "card", "transfer", "kakao"
+
+  // PG사 연동
+  pgProvider  String?                       // "tosspayments", "kakaopay"
+  pgOrderId   String?       @unique         // PG사 주문번호
+  pgPaymentId String?                       // PG사 결제번호
+
+  // 상품 정보
+  planId      String?                       // 어떤 플랜 결제인지
+  planName    String?
+  billingType String        @default("monthly") // "monthly", "yearly", "one-time"
+
+  // 기간
+  periodStart DateTime?                     // 구독 시작일
+  periodEnd   DateTime?                     // 구독 종료일
+
+  description String?
+
+  paidAt      DateTime?
+  canceledAt  DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([pgOrderId])
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  CANCELED
+  REFUNDED
+  FAILED
+}
+
+// ============================================================
+// 대화 (기존)
+// ============================================================
+
+model Conversation {
+  id        String    @id @default(cuid())
+  title     String    @default("New Chat")
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages  Message[]
+  model     String    @default("hwarang-code-7b")
+  domain    String?                        // "code", "legal", "tax"
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([userId, updatedAt(sort: Desc)])
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  role           String       // "user" | "assistant" | "system" | "tool"
+  content        String       @db.Text
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  tokenCount     Int?
+  createdAt      DateTime     @default(now())
+
+  @@index([conversationId, createdAt])
+}
+
+// ============================================================
+// 시스템 설정 (관리자용)
+// ============================================================
+
+model SystemSetting {
+  id        String   @id @default(cuid())
+  key       String   @unique              // "maintenance_mode", "max_concurrent_users" 등
+  value     String   @db.Text
+  updatedAt DateTime @updatedAt
+}

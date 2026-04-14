@@ -1,0 +1,14 @@
+learning_rate: 2.0e-5
+weight_decay: 0.01
+max_grad_norm: 1.0
+warmup_steps: 100
+max_steps: 5000
+lr_scheduler: cosine
+batch_size: 4
+gradient_accumulation_steps: 8
+num_workers: 4
+save_steps: 500
+eval_steps: 250
+log_steps: 10
+output_dir: ./checkpoints/sft
+dtype: bfloat16
