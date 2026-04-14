@@ -58,6 +58,19 @@
 
 Hwarang AI는 **(주)퍼시스모어**가 개발합니다.
 
+**서비스 도메인: [hwarang.ai](https://hwarang.ai)**
+
+| 도메인 | 용도 |
+|--------|------|
+| **hwarang.ai** | 메인 서비스 (채팅, API, 플랜, 결제) |
+| code.hwarang.ai | 코딩 AI |
+| legal.hwarang.ai | 법률 AI |
+| tax.hwarang.ai | 세무 AI |
+| admin.hwarang.ai | 관리자 대시보드 |
+| grid.hwarang.ai | GPU 공유 네트워크 |
+| api.hwarang.ai | API 엔드포인트 |
+| docs.hwarang.ai | 개발자 문서 |
+
 ## 목차
 
 - [시스템 요구사항](#시스템-요구사항)
