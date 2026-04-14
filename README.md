@@ -1755,6 +1755,14 @@ Hwarang에 구현된 최신 AI 기법 10가지입니다.
 | 8 | **MoE** | ✅ 구현 | Mixture of Experts (N개 중 K개만 활성화) | 30B 품질 + 8B 속도 |
 | 9 | **Vision** | ✅ 구현 | 이미지 이해 (CLIP + Projection) | 스크린샷/문서 분석 |
 | 10 | **Agentic** | ✅ 구현 | 자율 에이전트 (ReAct, Plan-Execute, Reflection) | 복잡한 작업 자동화 |
+| 11 | **Embedding API** | ✅ 구현 | 텍스트→벡터 변환 (RAG/검색 필수) | 유사도 검색 |
+| 12 | **Streaming** | ✅ 구현 | SSE + WebSocket 통합 (중단 버튼 지원) | 실시간 응답 |
+| 13 | **Prompt Template** | ✅ 구현 | 도메인별 프롬프트 관리 (버전/A/B) | 프롬프트 품질 |
+| 14 | **Output Parser** | ✅ 구현 | 코드/JSON/마크다운/출처 자동 추출 | 구조화된 결과 |
+| 15 | **Hallucination Detection** | ✅ 구현 | RAG 답변 vs 출처 비교 검증 | 환각 방지 |
+| 16 | **Token Counter** | ✅ 구현 | 정확한 토큰 수 계산 (과금 정확성) | 과금 신뢰 |
+| 17 | **Conversation Summarizer** | ✅ 구현 | 긴 대화 자동 요약 (토큰 절약) | 컨텍스트 효율 |
+| 18 | **Multi-Model Router** | ✅ 구현 | 질문 난이도→7B/30B 자동 선택 | 비용 최적화 |
 
 ### 패턴별 활용 예시
 
@@ -1836,6 +1844,18 @@ AI 패턴 외에 서비스 운영에 필수적인 설계 패턴도 구현되어 
 | 10 | **Retry + Circuit Breaker** | ✅ | 장애 복구 (자동 재시도, 서브 차단) |
 | 11 | **Rate Limiting** | ✅ | 토큰 기반 한도 (일일/월간) |
 | 12 | **CQRS** | ✅ | 읽기(대시보드)/쓰기(추론) 분리 |
+| 13 | **Health Check** | ✅ | /health, /ready, /live 엔드포인트 |
+| 14 | **Graceful Shutdown** | ✅ | 진행 중 요청 완료 후 종료 |
+| 15 | **Request Tracing** | ✅ | 요청 추적 ID (마스터→서브→로그) |
+| 16 | **Idempotency** | ✅ | 중복 요청 방지 (네트워크 재시도 안전) |
+| 17 | **Backpressure** | ✅ | 서버 과부하 시 503 거부 |
+| 18 | **Bulkhead** | ✅ | 도메인별 자원 격리 (법률 장애 → 코딩 영향 X) |
+| 19 | **Saga Pattern** | ✅ | 결제→충전→플랜변경 트랜잭션 (실패 시 보상) |
+| 20 | **Observability** | ✅ | Prometheus 메트릭 + 히스토그램 |
+| 21 | **Blue-Green Deploy** | ✅ | 무중단 배포 (v1↔v2 전환) |
+| 22 | **Canary Release** | ✅ | 점진적 배포 (5%→20%→50%→100%) |
+| 23 | **Config Hot Reload** | ✅ | 재시작 없이 설정 변경 |
+| 24 | **Secret Management** | ✅ | API 키/비밀번호 안전 관리 (마스킹) |
 
 **요청 처리 흐름:**
 
