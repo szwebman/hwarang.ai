@@ -94,16 +94,24 @@ def main():
     logger.info(f"  데이터셋 준비 완료: {len(dataset)} 예제")
 
     # ============================================================
-    # 2. GPTQ 모델 로드 (이미 INT4 양자화됨, bitsandbytes 불필요)
+    # 2. 모델 로드 (bitsandbytes INT4 양자화)
     # ============================================================
-    logger.info("GPTQ 모델 로드 중... 약 2~3분 소요")
+    logger.info("모델 로드 중 (INT4 양자화)... 약 2~3분 소요")
 
     import torch
+    from transformers import BitsAndBytesConfig
+
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_use_double_quant=True,
+    )
 
     model = AutoModelForCausalLM.from_pretrained(
         args.model_path,
+        quantization_config=bnb_config,
         device_map="auto",
-        torch_dtype=torch.float16,
         trust_remote_code=True,
     )
 
@@ -163,9 +171,9 @@ def main():
         logging_steps=10,
         save_steps=500,
         save_total_limit=3,
-        fp16=True,
+        bf16=True,
         max_grad_norm=0.3,
-        optim="adamw_torch",
+        optim="paged_adamw_8bit",
         report_to="none",
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
