@@ -52,14 +52,14 @@ Thumbs.db
 *.arrow
 
 # Logs
-logs/
+#logs/
 *.log
 wandb/
 runs/
 
 # Model artifacts
 checkpoints/
-models/
+#models/
 tokenizer_output/
 
 # Database
