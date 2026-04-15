@@ -11,7 +11,7 @@ interface UseChatOptions {
 }
 
 export function useChat(options: UseChatOptions = {}) {
-  const { model = "hwarang-small", apiUrl = "/api/chat" } = options;
+  const { model = "/mnt/nvme2/hwarang/models/qwen2.5-32b-int4", apiUrl = "/api/chat" } = options;
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
