@@ -1,88 +1,60 @@
 /**
- * Admin 통계 API
- * GET /api/admin/stats - 대시보드 전체 현황
+ * 관리자 대시보드 통계 - 실제 DB + vLLM 서버
  */
 
-import { NextRequest } from "next/server";
-import { prisma } from "@/lib/db";
+import { prisma, HWARANG_API_URL } from "@/lib/db";
 
-export async function GET(request: NextRequest) {
-  try {
-    const now = new Date();
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+export async function GET() {
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
 
-    const [
-      totalUsers,
-      newUsersToday,
-      activeUsers,
-      requestsToday,
-      requestsThisMonth,
-      planDistribution,
-      revenueThisMonth,
-    ] = await Promise.all([
-      prisma.user.count(),
-      prisma.user.count({ where: { createdAt: { gte: todayStart } } }),
-      prisma.user.count({ where: { isActive: true } }),
-      prisma.usageRecord.count({ where: { createdAt: { gte: todayStart } } }),
-      prisma.usageRecord.count({ where: { createdAt: { gte: monthStart } } }),
-      prisma.user.groupBy({
-        by: ["planId"],
-        _count: true,
-        where: { isActive: true },
-      }),
-      prisma.payment.aggregate({
-        _sum: { amount: true },
-        where: { status: "PAID", createdAt: { gte: monthStart } },
-      }),
-    ]);
-
-    // 서버 상태 (Hwarang API에서 가져오기)
-    let clusterStatus = null;
-    try {
-      const apiUrl = process.env.HWARANG_API_URL || "http://localhost:8000";
-      const resp = await fetch(`${apiUrl}/admin/cluster/status`, { cache: "no-store" });
-      if (resp.ok) clusterStatus = await resp.json();
-    } catch {}
-
-    return Response.json({
-      users: {
-        total: totalUsers,
-        active: activeUsers,
-        newToday: newUsersToday,
-      },
-      requests: {
-        today: requestsToday,
-        thisMonth: requestsThisMonth,
-      },
-      revenue: {
-        thisMonth: revenueThisMonth._sum.amount || 0,
-      },
-      planDistribution,
-      cluster: clusterStatus,
-    });
-  } catch (error) {
-    // DB 연결 전 데모 데이터
-    return Response.json(getDemoStats());
-  }
-}
-
-function getDemoStats() {
-  return {
-    users: { total: 1234, active: 567, newToday: 23 },
-    requests: { today: 3456, thisMonth: 89012 },
-    revenue: { thisMonth: 12340000 },
-    planDistribution: [
-      { planId: "free", _count: 890 },
-      { planId: "pro", _count: 280 },
-      { planId: "business", _count: 52 },
-      { planId: "enterprise", _count: 12 },
-    ],
-    cluster: {
-      mode: "distributed",
-      workers: { total: 3, idle: 2, busy: 1 },
-      total_gpus: 4,
-      models: { "hwarang-code-7b": 2, "hwarang-code-30b": 1 },
-    },
+  let dbStats = {
+    totalUsers: 0, newUsersToday: 0, activeUsers: 0,
+    requestsToday: 0, requestsThisMonth: 0, revenueThisMonth: 0,
+    planDistribution: [] as any[],
   };
+
+  try {
+    const [totalUsers, newUsersToday, activeUsers, requestsToday, requestsThisMonth, revenue, planDist] =
+      await Promise.all([
+        prisma.user.count(),
+        prisma.user.count({ where: { createdAt: { gte: todayStart } } }),
+        prisma.user.count({ where: { isActive: true } }),
+        prisma.usageRecord.count({ where: { createdAt: { gte: todayStart } } }),
+        prisma.usageRecord.count({ where: { createdAt: { gte: monthStart } } }),
+        prisma.payment.aggregate({ _sum: { amount: true }, where: { status: "PAID", createdAt: { gte: monthStart } } }),
+        prisma.plan.findMany({ include: { _count: { select: { users: true } } }, where: { isActive: true } }),
+      ]);
+
+    dbStats = {
+      totalUsers, newUsersToday, activeUsers, requestsToday, requestsThisMonth,
+      revenueThisMonth: revenue._sum.amount || 0,
+      planDistribution: planDist.map((p: any) => ({
+        name: p.name, displayName: p.displayName,
+        userCount: p._count.users, priceMonthly: p.priceMonthly,
+      })),
+    };
+  } catch (e) {
+    console.error("DB 조회 실패:", e);
+  }
+
+  let cluster = null;
+  try {
+    const resp = await fetch(`${HWARANG_API_URL}/v1/models`, { cache: "no-store" });
+    if (resp.ok) {
+      const data = await resp.json();
+      cluster = { status: "running", models: data.data?.map((m: any) => m.id) || [], modelCount: data.data?.length || 0 };
+    }
+  } catch {
+    cluster = { status: "offline", models: [], modelCount: 0 };
+  }
+
+  return Response.json({
+    users: { total: dbStats.totalUsers, active: dbStats.activeUsers, newToday: dbStats.newUsersToday },
+    requests: { today: dbStats.requestsToday, thisMonth: dbStats.requestsThisMonth },
+    revenue: { thisMonth: dbStats.revenueThisMonth },
+    planDistribution: dbStats.planDistribution,
+    cluster,
+  });
 }

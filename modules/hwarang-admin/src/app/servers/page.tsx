@@ -25,7 +25,7 @@ export default function ServersPage() {
   const fetchWorkers = async () => {
     try {
       const apiUrl = process.env.NEXT_PUBLIC_HWARANG_API_URL || "http://localhost:8000";
-      const resp = await fetch(`/api/admin/stats`);
+      const resp = await fetch(`/api/stats`);
       const data = await resp.json();
 
       if (data.cluster?.workers) {
