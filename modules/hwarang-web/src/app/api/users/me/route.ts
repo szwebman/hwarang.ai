@@ -3,12 +3,17 @@
  * GET /api/users/me - 내 정보 + 토큰 잔액 + 플랜
  */
 
-import { NextRequest } from "next/server";
+import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/db";
 
-export async function GET(request: NextRequest) {
-  // TODO: 실제 인증에서 userId 가져오기 (NextAuth)
-  const userId = request.headers.get("x-user-id") || "demo-user";
+export async function GET() {
+  const session = await auth();
+
+  if (!session?.user?.id) {
+    return Response.json({ error: "로그인이 필요합니다" }, { status: 401 });
+  }
+
+  const userId = session.user.id;
 
   try {
     const user = await prisma.user.findUnique({
@@ -25,7 +30,7 @@ export async function GET(request: NextRequest) {
     });
 
     if (!user) {
-      return Response.json({ error: "User not found" }, { status: 404 });
+      return Response.json({ error: "유저를 찾을 수 없습니다" }, { status: 404 });
     }
 
     // 일일 리셋 체크
@@ -33,7 +38,6 @@ export async function GET(request: NextRequest) {
       const now = new Date();
       const resetAt = user.tokenBalance.dailyResetAt;
       if (!resetAt || now > resetAt) {
-        // 자정 리셋
         await prisma.tokenBalance.update({
           where: { userId },
           data: {
@@ -49,6 +53,7 @@ export async function GET(request: NextRequest) {
       id: user.id,
       name: user.name,
       email: user.email,
+      image: user.image,
       role: user.role,
       plan: user.plan,
       tokens: user.tokenBalance ? {
@@ -63,24 +68,8 @@ export async function GET(request: NextRequest) {
         totalRequests: user._count.usageRecords,
       },
     });
-  } catch (error) {
-    // DB 연결 전 데모 데이터
-    return Response.json(getDemoUser());
+  } catch (e: any) {
+    console.error("GET /api/users/me error:", e.message);
+    return Response.json({ error: "서버 오류" }, { status: 500 });
   }
-}
-
-function getDemoUser() {
-  return {
-    id: "demo-user",
-    name: "데모 사용자",
-    email: "demo@hwarang.ai",
-    role: "USER",
-    plan: { name: "pro", displayName: "Pro", tokensIncluded: 500000, dailyTokenLimit: 50000 },
-    tokens: { balance: 342000, dailyUsed: 12000, dailyLimit: 50000, totalUsed: 158000 },
-    apiKeys: [
-      { id: "1", name: "Production", keyPrefix: "hk-prod-a1b2", lastUsedAt: "2026-04-13", createdAt: "2026-04-01" },
-      { id: "2", name: "Development", keyPrefix: "hk-dev-c3d4", lastUsedAt: null, createdAt: "2026-04-05" },
-    ],
-    stats: { conversations: 45, totalRequests: 1230 },
-  };
 }
