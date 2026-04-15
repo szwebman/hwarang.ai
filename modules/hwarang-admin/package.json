@@ -14,7 +14,8 @@
     "react-dom": "^19.0",
     "clsx": "^2.1",
     "tailwind-merge": "^2.3",
-    "@prisma/client": "6"
+    "@prisma/client": "^6.0.0",
+    "prisma": "^6.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.0",

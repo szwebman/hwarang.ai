@@ -115,7 +115,7 @@ export default function AdminDashboardPage() {
             gradient: "linear-gradient(135deg, #10b981, #34d399)",
           },
         ].map((card) => (
-          <div key={card.label} className="card p-5 relative overflow-hidden">
+          <div key={card.label} className="p-5 relative overflow-hidden rounded-xl border" style={{ background: "var(--background)", borderColor: "var(--border)" }}>
             <div className="flex items-start justify-between">
               <div>
                 <div className="text-xs font-medium mb-2" style={{ color: "var(--muted-foreground)" }}>{card.label}</div>
@@ -133,7 +133,7 @@ export default function AdminDashboardPage() {
       {/* Two Column Layout */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
         {/* Server Cluster */}
-        <div className="card p-6">
+        <div className="p-6 rounded-xl border" style={{ background: "var(--background)", borderColor: "var(--border)" }}>
           <div className="flex items-center justify-between mb-5">
             <h2 className="font-semibold">서버 클러스터</h2>
             <Link href="/servers" className="text-xs font-medium" style={{ color: "var(--primary)" }}>상세 보기 &rarr;</Link>
@@ -169,7 +169,7 @@ export default function AdminDashboardPage() {
         </div>
 
         {/* Quick Links */}
-        <div className="card p-6">
+        <div className="p-6 rounded-xl border" style={{ background: "var(--background)", borderColor: "var(--border)" }}>
           <h2 className="font-semibold mb-5">빠른 메뉴</h2>
           <div className="grid grid-cols-3 gap-3">
             {[
