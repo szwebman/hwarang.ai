@@ -32,7 +32,7 @@ export function Sidebar({
       <div className="p-3 space-y-2">
         <div className="flex items-center justify-between px-1">
           <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--muted-foreground)" }}>
-            Conversations
+            대화 목록
           </span>
         </div>
         <button
@@ -43,7 +43,7 @@ export function Sidebar({
             <line x1="12" y1="5" x2="12" y2="19" />
             <line x1="5" y1="12" x2="19" y2="12" />
           </svg>
-          New Chat
+          새 대화
         </button>
       </div>
 
@@ -57,10 +57,10 @@ export function Sidebar({
               </svg>
             </div>
             <p className="text-sm font-medium" style={{ color: "var(--muted-foreground)" }}>
-              No conversations yet
+              아직 대화가 없습니다
             </p>
             <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)", opacity: 0.7 }}>
-              Start a new chat to begin
+              새 대화를 시작해보세요
             </p>
           </div>
         ) : (

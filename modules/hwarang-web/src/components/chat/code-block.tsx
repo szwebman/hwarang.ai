@@ -38,7 +38,7 @@ export function CodeBlock({ language, code }: CodeBlockProps) {
             {language}
           </span>
           <span className="text-[10px]" style={{ color: "var(--muted-foreground)", opacity: 0.5 }}>
-            {lineCount} lines
+            {lineCount}줄
           </span>
         </div>
 
@@ -52,7 +52,7 @@ export function CodeBlock({ language, code }: CodeBlockProps) {
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--success)" strokeWidth="2.5" strokeLinecap="round">
                 <polyline points="20 6 9 17 4 12" />
               </svg>
-              <span style={{ color: "var(--success)" }}>Copied!</span>
+              <span style={{ color: "var(--success)" }}>복사됨!</span>
             </>
           ) : (
             <>
@@ -60,7 +60,7 @@ export function CodeBlock({ language, code }: CodeBlockProps) {
                 <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
                 <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
               </svg>
-              Copy
+              복사
             </>
           )}
         </button>
