@@ -29,8 +29,9 @@ export default function LandingPage() {
             <span className="text-lg font-bold gradient-text">화랑 AI</span>
           </div>
           <div className="flex items-center gap-4">
+            <Link href="/chat" className="text-sm hover:opacity-70 transition-opacity hidden sm:inline" style={{ color: "var(--muted-foreground)" }}>AI 채팅</Link>
             <Link href="/pricing" className="text-sm hover:opacity-70 transition-opacity" style={{ color: "var(--muted-foreground)" }}>요금제</Link>
-            <Link href="/community" className="text-sm hover:opacity-70 transition-opacity" style={{ color: "var(--muted-foreground)" }}>커뮤니티</Link>
+            <Link href="/community" className="text-sm hover:opacity-70 transition-opacity hidden sm:inline" style={{ color: "var(--muted-foreground)" }}>커뮤니티</Link>
             <button onClick={toggleTheme} className="p-2 rounded-lg hover:bg-[var(--muted)]">
               {theme === "light" ? "🌙" : "☀️"}
             </button>
@@ -304,17 +305,17 @@ export default function LandingPage() {
             <div>
               <div className="font-semibold text-sm mb-3">도메인</div>
               <div className="space-y-2 text-xs" style={{ color: "var(--muted-foreground)" }}>
-                <div>코딩 AI</div>
-                <div>법률 AI</div>
-                <div>세무 AI</div>
+                <div><Link href="/chat" className="hover:underline">코딩 AI</Link></div>
+                <div><Link href="/chat" className="hover:underline">법률 AI</Link></div>
+                <div><Link href="/chat" className="hover:underline">세무 AI</Link></div>
               </div>
             </div>
             <div>
               <div className="font-semibold text-sm mb-3">회사</div>
               <div className="space-y-2 text-xs" style={{ color: "var(--muted-foreground)" }}>
-                <div>이용약관</div>
-                <div>개인정보처리방침</div>
-                <div>hello@persismore.com</div>
+                <div><Link href="/terms" className="hover:underline">이용약관</Link></div>
+                <div><Link href="/privacy" className="hover:underline">개인정보처리방침</Link></div>
+                <div><a href="mailto:hello@persismore.com" className="hover:underline">hello@persismore.com</a></div>
               </div>
             </div>
           </div>
