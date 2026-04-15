@@ -2,27 +2,43 @@
  * Chat API proxy route.
  * 브라우저 → Next.js → vLLM/Hwarang API
  *
- * 모델은 환경변수 HWARANG_DEFAULT_MODEL에서 가져옴.
- * 관리자가 변경하면 자동 반영.
+ * 모델 선택 우선순위:
+ * 1. 요청에 model 지정 → 그 모델 사용
+ * 2. 관리자 설정 (.model-config.json) → 기본 모델
+ * 3. 환경변수 HWARANG_DEFAULT_MODEL
+ * 4. vLLM의 첫 번째 모델 자동 선택
  */
 
 import { NextRequest } from "next/server";
+import { readFileSync, existsSync } from "fs";
+import { join } from "path";
 
 const HWARANG_API_URL =
   process.env.HWARANG_API_URL || "http://localhost:8000";
 
-const DEFAULT_MODEL =
-  process.env.HWARANG_DEFAULT_MODEL || "";
+function getDefaultModel(): string {
+  // 1. 관리자 설정 파일
+  try {
+    const configPath = join(process.cwd(), ".model-config.json");
+    if (existsSync(configPath)) {
+      const config = JSON.parse(readFileSync(configPath, "utf-8"));
+      if (config.defaultModel) return config.defaultModel;
+    }
+  } catch {}
+
+  // 2. 환경변수
+  return process.env.HWARANG_DEFAULT_MODEL || "";
+}
 
 export async function POST(request: NextRequest) {
   const body = await request.json();
 
-  // 모델이 지정 안 되었으면 기본 모델 사용
-  if (!body.model && DEFAULT_MODEL) {
-    body.model = DEFAULT_MODEL;
+  // 모델 자동 선택
+  if (!body.model) {
+    body.model = getDefaultModel();
   }
 
-  // 모델이 아직도 없으면 vLLM에서 첫 번째 모델 자동 선택
+  // 여전히 없으면 vLLM에서 자동 선택
   if (!body.model) {
     try {
       const modelsResp = await fetch(`${HWARANG_API_URL}/v1/models`);
@@ -52,7 +68,6 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // 스트리밍
   if (body.stream) {
     return new Response(apiResponse.body, {
       headers: {
