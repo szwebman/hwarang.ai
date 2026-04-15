@@ -69,8 +69,8 @@ export default function LoginPage() {
           <p>로그인 시 <strong>Free 플랜 (10,000 토큰)</strong>이 자동 적용됩니다.</p>
           <p>
             계속 진행하면{" "}
-            <a href="#" style={{ color: "var(--primary)" }}>이용약관</a> 및{" "}
-            <a href="#" style={{ color: "var(--primary)" }}>개인정보처리방침</a>에 동의하는 것으로 간주합니다.
+            <a href="/terms" style={{ color: "var(--primary)" }}>이용약관</a> 및{" "}
+            <a href="/privacy" style={{ color: "var(--primary)" }}>개인정보처리방침</a>에 동의하는 것으로 간주합니다.
           </p>
         </div>
       </div>

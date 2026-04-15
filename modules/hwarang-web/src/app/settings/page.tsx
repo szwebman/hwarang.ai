@@ -14,28 +14,28 @@ export default function SettingsPage() {
     <div className="min-h-screen" style={{ background: "var(--background)" }}>
       <div className="max-w-2xl mx-auto px-4 py-8">
         <div className="flex items-center justify-between mb-8">
-          <h1 className="text-2xl font-bold">Settings</h1>
+          <h1 className="text-2xl font-bold">설정</h1>
           <Link
             href="/"
             className="text-sm px-4 py-2 rounded-lg border hover:bg-[var(--muted)] transition-colors"
             style={{ borderColor: "var(--border)" }}
           >
-            Back to Chat
+            채팅으로 돌아가기
           </Link>
         </div>
 
-        {/* Appearance */}
+        {/* 외관 */}
         <section className="mb-8">
-          <h2 className="text-lg font-semibold mb-4">Appearance</h2>
+          <h2 className="text-lg font-semibold mb-4">외관</h2>
           <div
             className="p-4 rounded-lg border"
             style={{ borderColor: "var(--border)" }}
           >
             <div className="flex items-center justify-between">
               <div>
-                <p className="font-medium text-sm">Theme</p>
+                <p className="font-medium text-sm">테마</p>
                 <p className="text-xs" style={{ color: "var(--muted-foreground)" }}>
-                  Toggle between light and dark mode
+                  라이트 모드와 다크 모드를 전환합니다
                 </p>
               </div>
               <button
@@ -43,21 +43,21 @@ export default function SettingsPage() {
                 className="px-4 py-2 rounded-lg border text-sm"
                 style={{ borderColor: "var(--border)" }}
               >
-                {theme === "light" ? "Dark Mode" : "Light Mode"}
+                {theme === "light" ? "다크 모드" : "라이트 모드"}
               </button>
             </div>
           </div>
         </section>
 
-        {/* Model Settings */}
+        {/* 모델 설정 */}
         <section className="mb-8">
-          <h2 className="text-lg font-semibold mb-4">Model</h2>
+          <h2 className="text-lg font-semibold mb-4">모델</h2>
           <div
             className="p-4 rounded-lg border space-y-4"
             style={{ borderColor: "var(--border)" }}
           >
             <div>
-              <label className="block text-sm font-medium mb-1">Default Model</label>
+              <label className="block text-sm font-medium mb-1">기본 모델</label>
               <select
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
@@ -72,7 +72,7 @@ export default function SettingsPage() {
 
             <div>
               <label className="block text-sm font-medium mb-1">
-                Temperature: {temperature}
+                온도 (Temperature): {temperature}
               </label>
               <input
                 type="range"
@@ -84,14 +84,14 @@ export default function SettingsPage() {
                 className="w-full"
               />
               <div className="flex justify-between text-xs" style={{ color: "var(--muted-foreground)" }}>
-                <span>Precise (0)</span>
-                <span>Creative (2)</span>
+                <span>정확 (0)</span>
+                <span>창의적 (2)</span>
               </div>
             </div>
 
             <div>
               <label className="block text-sm font-medium mb-1">
-                Max Tokens: {maxTokens}
+                최대 토큰: {maxTokens}
               </label>
               <input
                 type="range"
@@ -114,7 +114,7 @@ export default function SettingsPage() {
             style={{ borderColor: "var(--border)" }}
           >
             <p className="text-sm" style={{ color: "var(--muted-foreground)" }}>
-              API endpoint: <code className="text-xs">http://localhost:8000</code>
+              API 엔드포인트: <code className="text-xs">https://api.hwarang.ai</code>
             </p>
           </div>
         </section>

@@ -69,12 +69,12 @@ export function useChat(options: UseChatOptions = {}) {
         }
       } catch (err) {
         const errorMessage =
-          err instanceof Error ? err.message : "An error occurred";
+          err instanceof Error ? err.message : "오류가 발생했습니다";
         setError(errorMessage);
         setMessages((prev) =>
           prev.map((m) =>
             m.id === assistantId
-              ? { ...m, content: `Error: ${errorMessage}` }
+              ? { ...m, content: `오류: ${errorMessage}` }
               : m
           )
         );

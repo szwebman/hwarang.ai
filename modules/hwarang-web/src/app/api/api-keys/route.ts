@@ -43,7 +43,7 @@ export async function POST(request: NextRequest) {
     const apiKey = await prisma.apiKey.create({
       data: {
         userId,
-        name: body.name || "Untitled",
+        name: body.name || "이름 없음",
         keyHash,
         keyPrefix,
         permissions: body.permissions || ["chat"],

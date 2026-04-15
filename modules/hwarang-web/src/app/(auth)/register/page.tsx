@@ -14,15 +14,15 @@ export default function RegisterPage() {
     setError("");
 
     if (password.length < 8) {
-      setError("Password must be at least 8 characters");
+      setError("비밀번호는 8자 이상이어야 합니다");
       return;
     }
 
-    // TODO: Implement registration
+    // TODO: 회원가입 API 연동
     try {
       console.log("Register:", email, name);
     } catch {
-      setError("Registration failed. Please try again.");
+      setError("회원가입에 실패했습니다. 다시 시도해 주세요.");
     }
   };
 
@@ -33,15 +33,17 @@ export default function RegisterPage() {
         style={{ background: "var(--background)", borderColor: "var(--border)" }}
       >
         <div className="text-center mb-8">
+          <div className="w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-4 text-white text-2xl font-bold"
+            style={{ background: "var(--primary)" }}>H</div>
           <h1 className="text-2xl font-bold">Hwarang AI</h1>
           <p className="mt-2 text-sm" style={{ color: "var(--muted-foreground)" }}>
-            Create a new account
+            새 계정을 만들어 시작하세요
           </p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="block text-sm font-medium mb-1">Name</label>
+            <label className="block text-sm font-medium mb-1">이름</label>
             <input
               type="text"
               value={name}
@@ -49,12 +51,12 @@ export default function RegisterPage() {
               required
               className="w-full px-3 py-2 rounded-lg border text-sm"
               style={{ borderColor: "var(--border)", background: "var(--background)" }}
-              placeholder="Your name"
+              placeholder="이름을 입력하세요"
             />
           </div>
 
           <div>
-            <label className="block text-sm font-medium mb-1">Email</label>
+            <label className="block text-sm font-medium mb-1">이메일</label>
             <input
               type="email"
               value={email}
@@ -62,12 +64,12 @@ export default function RegisterPage() {
               required
               className="w-full px-3 py-2 rounded-lg border text-sm"
               style={{ borderColor: "var(--border)", background: "var(--background)" }}
-              placeholder="you@example.com"
+              placeholder="example@email.com"
             />
           </div>
 
           <div>
-            <label className="block text-sm font-medium mb-1">Password</label>
+            <label className="block text-sm font-medium mb-1">비밀번호</label>
             <input
               type="password"
               value={password}
@@ -76,7 +78,7 @@ export default function RegisterPage() {
               minLength={8}
               className="w-full px-3 py-2 rounded-lg border text-sm"
               style={{ borderColor: "var(--border)", background: "var(--background)" }}
-              placeholder="At least 8 characters"
+              placeholder="8자 이상 입력"
             />
           </div>
 
@@ -89,14 +91,14 @@ export default function RegisterPage() {
             className="w-full py-2.5 rounded-lg text-sm font-medium transition-colors"
             style={{ background: "var(--primary)", color: "var(--primary-foreground)" }}
           >
-            Create Account
+            회원가입
           </button>
         </form>
 
         <p className="mt-6 text-center text-sm" style={{ color: "var(--muted-foreground)" }}>
-          Already have an account?{" "}
+          이미 계정이 있으신가요?{" "}
           <Link href="/login" className="underline" style={{ color: "var(--primary)" }}>
-            Sign in
+            로그인
           </Link>
         </p>
       </div>

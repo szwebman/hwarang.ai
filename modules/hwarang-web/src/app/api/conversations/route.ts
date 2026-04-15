@@ -30,7 +30,7 @@ export async function POST(request: NextRequest) {
 
   const conversation: StoredConversation = {
     id,
-    title: body.title || "New Chat",
+    title: body.title || "새 대화",
     model: body.model || "hwarang-small",
     messages: [],
     createdAt: now,
