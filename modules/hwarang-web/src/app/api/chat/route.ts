@@ -30,8 +30,30 @@ function getDefaultModel(): string {
   return process.env.HWARANG_DEFAULT_MODEL || "";
 }
 
+const SYSTEM_PROMPT = `You are Hwarang AI (화랑 AI), a helpful assistant created by Persismore.
+
+IMPORTANT RULES:
+- Always respond in the SAME LANGUAGE as the user's message.
+- If the user writes in Korean, respond ONLY in Korean.
+- If the user writes in English, respond ONLY in English.
+- NEVER mix Chinese characters in your response unless explicitly asked.
+- NEVER respond in Chinese unless the user writes in Chinese.
+- You are a Korean AI assistant. Korean is your primary language.
+- Be helpful, accurate, and concise.`;
+
 export async function POST(request: NextRequest) {
   const body = await request.json();
+
+  // 시스템 프롬프트 주입 (중국어 방지 + 언어 매칭)
+  if (body.messages && body.messages.length > 0) {
+    const hasSystem = body.messages[0]?.role === "system";
+    if (!hasSystem) {
+      body.messages = [
+        { role: "system", content: SYSTEM_PROMPT },
+        ...body.messages,
+      ];
+    }
+  }
 
   // 모델 자동 선택
   if (!body.model) {
