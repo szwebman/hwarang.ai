@@ -193,7 +193,6 @@ def main():
         args=training_args,
         train_dataset=dataset,
         processing_class=tokenizer,
-        max_seq_length=args.max_length,
     )
 
     trainer.train()
