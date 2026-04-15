@@ -35,7 +35,7 @@ export default function UsersPage() {
       if (search) params.set("search", search);
       if (planFilter !== "all") params.set("plan", planFilter);
 
-      const resp = await fetch(`/api/admin/users?${params}`);
+      const resp = await fetch(`/api/users?${params}`);
       const data = await resp.json();
 
       setUsers((data.users || []).map((u: any) => ({

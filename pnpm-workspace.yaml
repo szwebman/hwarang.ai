@@ -1,3 +1,4 @@
 packages:
   - "modules/hwarang-web"
+  - "modules/hwarang-admin"
   - "modules/hwarang-vscode"

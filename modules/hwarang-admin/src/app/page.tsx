@@ -30,7 +30,7 @@ export default function AdminDashboardPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch("/api/admin/stats")
+    fetch("/api/stats")
       .then((r) => r.json())
       .then((data) => {
         setStats({
@@ -56,7 +56,7 @@ export default function AdminDashboardPage() {
 
     // 10초마다 갱신
     const interval = setInterval(() => {
-      fetch("/api/admin/stats").then((r) => r.json()).then((data) => {
+      fetch("/api/stats").then((r) => r.json()).then((data) => {
         setStats({
           totalUsers: data.users?.total || 0,
           activeUsers: data.users?.active || 0,
@@ -116,7 +116,7 @@ export default function AdminDashboardPage() {
           <div className="rounded-2xl p-6" style={{ background: "var(--background)", border: "1px solid var(--border)" }}>
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-lg font-semibold">서버 클러스터</h2>
-              <a href="/admin/servers" className="text-xs" style={{ color: "var(--primary)" }}>상세 보기 →</a>
+              <a href="/servers" className="text-xs" style={{ color: "var(--primary)" }}>상세 보기 →</a>
             </div>
 
             <div className="grid grid-cols-2 gap-4 mb-4">
@@ -151,7 +151,7 @@ export default function AdminDashboardPage() {
           <div className="rounded-2xl p-6" style={{ background: "var(--background)", border: "1px solid var(--border)" }}>
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-lg font-semibold">플랜별 사용자</h2>
-              <a href="/admin/plans" className="text-xs" style={{ color: "var(--primary)" }}>관리 →</a>
+              <a href="/plans" className="text-xs" style={{ color: "var(--primary)" }}>관리 →</a>
             </div>
 
             {[
@@ -179,12 +179,12 @@ export default function AdminDashboardPage() {
         {/* 빠른 링크 */}
         <div className="grid grid-cols-2 lg:grid-cols-6 gap-3 mt-6">
           {[
-            { href: "/admin/servers", label: "서버 관리", icon: "🖥️" },
-            { href: "/admin/users", label: "유저 관리", icon: "👥" },
-            { href: "/admin/plans", label: "플랜 관리", icon: "💎" },
-            { href: "/admin/billing", label: "매출 현황", icon: "💳" },
-            { href: "/admin/models", label: "모델 관리", icon: "🧠" },
-            { href: "/admin/logs", label: "요청 로그", icon: "📋" },
+            { href: "/servers", label: "서버 관리", icon: "🖥️" },
+            { href: "/users", label: "유저 관리", icon: "👥" },
+            { href: "/plans", label: "플랜 관리", icon: "💎" },
+            { href: "/billing", label: "매출 현황", icon: "💳" },
+            { href: "/models", label: "모델 관리", icon: "🧠" },
+            { href: "/logs", label: "요청 로그", icon: "📋" },
           ].map((link) => (
             <a
               key={link.href}
