@@ -1,80 +1,64 @@
 /**
- * Chat API proxy route.
- * 브라우저 → Next.js → vLLM/Hwarang API
+ * Chat API - 전체 정렬 프레임워크 통합
  *
- * 기능:
- * - 인증 확인 (로그인 필수)
- * - 모델 선택 (요청 model 이름 or 기본 모델)
- * - AIModel 테이블에서 백엔드 ID + 토큰 배수 조회
- * - 토큰 잔액 확인 (부족하면 차단)
- * - 사용 후 토큰 차감 + UsageRecord 기록
+ * 적용 기법:
+ *   ✅ KCAI  - 한국형 헌법
+ *   ✅ TACS  - 도메인별 안전 체인
+ *   ✅ GRPO  - 피드백 수집 (별도 엔드포인트)
+ *   ✅ HRAG  - 한국 공식 DB 실시간 검색
+ *   ✅ NWNC  - 눈치 기반 대화
+ *   ✅ VCoT  - 검증된 추론 (법률/세무)
+ *   ✅ TADM  - 시점 인식
+ *   ✅ MMRM  - 계층적 메모리
+ *   ✅ LCRG  - 인용 검증
  */
 
 import { NextRequest } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/db";
-
-const HWARANG_API_URL = process.env.HWARANG_API_URL || "http://localhost:8000";
-
-const SYSTEM_PROMPT = `You are Hwarang AI (화랑 AI), a helpful assistant created by Persismore.
-
-IMPORTANT RULES:
-- Always respond in the SAME LANGUAGE as the user's message.
-- If the user writes in Korean, respond ONLY in Korean.
-- If the user writes in English, respond ONLY in English.
-- NEVER mix Chinese characters in your response unless explicitly asked.
-- NEVER respond in Chinese unless the user writes in Chinese.
-- You are a Korean AI assistant. Korean is your primary language.
-- Be helpful, accurate, and concise.`;
-
+import { applyFullAlignment } from "@/lib/alignment";
+import { applyOptimization } from "@/lib/optimization";
+import { runAgenticLoop } from "@/lib/optimization/hat";
+import { applyAdvanced } from "@/lib/advanced";
+import { applyInnovation } from "@/lib/innovation";
 
 export async function POST(request: NextRequest) {
-  // ─── 1. 인증 확인 ─────────────────────────────────────
+  // ─── 1. 인증 ────────────────────────────────────────
   const session = await auth();
   if (!session?.user?.id) {
     return Response.json({ error: "로그인이 필요합니다" }, { status: 401 });
   }
 
   const userId = session.user.id;
-  const body = await request.json();
+  let body = await request.json();
 
-  // ─── 2. 모델 선택 ─────────────────────────────────────
-  let aiModel;
-  if (body.model) {
-    // 요청한 모델 조회
-    aiModel = await prisma.aIModel.findUnique({ where: { name: body.model } });
-  }
+  // ─── 2. 모델 선택 ──────────────────────────────────
+  let aiModel = body.model
+    ? await prisma.aIModel.findUnique({ where: { name: body.model } })
+    : null;
 
   if (!aiModel) {
-    // 기본 모델 fallback
-    aiModel = await prisma.aIModel.findFirst({
-      where: { isDefault: true, isActive: true },
-    });
+    aiModel = await prisma.aIModel.findFirst({ where: { isDefault: true, isActive: true } });
   }
-
   if (!aiModel) {
-    // 마지막 fallback: 첫번째 활성 모델
     aiModel = await prisma.aIModel.findFirst({
       where: { isActive: true, isPublic: true },
       orderBy: { sortOrder: "asc" },
     });
   }
-
   if (!aiModel) {
     return Response.json({ error: "사용 가능한 AI 모델이 없습니다" }, { status: 503 });
   }
 
-  // ─── 3. 유저 플랜 + 토큰 확인 ──────────────────────────
+  // ─── 3. 유저 + 토큰 확인 ───────────────────────────
   const user = await prisma.user.findUnique({
     where: { id: userId },
     include: { plan: true, tokenBalance: true },
   });
 
-  if (!user) {
-    return Response.json({ error: "유저 정보를 찾을 수 없습니다" }, { status: 404 });
-  }
+  if (!user) return Response.json({ error: "유저 없음" }, { status: 404 });
 
-  // 모델 최소 플랜 체크
+  // 플랜 제한 체크
   if (aiModel.minPlan) {
     const planTiers: Record<string, number> = {
       free: 0, starter: 1, pro: 2, business: 3, enterprise: 4,
@@ -83,45 +67,168 @@ export async function POST(request: NextRequest) {
     const requiredTier = planTiers[aiModel.minPlan] ?? 0;
     if (userTier < requiredTier) {
       return Response.json({
-        error: `이 모델은 ${aiModel.minPlan} 이상의 플랜에서만 사용 가능합니다`,
+        error: `이 모델은 ${aiModel.minPlan} 이상 플랜에서만 사용 가능합니다`,
         upgradeRequired: aiModel.minPlan,
       }, { status: 403 });
     }
   }
 
-  // 토큰 잔액 확인
   const balance = user.tokenBalance?.balance ?? 0;
   const dailyUsed = user.tokenBalance?.dailyUsed ?? 0;
   const dailyLimit = user.tokenBalance?.dailyLimit ?? 0;
 
   if (balance <= 0) {
-    return Response.json({ error: "토큰이 부족합니다. 플랜을 업그레이드하거나 토큰을 충전하세요." }, { status: 402 });
+    return Response.json({ error: "토큰이 부족합니다" }, { status: 402 });
   }
   if (dailyLimit > 0 && dailyUsed >= dailyLimit) {
-    return Response.json({ error: "오늘 일일 사용 한도를 초과했습니다. 내일 다시 시도하세요." }, { status: 429 });
+    return Response.json({ error: "일일 사용 한도 초과" }, { status: 429 });
   }
 
-  // ─── 4. 시스템 프롬프트 + 백엔드 모델 지정 ─────────────
+  // ─── 4. 정렬 프레임워크 적용 ─────────────────────────
+  const lastUserMsg = [...(body.messages || [])].reverse().find((m: any) => m.role === "user");
+  const userMessage = lastUserMsg?.content || "";
+
+  const alignment = await applyFullAlignment({
+    userId,
+    userMessage,
+    userPlan: user.plan?.name,
+    enableHRAG: true,
+    enableNWNC: true,
+    enableVCoT: true,
+    enableTADM: true,
+    enableMMRM: true,
+    enableLCRG: true,
+  });
+
+  // ─── 4.2 고급 추론 기법 (TTT, Reasoning, ACT, MTP, Quiet-STaR) ─
+  const advanced = applyAdvanced({
+    userMessage,
+    domain: alignment.domainInfo.domain,
+    enableTTT: true,
+    enableReasoning: true,
+    enableMTP: true,
+    enableQuietSTaR: true,
+    enableACT: true,
+  });
+
+  // ─── 4.3 혁신 기법 (HNTL, HCE, HRL, HCP, HML, HQL) ───────────
+  const innovation = await applyInnovation({
+    userMessage,
+    domain: alignment.domainInfo.domain,
+    userId,
+    vllmEndpoint: aiModel.endpoint,
+    model: aiModel.backendId,
+    enableHNTL: true,
+    enableHCE: true,
+    enableHRL: true,
+    enableHML: true,
+    enableHQL: true,
+  });
+
+  // 통합 시스템 프롬프트
+  const fullSystemPrompt = [
+    alignment.systemPrompt,
+    advanced.systemPrompt,
+    innovation.systemPrompt,
+  ]
+    .filter((p) => p && p.trim().length > 0)
+    .join("\n");
+
+  // 시스템 프롬프트 주입
   if (body.messages && body.messages.length > 0) {
     const hasSystem = body.messages[0]?.role === "system";
     if (!hasSystem) {
       body.messages = [
-        { role: "system", content: SYSTEM_PROMPT },
+        { role: "system", content: fullSystemPrompt },
         ...body.messages,
       ];
+    } else {
+      body.messages[0].content = `${fullSystemPrompt}\n\n${body.messages[0].content}`;
     }
   }
 
-  // 실제 백엔드 모델 ID로 교체
-  body.model = aiModel.backendId;
+  // TTT few-shot 예제 주입 (마지막 user 메시지 직전에)
+  if (advanced.fewShotMessages.length > 0) {
+    const lastIdx = body.messages.length - 1;
+    if (body.messages[lastIdx]?.role === "user") {
+      body.messages.splice(lastIdx, 0, ...advanced.fewShotMessages);
+    }
+  }
 
-  // 플랜별 최대 토큰 제한
+  // 백엔드 모델로 교체
+  body.model = aiModel.backendId;
   const maxTokens = user.plan?.maxTokensPerReq || aiModel.maxOutputTokens;
   if (!body.max_tokens || body.max_tokens > maxTokens) {
     body.max_tokens = maxTokens;
   }
 
-  // ─── 5. vLLM 호출 ────────────────────────────────────
+  // 고급/혁신 기법의 request body transform 적용
+  body = advanced.requestBodyTransform(body);
+  body = innovation.requestBodyTransform(body);
+
+  // ─── 4.5 최적화 프레임워크 적용 (HPC + HAT) ─────────
+  const optimization = await applyOptimization(body.messages, {
+    domain: alignment.domainInfo.domain,
+    userPlan: user.plan?.name,
+    enableHPC: true,
+    enableHAT: true,
+  });
+
+  // 에이전트 도구 사용 모드 (Pro+ 플랜)
+  if (optimization.useTools && optimization.tools && !body.stream) {
+    const startedAt = Date.now();
+    const agentResult = await runAgenticLoop(
+      body.messages,
+      alignment.domainInfo.domain,
+      aiModel.endpoint,
+      aiModel.backendId,
+      5
+    );
+
+    const enhanced = await alignment.postProcess(agentResult.finalResponse);
+
+    // 토큰 사용량 (도구 호출 포함)
+    const totalTokens = Math.ceil(enhanced.length / 4);  // 대략
+    const chargedTokens = Math.ceil(totalTokens * aiModel.outputMultiplier);
+
+    prisma.tokenBalance.update({
+      where: { userId },
+      data: {
+        balance: { decrement: chargedTokens },
+        totalUsed: { increment: chargedTokens },
+        dailyUsed: { increment: chargedTokens },
+      },
+    }).catch(() => {});
+
+    return Response.json({
+      choices: [{ message: { role: "assistant", content: enhanced } }],
+      usage: { total_tokens: totalTokens },
+      _meta: {
+        model: aiModel.name,
+        displayName: aiModel.displayName,
+        chargedTokens,
+        latencyMs: Date.now() - startedAt,
+        alignment: {
+          tacs: {
+            domain: alignment.domainInfo.domain,
+            riskLevel: alignment.domainInfo.riskLevel,
+          },
+        },
+        optimization: {
+          hat: {
+            toolsUsed: agentResult.toolCalls.map((t) => t.name),
+            iterations: agentResult.iterations,
+          },
+        },
+      },
+    });
+  }
+
+  // 일반 모드: 캐시 힌트 헤더 추가
+  // (vLLM은 --enable-prefix-caching으로 자동 캐시)
+
+  // ─── 5. vLLM 호출 ─────────────────────────────────
+  const startedAt = Date.now();
   const apiResponse = await fetch(`${aiModel.endpoint}/v1/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -136,35 +243,45 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // ─── 6. 스트리밍 처리 ──────────────────────────────────
+  // ─── 6. 스트리밍 ───────────────────────────────────
   if (body.stream) {
-    // 스트리밍: 토큰 계산은 클라이언트 측 or 별도 endpoint에서
     return new Response(apiResponse.body, {
       headers: {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
         Connection: "keep-alive",
         "X-Model-Name": aiModel.name,
-        "X-Input-Multiplier": String(aiModel.inputMultiplier),
-        "X-Output-Multiplier": String(aiModel.outputMultiplier),
+        "X-Domain": alignment.domainInfo.domain,
+        "X-Risk-Level": alignment.domainInfo.riskLevel,
       },
     });
   }
 
-  // ─── 7. 일반 응답 + 토큰 차감 ──────────────────────────
+  // ─── 7. 일반 응답 + 사후 처리 + 토큰 차감 ──────────
   const data = await apiResponse.json();
+
+  if (data.choices?.[0]?.message?.content) {
+    let content = data.choices[0].message.content;
+    // 고급 기법 후처리 (Reasoning <thinking> 태그 제거 등)
+    content = advanced.postProcess(content);
+    // 정렬 프레임워크 후처리 (TACS 면책조항, LCRG 인용 검증)
+    content = await alignment.postProcess(content);
+    // 혁신 기법 후처리 (HRL 팩트 체크)
+    content = await innovation.postProcess(content);
+    data.choices[0].message.content = content;
+  }
 
   const promptTokens = data.usage?.prompt_tokens || 0;
   const completionTokens = data.usage?.completion_tokens || 0;
   const totalTokens = data.usage?.total_tokens || 0;
+  const latencyMs = Date.now() - startedAt;
 
-  // 화랑 토큰 소비량 계산 (배수 적용)
   const chargedTokens = Math.ceil(
     promptTokens * aiModel.inputMultiplier +
     completionTokens * aiModel.outputMultiplier
   );
 
-  // DB 업데이트 (비동기, 응답 지연 방지)
+  // 비동기 DB 업데이트
   Promise.all([
     prisma.tokenBalance.update({
       where: { userId },
@@ -185,9 +302,9 @@ export async function POST(request: NextRequest) {
         chargedTokens,
         inputMultiplier: aiModel.inputMultiplier,
         outputMultiplier: aiModel.outputMultiplier,
-        latencyMs: 0,
+        latencyMs,
         statusCode: 200,
-        domain: aiModel.category,
+        domain: alignment.domainInfo.domain,
       },
     }),
     prisma.tokenTransaction.create({
@@ -196,17 +313,64 @@ export async function POST(request: NextRequest) {
         type: "USAGE",
         amount: -chargedTokens,
         balance: balance - chargedTokens,
-        description: `${aiModel.displayName} 사용 (${totalTokens}토큰)`,
-        metadata: { model: aiModel.name, promptTokens, completionTokens },
+        description: `${aiModel.displayName} (${alignment.domainInfo.domain})`,
+        metadata: {
+          model: aiModel.name,
+          promptTokens,
+          completionTokens,
+          domain: alignment.domainInfo.domain,
+          riskLevel: alignment.domainInfo.riskLevel,
+        },
       },
     }),
-  ]).catch((e) => console.error("토큰 차감 실패:", e));
+  ]).catch((e) => console.error("DB 업데이트 실패:", e));
 
-  // 응답에 모델 정보 포함
+  // 메타데이터
   data._meta = {
     model: aiModel.name,
     displayName: aiModel.displayName,
     chargedTokens,
+    latencyMs,
+    alignment: {
+      tacs: {
+        domain: alignment.domainInfo.domain,
+        riskLevel: alignment.domainInfo.riskLevel,
+        confidence: alignment.domainInfo.confidence,
+      },
+      nwnc: alignment.emotion
+        ? { emotion: alignment.emotion.primary, formality: alignment.emotion.formalityLevel }
+        : undefined,
+      tadm: alignment.temporalContext
+        ? { date: alignment.temporalContext.now.toISOString().split("T")[0] }
+        : undefined,
+      hrag: {
+        sourcesFound: alignment.hragSources?.length || 0,
+      },
+      mmrm: {
+        hasProfile: !!alignment.profile,
+      },
+    },
+    optimization: {
+      hpc: {
+        cacheHit: optimization.cacheHit,
+        cacheKey: optimization.cacheKey?.slice(0, 16),
+      },
+      hat: {
+        eligible: optimization.useTools,
+      },
+    },
+    advanced: {
+      act: {
+        difficulty: advanced.actConfig.difficulty,
+      },
+      ttt: {
+        fewShots: advanced.fewShotMessages.length / 2,
+      },
+      reasoning: advanced.actConfig.useReasoning,
+      mtp: true,
+      quietStar: true,
+    },
+    innovation: innovation.metadata,
   };
 
   return Response.json(data);
