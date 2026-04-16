@@ -88,7 +88,7 @@ enum UserRole {
 }
 
 // ============================================================
-// 플랜 (구독 상품)
+// 플랜 (구독 상품) - 토큰 패키지만 차이남, 모든 모델 사용 가능
 // ============================================================
 
 model Plan {
@@ -101,20 +101,18 @@ model Plan {
   priceMonthly  Int      @default(0)        // 월 가격 (원)
   priceYearly   Int      @default(0)        // 연 가격 (원)
 
-  // ⭐ 토큰 기반 제한 (핵심!)
+  // ⭐ 토큰 기반 제한 (모든 모델 공통 토큰 풀)
   tokensIncluded    Int  @default(10000)    // 플랜에 포함된 월 토큰 수
   dailyTokenLimit   Int  @default(5000)     // 하루 최대 소진 토큰 (폭주 방지)
-  maxTokensPerReq   Int  @default(2048)     // 요청 1회당 최대 토큰
+  maxTokensPerReq   Int  @default(8192)     // 요청 1회당 최대 토큰
   concurrentReqs    Int  @default(1)        // 동시 요청 수
   apiKeysAllowed    Int  @default(1)        // API 키 개수
 
-  // 초과 토큰 단가 (원, 1K 토큰당)
-  overagePrice7b    Int  @default(0)        // 7B 초과 단가 (0이면 초과 불가)
-  overagePrice30b   Int  @default(0)        // 30B 초과 단가
+  // 초과 토큰 구매 가능 여부
+  allowOverage      Boolean @default(false) // 토큰 소진 후 추가 구매 가능?
 
-  // 기능 접근
-  models            String[]               // 사용 가능한 모델 ["7b", "30b"]
-  features          String[]               // 기능 ["chat", "api", "code", "legal", "tax"]
+  // 기능 접근 (플랜으로 제한)
+  features          String[]               // ["chat", "api", "code", "legal", "tax", "priority_queue"]
   supportLevel      String @default("community") // "community", "email", "priority", "dedicated"
 
   // 상태
@@ -124,6 +122,53 @@ model Plan {
   users             User[]
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
+}
+
+// ============================================================
+// AI 모델 및 토큰 단가 (관리자 제어 가능)
+// ============================================================
+
+model AIModel {
+  id          String   @id @default(cuid())
+  name        String   @unique            // "hwarang-v3", "hwarang-coder", "hwarang-general"
+  displayName String                       // "Hwarang V3 (최강)", "Hwarang Coder", "Hwarang General"
+  description String?
+
+  // 실제 모델 연결
+  backendId   String                       // vLLM 모델 ID (예: "/mnt/nvme2/hwarang/models/deepseek-v3")
+  endpoint    String   @default("http://localhost:8000") // 서빙 엔드포인트
+
+  // ⭐ 토큰 단가 (요청당 소비되는 "화랑 토큰" 배수)
+  inputMultiplier   Float @default(1.0)    // 입력 토큰 1개당 소비 배수 (예: 2.0 = 실제 토큰 × 2)
+  outputMultiplier  Float @default(1.0)    // 출력 토큰 1개당 소비 배수 (보통 입력보다 비쌈)
+
+  // 컨텍스트 & 제약
+  maxContextLength  Int   @default(32768)  // 지원 컨텍스트 길이 (토큰)
+  maxOutputTokens   Int   @default(4096)   // 최대 출력 길이
+
+  // 카테고리 & 태그
+  category    String    @default("general") // "general", "coding", "legal", "tax", "reasoning"
+  tier        String    @default("standard") // "basic", "standard", "premium", "flagship"
+  tags        String[]                       // ["한국어", "코딩", "고급"]
+
+  // 접근 제어 (선택적)
+  minPlan     String?                        // 최소 플랜 이름 (null이면 모든 플랜 사용 가능)
+  isPublic    Boolean   @default(true)       // 목록에 표시 여부
+  isDefault   Boolean   @default(false)      // 기본 선택 모델?
+  isActive    Boolean   @default(true)       // 현재 서빙 중?
+
+  // 서빙 상태 (실시간 업데이트)
+  status      String    @default("ready")    // "ready", "loading", "error", "offline"
+  lastCheckAt DateTime?
+
+  // 정렬
+  sortOrder   Int       @default(0)
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([category, tier])
+  @@index([isActive, isPublic])
 }
 
 // ============================================================
@@ -225,11 +270,19 @@ model UsageRecord {
   apiKey          ApiKey?  @relation(fields: [apiKeyId], references: [id])
 
   // 요청 정보
-  model           String                   // "hwarang-code-7b", "hwarang-code-30b"
+  model           String                   // 모델 이름 (AIModel.name)
   endpoint        String                   // "/v1/chat/completions"
+
+  // 실제 모델 사용 토큰
   promptTokens    Int
   completionTokens Int
   totalTokens     Int
+
+  // ⭐ 화랑 토큰 소비 (모델 배수 적용)
+  chargedTokens   Int      @default(0)    // 실제 차감된 화랑 토큰
+  inputMultiplier  Float   @default(1.0)  // 적용된 입력 배수
+  outputMultiplier Float   @default(1.0)  // 적용된 출력 배수
+
   latencyMs       Int
   statusCode      Int      @default(200)
 
@@ -241,6 +294,7 @@ model UsageRecord {
   @@index([userId, createdAt(sort: Desc)])
   @@index([apiKeyId, createdAt(sort: Desc)])
   @@index([createdAt(sort: Desc)])
+  @@index([model, createdAt(sort: Desc)])
 }
 
 // ============================================================

@@ -2,8 +2,40 @@
 
 import { signIn } from "next-auth/react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useState } from "react";
 
 export default function LoginPage() {
+  const router = useRouter();
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const handleCredentialsLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
+
+    try {
+      const result = await signIn("credentials", {
+        email,
+        password,
+        redirect: false,
+      });
+
+      if (result?.error) {
+        setError("이메일 또는 비밀번호가 올바르지 않습니다");
+      } else {
+        router.push("/dashboard");
+      }
+    } catch {
+      setError("로그인 중 오류가 발생했습니다");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <div className="min-h-screen flex items-center justify-center" style={{ background: "var(--muted)" }}>
       <div className="w-full max-w-md p-8 rounded-2xl border"
@@ -11,23 +43,81 @@ export default function LoginPage() {
 
         {/* 로고 */}
         <div className="text-center mb-8">
-          <div className="w-14 h-14 rounded-2xl gradient-bg flex items-center justify-center mx-auto mb-4">
+          <div className="w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-4"
+            style={{ background: "linear-gradient(135deg, #6366f1, #8b5cf6)" }}>
             <span className="text-white text-2xl font-bold">H</span>
           </div>
-          <h1 className="text-2xl font-bold">
-            <span className="gradient-text">Hwarang AI</span>
-          </h1>
+          <h1 className="text-2xl font-bold">Hwarang AI</h1>
           <p className="mt-2 text-sm" style={{ color: "var(--muted-foreground)" }}>
             로그인하고 AI를 시작하세요
           </p>
         </div>
 
+        {/* 이메일/비밀번호 로그인 */}
+        <form onSubmit={handleCredentialsLogin} className="space-y-3">
+          <div>
+            <label className="text-xs font-medium">이메일</label>
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+              className="w-full mt-1 px-3 py-2.5 rounded-xl border text-sm"
+              style={{ borderColor: "var(--border)" }}
+              placeholder="example@email.com"
+            />
+          </div>
+          <div>
+            <label className="text-xs font-medium">비밀번호</label>
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              className="w-full mt-1 px-3 py-2.5 rounded-xl border text-sm"
+              style={{ borderColor: "var(--border)" }}
+              placeholder="비밀번호 입력"
+            />
+          </div>
+
+          {error && (
+            <p className="text-xs px-3 py-2 rounded-lg" style={{ background: "rgba(239,68,68,0.1)", color: "#ef4444" }}>
+              {error}
+            </p>
+          )}
+
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full py-2.5 rounded-xl text-sm font-medium text-white disabled:opacity-50"
+            style={{ background: "var(--primary)" }}
+          >
+            {loading ? "로그인 중..." : "로그인"}
+          </button>
+        </form>
+
+        <div className="flex items-center justify-between mt-3 text-xs">
+          <Link href="/register" style={{ color: "var(--primary)" }}>회원가입</Link>
+          <Link href="/forgot-password" style={{ color: "var(--muted-foreground)" }}>비밀번호 찾기</Link>
+        </div>
+
+        {/* 구분선 */}
+        <div className="relative my-6">
+          <div className="absolute inset-0 flex items-center">
+            <div className="w-full border-t" style={{ borderColor: "var(--border)" }}></div>
+          </div>
+          <div className="relative flex justify-center text-xs">
+            <span className="px-2" style={{ background: "var(--background)", color: "var(--muted-foreground)" }}>
+              또는 소셜 로그인
+            </span>
+          </div>
+        </div>
+
         {/* 소셜 로그인 */}
-        <div className="space-y-3">
-          {/* Google */}
+        <div className="space-y-2">
           <button
             onClick={() => signIn("google", { callbackUrl: "/dashboard" })}
-            className="w-full flex items-center justify-center gap-3 px-4 py-3 rounded-xl border text-sm font-medium transition-colors hover:bg-gray-50"
+            className="w-full flex items-center justify-center gap-3 px-4 py-2.5 rounded-xl border text-sm font-medium"
             style={{ borderColor: "var(--border)" }}
           >
             <svg className="w-5 h-5" viewBox="0 0 24 24">
@@ -39,10 +129,9 @@ export default function LoginPage() {
             Google로 로그인
           </button>
 
-          {/* Kakao */}
           <button
             onClick={() => signIn("kakao", { callbackUrl: "/dashboard" })}
-            className="w-full flex items-center justify-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-colors hover:opacity-90"
+            className="w-full flex items-center justify-center gap-3 px-4 py-2.5 rounded-xl text-sm font-medium"
             style={{ background: "#FEE500", color: "#000000" }}
           >
             <svg className="w-5 h-5" viewBox="0 0 24 24" fill="#000000">
@@ -52,21 +141,9 @@ export default function LoginPage() {
           </button>
         </div>
 
-        {/* 구분선 */}
-        <div className="relative my-6">
-          <div className="absolute inset-0 flex items-center">
-            <div className="w-full border-t" style={{ borderColor: "var(--border)" }}></div>
-          </div>
-          <div className="relative flex justify-center text-xs">
-            <span className="px-2" style={{ background: "var(--background)", color: "var(--muted-foreground)" }}>
-              소셜 계정으로 간편하게
-            </span>
-          </div>
-        </div>
-
         {/* 안내 */}
-        <div className="text-center text-xs space-y-2" style={{ color: "var(--muted-foreground)" }}>
-          <p>로그인 시 <strong>Free 플랜 (10,000 토큰)</strong>이 자동 적용됩니다.</p>
+        <div className="text-center text-xs mt-6 space-y-1" style={{ color: "var(--muted-foreground)" }}>
+          <p>가입 시 <strong>Free 플랜 (10,000 토큰)</strong>이 자동 적용됩니다.</p>
           <p>
             계속 진행하면{" "}
             <a href="/terms" style={{ color: "var(--primary)" }}>이용약관</a> 및{" "}

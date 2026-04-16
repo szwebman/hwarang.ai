@@ -10,12 +10,54 @@
 import NextAuth from "next-auth";
 import Google from "next-auth/providers/google";
 import Kakao from "next-auth/providers/kakao";
+import Credentials from "next-auth/providers/credentials";
 import { PrismaAdapter } from "@auth/prisma-adapter";
 import { prisma } from "./db";
+import crypto from "crypto";
+
+function hashPassword(password: string): string {
+  return crypto.createHash("sha256").update(password).digest("hex");
+}
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   adapter: PrismaAdapter(prisma),
   providers: [
+    Credentials({
+      name: "credentials",
+      credentials: {
+        email: { label: "이메일", type: "email" },
+        password: { label: "비밀번호", type: "password" },
+      },
+      async authorize(credentials) {
+        if (!credentials?.email || !credentials?.password) {
+          return null;
+        }
+
+        const user = await prisma.user.findUnique({
+          where: { email: credentials.email as string },
+        });
+
+        if (!user || !user.hashedPassword) {
+          return null;
+        }
+
+        const hashed = hashPassword(credentials.password as string);
+        if (user.hashedPassword !== hashed) {
+          return null;
+        }
+
+        if (!user.isActive) {
+          return null;
+        }
+
+        return {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          image: user.image,
+        };
+      },
+    }),
     Google({
       clientId: process.env.GOOGLE_CLIENT_ID || "",
       clientSecret: process.env.GOOGLE_CLIENT_SECRET || "",
@@ -75,14 +117,24 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       return true;
     },
 
-    async session({ session, user }) {
-      // 세션에 유저 ID, 역할, 플랜 추가
-      if (session.user && user) {
-        session.user.id = user.id;
+    async jwt({ token, user }) {
+      // 최초 로그인 시 user가 있음 → 토큰에 정보 저장
+      if (user) {
+        token.id = user.id;
+      }
+      return token;
+    },
+
+    async session({ session, token, user }) {
+      // JWT 모드: token 사용, Database 모드: user 사용
+      const userId = (token?.id as string) || user?.id;
+
+      if (session.user && userId) {
+        session.user.id = userId;
 
         try {
           const fullUser = await prisma.user.findUnique({
-            where: { id: user.id },
+            where: { id: userId },
             include: {
               plan: { select: { name: true, displayName: true } },
               tokenBalance: { select: { balance: true, dailyUsed: true, dailyLimit: true } },
@@ -106,6 +158,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     error: "/login",
   },
   session: {
-    strategy: "database",
+    // Credentials Provider는 JWT 모드 필수
+    strategy: "jwt",
   },
 });
