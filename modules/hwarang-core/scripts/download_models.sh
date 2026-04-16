@@ -35,7 +35,6 @@ download_exaone() {
     echo ""
     hf download LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct \
         --local-dir "$MODEL_DIR/exaone-3.0-7.8b" \
-        --local-dir-use-symlinks False
     echo "  ✅ EXAONE 3.0 7.8B 다운로드 완료"
     echo ""
     echo "  [참고] 32B 버전은 별도 요청 필요 (LGAI-EXAONE/EXAONE-3.5-32B-Instruct)"
@@ -50,7 +49,6 @@ download_exaone_32b() {
     echo ""
     hf download LGAI-EXAONE/EXAONE-3.5-32B-Instruct \
         --local-dir "$MODEL_DIR/exaone-3.5-32b" \
-        --local-dir-use-symlinks False
     echo "  ✅ EXAONE 3.5 32B 다운로드 완료"
 }
 
@@ -62,7 +60,6 @@ download_qwen_coder() {
     echo ""
     hf download Qwen/Qwen2.5-Coder-32B-Instruct \
         --local-dir "$MODEL_DIR/qwen2.5-coder-32b" \
-        --local-dir-use-symlinks False
     echo "  ✅ Qwen2.5-Coder-32B 다운로드 완료"
 }
 
@@ -74,7 +71,6 @@ download_deepseek_coder() {
     echo ""
     hf download deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct \
         --local-dir "$MODEL_DIR/deepseek-coder-v2-lite" \
-        --local-dir-use-symlinks False
     echo "  ✅ DeepSeek-Coder-V2-Lite 다운로드 완료"
 }
 
@@ -86,7 +82,6 @@ download_starcoder2() {
     echo ""
     hf download bigcode/starcoder2-15b-instruct-v0.1 \
         --local-dir "$MODEL_DIR/starcoder2-15b" \
-        --local-dir-use-symlinks False
     echo "  ✅ StarCoder2-15B 다운로드 완료"
 }
 
@@ -100,7 +95,6 @@ download_deepseek_v3() {
     echo ""
     hf download deepseek-ai/DeepSeek-V3-0324 \
         --local-dir "$MODEL_DIR/deepseek-v3" \
-        --local-dir-use-symlinks False
     echo "  ✅ DeepSeek-V3 다운로드 완료"
     echo ""
     echo "  서빙 명령어:"
@@ -117,7 +111,6 @@ download_solar() {
     echo ""
     hf download upstage/SOLAR-10.7B-Instruct-v1.0 \
         --local-dir "$MODEL_DIR/solar-10.7b" \
-        --local-dir-use-symlinks False
     echo "  ✅ SOLAR-10.7B 다운로드 완료"
 }
 
