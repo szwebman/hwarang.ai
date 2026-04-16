@@ -33,7 +33,7 @@ download_exaone() {
     echo "  용도: 법률, 세무, 한국어 일반 대화"
     echo "  크기: ~65GB (FP16), ~18GB (4bit)"
     echo ""
-    huggingface-cli download LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct \
+    hf download LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct \
         --local-dir "$MODEL_DIR/exaone-3.0-7.8b" \
         --local-dir-use-symlinks False
     echo "  ✅ EXAONE 3.0 7.8B 다운로드 완료"
@@ -48,7 +48,7 @@ download_exaone_32b() {
     echo "  용도: 법률, 세무, 한국어 일반 대화"
     echo "  주의: HuggingFace 로그인 + 라이선스 동의 필요"
     echo ""
-    huggingface-cli download LGAI-EXAONE/EXAONE-3.5-32B-Instruct \
+    hf download LGAI-EXAONE/EXAONE-3.5-32B-Instruct \
         --local-dir "$MODEL_DIR/exaone-3.5-32b" \
         --local-dir-use-symlinks False
     echo "  ✅ EXAONE 3.5 32B 다운로드 완료"
@@ -60,7 +60,7 @@ download_qwen_coder() {
     echo "  용도: 코딩 특화 (일반 Qwen보다 코딩 성능 높음)"
     echo "  크기: ~65GB (FP16), ~18GB (4bit)"
     echo ""
-    huggingface-cli download Qwen/Qwen2.5-Coder-32B-Instruct \
+    hf download Qwen/Qwen2.5-Coder-32B-Instruct \
         --local-dir "$MODEL_DIR/qwen2.5-coder-32b" \
         --local-dir-use-symlinks False
     echo "  ✅ Qwen2.5-Coder-32B 다운로드 완료"
@@ -72,7 +72,7 @@ download_deepseek_coder() {
     echo "  용도: 코딩 (MoE라 실행 효율 좋음)"
     echo "  크기: ~16B 활성 파라미터"
     echo ""
-    huggingface-cli download deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct \
+    hf download deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct \
         --local-dir "$MODEL_DIR/deepseek-coder-v2-lite" \
         --local-dir-use-symlinks False
     echo "  ✅ DeepSeek-Coder-V2-Lite 다운로드 완료"
@@ -84,7 +84,7 @@ download_starcoder2() {
     echo "  용도: 600+ 프로그래밍 언어, 가벼움"
     echo "  크기: ~30GB (FP16), ~9GB (4bit)"
     echo ""
-    huggingface-cli download bigcode/starcoder2-15b-instruct-v0.1 \
+    hf download bigcode/starcoder2-15b-instruct-v0.1 \
         --local-dir "$MODEL_DIR/starcoder2-15b" \
         --local-dir-use-symlinks False
     echo "  ✅ StarCoder2-15B 다운로드 완료"
@@ -98,7 +98,7 @@ download_deepseek_v3() {
     echo "  크기: ~350GB (FP16), ~22GB (4bit 서빙)"
     echo "  주의: 다운로드 용량이 크므로 디스크 여유 확인!"
     echo ""
-    huggingface-cli download deepseek-ai/DeepSeek-V3-0324 \
+    hf download deepseek-ai/DeepSeek-V3-0324 \
         --local-dir "$MODEL_DIR/deepseek-v3" \
         --local-dir-use-symlinks False
     echo "  ✅ DeepSeek-V3 다운로드 완료"
@@ -115,7 +115,7 @@ download_solar() {
     echo "  용도: 한국어 일반 (가벼움)"
     echo "  크기: ~21GB (FP16), ~6GB (4bit)"
     echo ""
-    huggingface-cli download upstage/SOLAR-10.7B-Instruct-v1.0 \
+    hf download upstage/SOLAR-10.7B-Instruct-v1.0 \
         --local-dir "$MODEL_DIR/solar-10.7b" \
         --local-dir-use-symlinks False
     echo "  ✅ SOLAR-10.7B 다운로드 완료"
