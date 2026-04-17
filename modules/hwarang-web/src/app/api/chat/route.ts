@@ -23,6 +23,8 @@ import { runAgenticLoop } from "@/lib/optimization/hat";
 import { applyAdvanced } from "@/lib/advanced";
 import { applyInnovation } from "@/lib/innovation";
 import { selectModel } from "@/lib/innovation/hntl";
+import { hybridServing } from "@/lib/serving/hybrid-serving";
+import { calculateResponseWeight, enrichResponseWithWeight, buildResponseWeightMeta } from "@/lib/serving/response-weight";
 
 export async function POST(request: NextRequest) {
   // ─── 1. 인증 ────────────────────────────────────────
@@ -48,6 +50,8 @@ export async function POST(request: NextRequest) {
     ? await prisma.aIModel.findUnique({ where: { name: body.model } })
     : null;
 
+  let modelSelection: any = null;
+
   if (!aiModel) {
     // 마지막 user 메시지에서 도메인 + 복잡도 감지
     const lastUserMsgForRouting = [...(body.messages || [])]
@@ -55,15 +59,23 @@ export async function POST(request: NextRequest) {
       .find((m: any) => m.role === "user");
     const routingMessage = lastUserMsgForRouting?.content || "";
 
+    // 대화 턴 수 (맥락 기반)
+    const userMessages = (body.messages || []).filter((m: any) => m.role === "user");
+    const previousMsgs = userMessages.slice(0, -1).map((m: any) => m.content);
+
     const routingDomain = detectDomain(routingMessage).domain;
-    const routedModelName = selectModel(
+    modelSelection = selectModel(
       routingDomain,
       routingMessage,
-      user.plan?.name
+      user.plan?.name,
+      {
+        conversationTurns: body.messages?.length || 0,
+        previousMessages: previousMsgs,
+      }
     );
 
     aiModel = await prisma.aIModel.findUnique({
-      where: { name: routedModelName },
+      where: { name: modelSelection.model },
     });
 
     // 라우팅된 모델이 비활성이면 폴백
@@ -251,18 +263,87 @@ export async function POST(request: NextRequest) {
     });
   }
 
-  // 일반 모드: 캐시 힌트 헤더 추가
-  // (vLLM은 --enable-prefix-caching으로 자동 캐시)
-
-  // ─── 5. vLLM 호출 ─────────────────────────────────
-  const startedAt = Date.now();
-  const apiResponse = await fetch(`${aiModel.endpoint}/v1/chat/completions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+  // ─── 5. 하이브리드 서빙 (서버 + Grid 에이전트) ─────
+  // 서버 GPU 상황에 따라 서버 또는 에이전트로 라우팅
+  const servingTarget = hybridServing.selectTarget({
+    complexity: modelSelection?.complexity?.level,
+    userRegion: "kr",
+    userPlan: user.plan?.name,
+    stream: body.stream,
   });
 
+  // 실제 호출할 엔드포인트 결정
+  let servingEndpoint = aiModel.endpoint;
+  let servedBy = "server";
+
+  if (servingTarget) {
+    if (servingTarget.type === "agent") {
+      servingEndpoint = servingTarget.agent.endpoint;
+      servedBy = `agent:${servingTarget.agent.id}`;
+      servingTarget.agent.currentLoad++;
+    } else if (servingTarget.type === "server") {
+      servingEndpoint = servingTarget.node.endpoint || aiModel.endpoint;
+      servedBy = `server:${servingTarget.node.id}`;
+      servingTarget.node.currentLoad++;
+    } else if (servingTarget.type === "hybrid") {
+      // 복잡 작업: 서버가 메인, 에이전트가 보조
+      servingEndpoint = servingTarget.server.endpoint || aiModel.endpoint;
+      servedBy = `hybrid:${servingTarget.server.id}+${servingTarget.agent.id}`;
+    }
+  }
+
+  const startedAt = Date.now();
+  let apiResponse: Response;
+
+  try {
+    apiResponse = await fetch(`${servingEndpoint}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(120000),
+    });
+  } catch (fetchError: any) {
+    // 서빙 실패 → 불량 기록 + 페일오버
+    console.error(`[HybridServing] ${servedBy} 실패, 페일오버 시도:`, fetchError.message);
+
+    // 실패 기록 → 연속 실패 시 자동 격리
+    if (servingTarget?.type === "agent") {
+      hybridServing.recordFailure(servingTarget.agent.id, fetchError.message);
+      servingTarget.agent.currentLoad--;
+    } else if (servingTarget?.type === "server") {
+      servingTarget.node.status = "offline";
+      servingTarget.node.currentLoad--;
+    }
+
+    // 재시도: 원래 서버 엔드포인트로
+    try {
+      apiResponse = await fetch(`${aiModel.endpoint}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(120000),
+      });
+      servedBy = "server:fallback";
+    } catch {
+      return Response.json(
+        { error: "AI 서버와 에이전트 모두 응답 없음" },
+        { status: 503 }
+      );
+    }
+  }
+
+  // 에이전트 로드 해제
+  if (servingTarget?.type === "agent") {
+    servingTarget.agent.currentLoad--;
+  } else if (servingTarget?.type === "server") {
+    servingTarget.node.currentLoad--;
+  }
+
   if (!apiResponse.ok) {
+    // 응답 에러도 실패로 기록
+    if (servingTarget?.type === "agent") {
+      hybridServing.recordFailure(servingTarget.agent.id, `HTTP ${apiResponse.status}`);
+    }
     const errorText = await apiResponse.text();
     return Response.json(
       { error: `AI 서버 오류 (${apiResponse.status})`, detail: errorText },
@@ -286,6 +367,7 @@ export async function POST(request: NextRequest) {
 
   // ─── 7. 일반 응답 + 사후 처리 + 토큰 차감 ──────────
   const data = await apiResponse.json();
+  let responseWeight = calculateResponseWeight({ agentId: servedBy, response: "", requestDomain: alignment.domainInfo.domain });
 
   if (data.choices?.[0]?.message?.content) {
     let content = data.choices[0].message.content;
@@ -295,7 +377,25 @@ export async function POST(request: NextRequest) {
     content = await alignment.postProcess(content);
     // 혁신 기법 후처리 (HRL 팩트 체크)
     content = await innovation.postProcess(content);
+
+    // 응답 가중치 계산 (에이전트 품질 평가)
+    const responseMeta = {
+      agentId: servedBy,
+      response: content,
+      avgLogprob: data.choices?.[0]?.logprobs?.content?.[0]?.logprob,
+      requestDomain: alignment.domainInfo.domain,
+    };
+    const responseWeight = calculateResponseWeight(responseMeta);
+
+    // 낮은 신뢰도 → 면책조항 자동 추가
+    content = enrichResponseWithWeight(content, responseWeight);
+
     data.choices[0].message.content = content;
+  }
+
+  // 에이전트 성공 기록
+  if (servingTarget?.type === "agent") {
+    hybridServing.recordSuccess(servingTarget.agent.id);
   }
 
   const promptTokens = data.usage?.prompt_tokens || 0;
@@ -308,7 +408,12 @@ export async function POST(request: NextRequest) {
     completionTokens * aiModel.outputMultiplier
   );
 
-  // 비동기 DB 업데이트
+  // 비동기 DB 업데이트 + 토큰 소각
+  // HWARANG 코인: 서비스 이용 시 30% 소각
+  import("@/lib/blockchain/token-economy").then(({ burnTokens }) => {
+    burnTokens(userId, "ai_usage", chargedTokens).catch(() => {});
+  }).catch(() => {});
+
   Promise.all([
     prisma.tokenBalance.update({
       where: { userId },
@@ -357,9 +462,19 @@ export async function POST(request: NextRequest) {
     model: aiModel.name,
     displayName: aiModel.displayName,
     tier: aiModel.tier,
-    autoRouted: !body.model, // 자동 라우팅 여부
+    autoRouted: !body.model,
+    routing: modelSelection ? {
+      reason: modelSelection.reason,
+      complexityScore: modelSelection.complexity?.score,
+      complexityLevel: modelSelection.complexity?.level,
+      reasons: modelSelection.complexity?.reasons?.slice(0, 5),
+    } : undefined,
     chargedTokens,
     latencyMs,
+    serving: {
+      servedBy,
+      endpoint: servingEndpoint,
+    },
     alignment: {
       tacs: {
         domain: alignment.domainInfo.domain,
@@ -400,6 +515,7 @@ export async function POST(request: NextRequest) {
       quietStar: true,
     },
     innovation: innovation.metadata,
+    ...buildResponseWeightMeta(responseWeight),
   };
 
   return Response.json(data);
