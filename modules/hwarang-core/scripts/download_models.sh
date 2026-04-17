@@ -29,27 +29,37 @@ TARGET="${1:-list}"
 
 download_exaone() {
     echo ""
-    echo "[EXAONE 3.0 32B] 한국어 특화 - LG AI Research"
-    echo "  용도: 법률, 세무, 한국어 일반 대화"
-    echo "  크기: ~65GB (FP16), ~18GB (4bit)"
+    echo "[EXAONE 4.5-33B] ⭐ 최신 한국어 + 멀티모달 - LG AI Research (2026)"
+    echo "  용도: 법률, 세무, 한국어 일반 대화 + 이미지 이해"
+    echo "  크기: ~69GB (FP16)"
+    echo "  언어: 한국어, 영어, 스페인어, 독일어, 일본어, 베트남어"
+    echo "  특징: 이미지 입력 지원 (image-text-to-text)"
     echo ""
-    hf download LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct \
-        --local-dir "$MODEL_DIR/exaone-3.0-7.8b" \
-    echo "  ✅ EXAONE 3.0 7.8B 다운로드 완료"
-    echo ""
-    echo "  [참고] 32B 버전은 별도 요청 필요 (LGAI-EXAONE/EXAONE-3.5-32B-Instruct)"
-    echo "  huggingface-cli login 후 접근 가능"
+    hf download LGAI-EXAONE/EXAONE-4.5-33B \
+        --local-dir "$MODEL_DIR/exaone-4.5-33b"
+    echo "  ✅ EXAONE 4.5-33B 다운로드 완료"
 }
 
-download_exaone_32b() {
+download_exaone_gguf() {
     echo ""
-    echo "[EXAONE 3.5 32B] 한국어 특화 - LG AI Research (최신)"
-    echo "  용도: 법률, 세무, 한국어 일반 대화"
-    echo "  주의: HuggingFace 로그인 + 라이선스 동의 필요"
+    echo "[EXAONE 4.5-33B GGUF] 양자화 버전 (llama.cpp용)"
+    echo "  용도: 메모리 제한 환경에서 서빙"
+    echo "  크기: ~35~45GB (4~6bit 양자화)"
+    echo ""
+    hf download LGAI-EXAONE/EXAONE-4.5-33B-GGUF \
+        --local-dir "$MODEL_DIR/exaone-4.5-33b-gguf"
+    echo "  ✅ EXAONE 4.5-33B GGUF 다운로드 완료"
+}
+
+download_exaone_35() {
+    echo ""
+    echo "[EXAONE 3.5-32B] 한국어 특화 - LG AI Research (구버전)"
+    echo "  용도: 4.5 못 쓸 때 폴백"
+    echo "  주의: gated 모델일 수 있음 - HuggingFace 로그인 필요"
     echo ""
     hf download LGAI-EXAONE/EXAONE-3.5-32B-Instruct \
-        --local-dir "$MODEL_DIR/exaone-3.5-32b" \
-    echo "  ✅ EXAONE 3.5 32B 다운로드 완료"
+        --local-dir "$MODEL_DIR/exaone-3.5-32b"
+    echo "  ✅ EXAONE 3.5-32B 다운로드 완료"
 }
 
 download_qwen_coder() {
@@ -154,8 +164,14 @@ case "$TARGET" in
     exaone)
         download_exaone
         ;;
+    exaone-gguf)
+        download_exaone_gguf
+        ;;
+    exaone-35)
+        download_exaone_35
+        ;;
     exaone-32b)
-        download_exaone_32b
+        download_exaone_35  # 별칭
         ;;
     qwen-coder)
         download_qwen_coder
@@ -205,10 +221,11 @@ case "$TARGET" in
         echo ""
         echo "사용 가능한 모델:"
         echo ""
-        echo "  deepseek-v3  ⭐ DeepSeek-V3 671B MoE (현존 최강, ~350GB)"
-        echo "  exaone       EXAONE 3.0 7.8B (한국어, LG)"
-        echo "  exaone-32b   EXAONE 3.5 32B (한국어 최강, 로그인 필요)"
-        echo "  qwen-coder    ⭐ Qwen3-Coder-Next (2026 최신, 160GB)"
+        echo "  deepseek-v3   ⭐ DeepSeek-V3 671B MoE (최강 코딩, ~350GB)"
+        echo "  exaone        ⭐ EXAONE 4.5-33B (2026 최신, 멀티모달, ~69GB)"
+        echo "  exaone-gguf   EXAONE 4.5-33B GGUF (양자화, ~35-45GB)"
+        echo "  exaone-35     EXAONE 3.5-32B (구버전, gated)"
+        echo "  qwen-coder    Qwen3-Coder-Next (160GB, 비추)"
         echo "  qwen-coder-30b Qwen3-Coder-30B-A3B (폴백, 빠름)"
         echo "  qwen-coder-25  Qwen2.5-Coder-32B (최종 폴백)"
         echo "  deepseek     DeepSeek-Coder-V2-Lite (코딩 MoE)"

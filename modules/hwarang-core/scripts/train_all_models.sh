@@ -85,8 +85,8 @@ case "$TARGET" in
             "hwarang-code-v1" "Qwen2.5-Coder-32B (코딩)"
         ;;
     exaone)
-        train_model "$MODEL_DIR/exaone-3.5-32b" "$LEGAL_DATA" \
-            "hwarang-legal-v1" "EXAONE 3.5-32B (법률/세무)"
+        train_model "$MODEL_DIR/exaone-4.5-33b" "$LEGAL_DATA" \
+            "hwarang-legal-v1" "EXAONE 4.5-33B (법률/세무, 멀티모달)"
         ;;
     exaone-7b)
         train_model "$MODEL_DIR/exaone-3.0-7.8b" "$LEGAL_DATA" \
@@ -109,8 +109,8 @@ case "$TARGET" in
         ;;
     korean)
         echo "한국어 모델 순차 학습..."
-        train_model "$MODEL_DIR/exaone-3.5-32b" "$LEGAL_DATA" \
-            "hwarang-legal-v1" "EXAONE 3.5-32B (법률/세무)"
+        train_model "$MODEL_DIR/exaone-4.5-33b" "$LEGAL_DATA" \
+            "hwarang-legal-v1" "EXAONE 4.5-33B (법률/세무, 멀티모달)"
         train_model "$MODEL_DIR/solar-10.7b" "$ALL_DATA" \
             "hwarang-general-solar-v1" "SOLAR-10.7B (한국어 일반)"
         ;;
@@ -118,8 +118,8 @@ case "$TARGET" in
         echo "전체 모델 순차 학습 (약 200시간+ 소요)..."
         train_model "$MODEL_DIR/qwen3-coder-next" "$CODE_DATA" \
             "hwarang-code-v1" "Qwen2.5-Coder-32B (코딩)"
-        train_model "$MODEL_DIR/exaone-3.5-32b" "$LEGAL_DATA" \
-            "hwarang-legal-v1" "EXAONE 3.5-32B (법률/세무)"
+        train_model "$MODEL_DIR/exaone-4.5-33b" "$LEGAL_DATA" \
+            "hwarang-legal-v1" "EXAONE 4.5-33B (법률/세무, 멀티모달)"
         train_model "$MODEL_DIR/deepseek-coder-v2-lite" "$CODE_DATA" \
             "hwarang-code-ds-v1" "DeepSeek-Coder-V2-Lite (코딩)"
         train_model "$MODEL_DIR/solar-10.7b" "$ALL_DATA" \

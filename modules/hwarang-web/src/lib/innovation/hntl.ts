@@ -74,6 +74,101 @@ export function selectNeuralPath(domain: string): NeuralPath {
 }
 
 /**
+ * 코딩 질문의 복잡도 감지 → 모델 선택.
+ *
+ * 복잡한 코딩 (Pro+ 모델 사용):
+ *   - 멀티파일 리팩토링
+ *   - 아키텍처 설계
+ *   - 프레임워크 마이그레이션
+ *   - 복잡한 알고리즘
+ *   - 긴 컨텍스트 필요
+ *
+ * 간단한 코딩 (Coder 모델 사용):
+ *   - 함수 작성
+ *   - 버그 수정
+ *   - 단순 리팩토링
+ *   - 간단한 설명
+ */
+export function detectCodingComplexity(userMessage: string): "simple" | "complex" {
+  const text = userMessage.toLowerCase();
+
+  // 복잡 지표
+  const complexIndicators = [
+    /(전체|모든|full)\s*(프로젝트|project|codebase|레포|repository)/i,
+    /(아키텍처|architecture|설계|design)/i,
+    /(마이그레이션|migrate|migration)/i,
+    /(리팩토링|refactor).*(여러|multi|전체|all)/i,
+    /(멀티|multi)\s*(파일|file)/i,
+    /(대규모|large[- ]?scale)/i,
+    /(복잡한|complex|sophisticated)/i,
+    /(최적화|optimize|optimization).*(시스템|system|database|쿼리|query)/i,
+    /(분석|analyze).*(코드|code|project)/i,
+    /(디버그|debug).*(복잡|complex|어려운)/i,
+    // 긴 질문 = 복잡
+    /^.{500,}$/,
+  ];
+
+  // 간단 지표
+  const simpleIndicators = [
+    /^.{0,80}$/,                          // 짧은 질문
+    /(만들|만들어|짜줘|작성|write|create)\s*(함수|function|코드|code)/i,
+    /(버그|bug|오류|error).*(고쳐|fix|수정)/i,
+    /(무엇|what is|뭐야)/i,
+    /(설명|explain).*(간단|simple|briefly)/i,
+    /(형식|format|syntax)/i,
+  ];
+
+  const complexCount = complexIndicators.filter((p) => p.test(text)).length;
+  const simpleCount = simpleIndicators.filter((p) => p.test(text)).length;
+
+  // 코드 블록 포함 + 길이 → 복잡
+  const hasCodeBlock = text.includes("```");
+  const isLong = text.length > 300;
+
+  if (complexCount >= 2 || (complexCount >= 1 && hasCodeBlock && isLong)) {
+    return "complex";
+  }
+  if (simpleCount >= 1 && complexCount === 0) {
+    return "simple";
+  }
+  return isLong || hasCodeBlock ? "complex" : "simple";
+}
+
+/**
+ * 도메인 + 복잡도 + 플랜으로 최종 모델 선택.
+ *
+ * Returns: DB의 AIModel.name
+ */
+export function selectModel(
+  domain: string,
+  userMessage: string,
+  userPlan?: string
+): string {
+  const isPaidPlan = userPlan && ["starter", "pro", "business", "enterprise"].includes(userPlan);
+
+  // 법률/세무 도메인
+  if (domain === "legal" || domain === "tax") {
+    return isPaidPlan ? "hwarang-legal" : "hwarang-coder";
+  }
+
+  // 코딩 도메인: 복잡도로 분기
+  if (domain === "coding") {
+    const complexity = detectCodingComplexity(userMessage);
+
+    // 복잡한 코딩 + 유료 플랜 → DeepSeek V3
+    if (complexity === "complex" && isPaidPlan) {
+      return "hwarang-pro";
+    }
+
+    // 간단한 코딩 또는 Free 플랜 → Qwen3-Coder
+    return "hwarang-coder";
+  }
+
+  // 일반 대화
+  return "hwarang-general";
+}
+
+/**
  * vLLM 요청에 LoRA 지정 주입.
  * vLLM은 --enable-lora 옵션으로 실행되어야 함.
  */

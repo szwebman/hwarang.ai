@@ -17,10 +17,12 @@ import { NextRequest } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/db";
 import { applyFullAlignment } from "@/lib/alignment";
+import { detectDomain } from "@/lib/alignment/tacs";
 import { applyOptimization } from "@/lib/optimization";
 import { runAgenticLoop } from "@/lib/optimization/hat";
 import { applyAdvanced } from "@/lib/advanced";
 import { applyInnovation } from "@/lib/innovation";
+import { selectModel } from "@/lib/innovation/hntl";
 
 export async function POST(request: NextRequest) {
   // ─── 1. 인증 ────────────────────────────────────────
@@ -32,14 +34,47 @@ export async function POST(request: NextRequest) {
   const userId = session.user.id;
   let body = await request.json();
 
-  // ─── 2. 모델 선택 ──────────────────────────────────
+  // ─── 2. 유저 먼저 로드 (플랜 필요) ──────────────────
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    include: { plan: true, tokenBalance: true },
+  });
+
+  if (!user) return Response.json({ error: "유저 없음" }, { status: 404 });
+
+  // ─── 3. 자동 모델 선택 (도메인 + 복잡도 + 플랜 기반) ──
+  // 유저가 명시적으로 model을 지정하면 그것 사용, 아니면 자동 선택
   let aiModel = body.model
     ? await prisma.aIModel.findUnique({ where: { name: body.model } })
     : null;
 
   if (!aiModel) {
-    aiModel = await prisma.aIModel.findFirst({ where: { isDefault: true, isActive: true } });
+    // 마지막 user 메시지에서 도메인 + 복잡도 감지
+    const lastUserMsgForRouting = [...(body.messages || [])]
+      .reverse()
+      .find((m: any) => m.role === "user");
+    const routingMessage = lastUserMsgForRouting?.content || "";
+
+    const routingDomain = detectDomain(routingMessage).domain;
+    const routedModelName = selectModel(
+      routingDomain,
+      routingMessage,
+      user.plan?.name
+    );
+
+    aiModel = await prisma.aIModel.findUnique({
+      where: { name: routedModelName },
+    });
+
+    // 라우팅된 모델이 비활성이면 폴백
+    if (!aiModel || !aiModel.isActive) {
+      aiModel = await prisma.aIModel.findFirst({
+        where: { isDefault: true, isActive: true },
+      });
+    }
   }
+
+  // 최종 폴백: 아무 활성 모델
   if (!aiModel) {
     aiModel = await prisma.aIModel.findFirst({
       where: { isActive: true, isPublic: true },
@@ -49,14 +84,6 @@ export async function POST(request: NextRequest) {
   if (!aiModel) {
     return Response.json({ error: "사용 가능한 AI 모델이 없습니다" }, { status: 503 });
   }
-
-  // ─── 3. 유저 + 토큰 확인 ───────────────────────────
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    include: { plan: true, tokenBalance: true },
-  });
-
-  if (!user) return Response.json({ error: "유저 없음" }, { status: 404 });
 
   // 플랜 제한 체크
   if (aiModel.minPlan) {
@@ -329,6 +356,8 @@ export async function POST(request: NextRequest) {
   data._meta = {
     model: aiModel.name,
     displayName: aiModel.displayName,
+    tier: aiModel.tier,
+    autoRouted: !body.model, // 자동 라우팅 여부
     chargedTokens,
     latencyMs,
     alignment: {
