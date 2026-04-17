@@ -54,12 +54,46 @@ download_exaone_32b() {
 
 download_qwen_coder() {
     echo ""
-    echo "[Qwen2.5-Coder-32B] 코딩 전용 - Alibaba"
-    echo "  용도: 코딩 특화 (일반 Qwen보다 코딩 성능 높음)"
+    echo "[Qwen3-Coder-Next] ⭐ 코딩 최신 - Alibaba (2026)"
+    echo "  용도: 최고 성능 코딩 (qwen3_next 새 아키텍처)"
+    echo "  크기: ~160GB (FP16, 40 shards × 4GB)"
+    echo "  예상 VRAM: 4bit ~30-40GB (RTX 5090 1장으로 시도)"
+    echo "  주의: VRAM 초과 시 --gpu-memory-utilization 조정 또는"
+    echo "        CPU offload 필요할 수 있음. 안 되면 30B-A3B로 폴백."
+    echo ""
+    hf download Qwen/Qwen3-Coder-Next \
+        --local-dir "$MODEL_DIR/qwen3-coder-next"
+    echo "  ✅ Qwen3-Coder-Next 다운로드 완료"
+    echo ""
+    echo "  서빙 시도:"
+    echo "  vllm serve $MODEL_DIR/qwen3-coder-next \\"
+    echo "    --trust-remote-code --gpu-memory-utilization 0.95 \\"
+    echo "    --max-model-len 32768 --quantization awq --port 8000"
+    echo ""
+    echo "  서빙 실패 시 폴백:"
+    echo "  bash scripts/download_models.sh qwen-coder-30b"
+}
+
+download_qwen_coder_30b() {
+    echo ""
+    echo "[Qwen3-Coder-30B-A3B] 코딩 MoE - Alibaba (폴백용)"
+    echo "  용도: Next 안 될 때 폴백 (MoE 3B 활성)"
+    echo "  크기: ~60GB (FP16), ~15GB (4bit 서빙)"
+    echo "  성능: RTX 5090에서 100~150 토큰/초"
+    echo ""
+    hf download Qwen/Qwen3-Coder-30B-A3B-Instruct \
+        --local-dir "$MODEL_DIR/qwen3-coder-30b"
+    echo "  ✅ Qwen3-Coder-30B-A3B 다운로드 완료"
+}
+
+download_qwen_coder_25() {
+    echo ""
+    echo "[Qwen2.5-Coder-32B] 코딩 구버전 - Alibaba (최종 폴백)"
+    echo "  용도: Next와 30B 모두 문제있을 때만"
     echo "  크기: ~65GB (FP16), ~18GB (4bit)"
     echo ""
     hf download Qwen/Qwen2.5-Coder-32B-Instruct \
-        --local-dir "$MODEL_DIR/qwen2.5-coder-32b" \
+        --local-dir "$MODEL_DIR/qwen2.5-coder-32b"
     echo "  ✅ Qwen2.5-Coder-32B 다운로드 완료"
 }
 
@@ -126,6 +160,12 @@ case "$TARGET" in
     qwen-coder)
         download_qwen_coder
         ;;
+    qwen-coder-30b)
+        download_qwen_coder_30b
+        ;;
+    qwen-coder-25)
+        download_qwen_coder_25
+        ;;
     deepseek)
         download_deepseek_coder
         ;;
@@ -168,7 +208,9 @@ case "$TARGET" in
         echo "  deepseek-v3  ⭐ DeepSeek-V3 671B MoE (현존 최강, ~350GB)"
         echo "  exaone       EXAONE 3.0 7.8B (한국어, LG)"
         echo "  exaone-32b   EXAONE 3.5 32B (한국어 최강, 로그인 필요)"
-        echo "  qwen-coder   Qwen2.5-Coder-32B (코딩 최강)"
+        echo "  qwen-coder    ⭐ Qwen3-Coder-Next (2026 최신, 160GB)"
+        echo "  qwen-coder-30b Qwen3-Coder-30B-A3B (폴백, 빠름)"
+        echo "  qwen-coder-25  Qwen2.5-Coder-32B (최종 폴백)"
         echo "  deepseek     DeepSeek-Coder-V2-Lite (코딩 MoE)"
         echo "  starcoder    StarCoder2-15B (600+ 언어)"
         echo "  solar        SOLAR-10.7B (한국어, 가벼움)"
