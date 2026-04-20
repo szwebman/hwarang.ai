@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 
 interface MessageInputProps {
   onSend: (message: string) => void;
@@ -22,7 +22,17 @@ export function MessageInput({ onSend, disabled, placeholder }: MessageInputProp
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
+
+    // 전송 후 포커스 유지
+    setTimeout(() => textareaRef.current?.focus(), 0);
   };
+
+  // 응답 완료 시 (disabled가 false로 바뀌면) 자동 포커스
+  useEffect(() => {
+    if (!disabled) {
+      setTimeout(() => textareaRef.current?.focus(), 100);
+    }
+  }, [disabled]);
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {

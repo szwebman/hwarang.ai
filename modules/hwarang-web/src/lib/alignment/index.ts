@@ -135,6 +135,17 @@ export async function applyFullAlignment(
       } catch {}
     }
 
+    // 외국어 문자 필터링 (태국어, 아랍어, 힌디어 등 제거)
+    result = result.replace(/[\u0E00-\u0E7F]/g, "");  // 태국어
+    result = result.replace(/[\u0600-\u06FF]/g, "");  // 아랍어
+    result = result.replace(/[\u0900-\u097F]/g, "");  // 힌디어(데바나가리)
+    result = result.replace(/[\u0B80-\u0BFF]/g, "");  // 타밀어
+    result = result.replace(/[\u0980-\u09FF]/g, "");  // 벵골어
+    result = result.replace(/[\u0A00-\u0A7F]/g, "");  // 구르무키
+    result = result.replace(/[\u1000-\u109F]/g, "");  // 미얀마어
+    result = result.replace(/[\u1780-\u17FF]/g, "");  // 크메르어
+    result = result.trim();
+
     return result;
   };
 
