@@ -85,7 +85,7 @@ function parseSteps(text: string): ReasoningStep[] {
   const steps: ReasoningStep[] = [];
 
   // "[단계 1]" 또는 "Step 1:" 패턴
-  const stepPattern = /(?:\[단계\s*(\d+)\]|Step\s*(\d+)[:.])\s*(.+?)(?=\[단계|Step\s*\d+[:.]|$)/gs;
+  const stepPattern = /(?:\[단계\s*(\d+)\]|Step\s*(\d+)[:.])\s*([\s\S]+?)(?=\[단계|Step\s*\d+[:.]|$)/g;
 
   let match;
   while ((match = stepPattern.exec(text)) !== null) {
