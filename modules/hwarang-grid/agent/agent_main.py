@@ -58,6 +58,10 @@ from modules.auto_updater import AutoUpdaterModule
 from modules.translator import TranslatorModule
 from modules.local_finetune import LocalFinetuneModule
 from modules.sleep_learning import SleepLearningModule
+from modules.optimizer import (
+    AgentWatchdog, ConnectionPool, DataDeduplicator, get_model_cache,
+)
+from modules.lora_compressor import NetworkAdaptiveTransfer
 
 
 class HwarangAgent:
@@ -77,13 +81,22 @@ class HwarangAgent:
         self.master_url = config.network.master_url
         self.agent_id = config.agent_id
         self.current_lora_version = 0
-        self.hfl_active = False  # 현재 학습 중인지
+        self.hfl_active = False
         self._http_client = None
+
+        # 최적화 모듈
+        self.watchdog = AgentWatchdog()
+        self.deduplicator = DataDeduplicator()
+        self.adaptive_transfer = NetworkAdaptiveTransfer()
 
         self._init_modules()
 
     def _get_http(self):
-        """HTTP 클라이언트 (lazy init)."""
+        """HTTP 클라이언트 (커넥션 풀 사용)."""
+        client = ConnectionPool.get().get_client()
+        if client:
+            return client
+        # 폴백
         if self._http_client is None:
             try:
                 import httpx
@@ -130,6 +143,13 @@ class HwarangAgent:
         logger.info("=" * 60)
         self.config.print_config()
 
+        # 자동 복구: 이전 크래시 확인 + PID 기록
+        self.watchdog.start()
+        checkpoint = self.watchdog.load_checkpoint()
+        if checkpoint:
+            self.current_lora_version = checkpoint.get("lora_version", 0)
+            logger.info(f"체크포인트 복원: LoRA v{self.current_lora_version}")
+
         # 마스터 등록
         self._register_with_master()
 
@@ -159,6 +179,22 @@ class HwarangAgent:
         """에이전트 중지."""
         logger.info("에이전트 종료 중...")
         self.running = False
+
+        # 체크포인트 저장
+        self.watchdog.save_checkpoint({
+            "lora_version": self.current_lora_version,
+            "modules": list(self.modules.keys()),
+            "status": "stopped",
+        })
+        self.watchdog.cleanup()
+        self.watchdog.reset_crash_count()
+
+        # 커넥션 풀 정리
+        ConnectionPool.get().close()
+
+        # 모델 캐시 정리
+        get_model_cache().clear()
+
         if self._http_client:
             self._http_client.close()
         for t in self.threads:
@@ -250,6 +286,13 @@ class HwarangAgent:
                     commands = result.get("commands", [])
                     for cmd in commands:
                         self._handle_command(cmd)
+
+                # 주기적 체크포인트 (30초마다)
+                self.watchdog.save_checkpoint({
+                    "lora_version": self.current_lora_version,
+                    "modules": list(self.modules.keys()),
+                    "status": "running" if self.hfl_active else "idle",
+                })
 
                 time.sleep(30)
             except KeyboardInterrupt:
@@ -355,23 +398,33 @@ class HwarangAgent:
             if result.get("status") == "success":
                 logger.info(f"✅ 학습 완료: {lora_name}")
 
-                # 마스터에 업로드!
-                upload_result = finetune.share_lora(
-                    lora_name=lora_name,
+                # 적응형 압축 업로드 (대역폭 측정 → 자동 전략 선택)
+                lora_output_dir = os.path.join(
+                    finetune.lora_path, lora_name,
+                )
+                upload_result = self.adaptive_transfer.adaptive_upload(
+                    lora_path=lora_output_dir,
                     master_url=self.master_url,
                     agent_id=self.agent_id,
                     round_id=round_id,
                 )
 
                 if upload_result.get("status") == "uploaded":
-                    logger.info(f"📤 LoRA 업로드 완료!")
-                    server_resp = upload_result.get("server_response", {})
-                    if server_resp.get("verified"):
-                        logger.info(f"   품질 점수: {server_resp.get('quality_score', 0):.2f}")
-                    if server_resp.get("aggregation") == "started":
-                        logger.info(f"   🔀 통합 시작됨!")
+                    cfg = upload_result.get("config", {})
+                    logger.info(
+                        f"📤 적응형 업로드 완료! "
+                        f"(전략: {cfg.get('strategy')}, "
+                        f"크기: {cfg.get('estimated_size_mb')}MB)"
+                    )
                 else:
-                    logger.error(f"업로드 실패: {upload_result}")
+                    # 폴백: 원본 업로드
+                    logger.warning("적응형 업로드 실패 → 원본 업로드 시도")
+                    upload_result = finetune.share_lora(
+                        lora_name=lora_name,
+                        master_url=self.master_url,
+                        agent_id=self.agent_id,
+                        round_id=round_id,
+                    )
             else:
                 logger.error(f"학습 실패: {result}")
 
