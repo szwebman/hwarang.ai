@@ -22,8 +22,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use tauri::{
-    CustomMenuItem, Manager, SystemTray, SystemTrayEvent, SystemTrayMenu,
-    SystemTrayMenuItem, SystemTraySubmenu,
+    CustomMenuItem, SystemTray, SystemTrayEvent, SystemTrayMenu,
+    SystemTrayMenuItem,
 };
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -149,7 +149,7 @@ fn main() {
                 _ => {}
             }
         })
-        .setup(|app| {
+        .setup(move |app| {
             // 백그라운드 상태 업데이트 스레드
             let app_handle = app.handle();
             let bg_state = state.clone();

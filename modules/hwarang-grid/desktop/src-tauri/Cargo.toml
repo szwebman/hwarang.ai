@@ -8,12 +8,18 @@ edition = "2021"
 tauri-build = { version = "1", features = [] }
 
 [dependencies]
-tauri = { version = "1", features = ["system-tray", "notification-all", "shell-open"] }
+tauri = { version = "1", features = ["system-tray", "notification-all", "shell-open", "shell-execute"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 open = "5"
+dirs = "5"
 reqwest = { version = "0.12", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
+
+[package.metadata.bundle]
+name = "Hwarang Grid Agent"
+identifier = "ai.hwarang.grid"
+category = "Utility"
 
 [features]
 default = ["custom-protocol"]

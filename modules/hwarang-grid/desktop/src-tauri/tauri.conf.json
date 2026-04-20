@@ -7,7 +7,7 @@
   },
   "package": {
     "productName": "Hwarang Grid Agent",
-    "version": "1.0.0"
+    "version": "0.1.0"
   },
   "tauri": {
     "allowlist": {
@@ -15,33 +15,10 @@
       "shell": {
         "open": true,
         "execute": true,
-        "sidecar": true,
-        "scope": [
-          {
-            "name": "hwarang-agent",
-            "cmd": "hwarang-agent",
-            "args": true
-          },
-          {
-            "name": "python3",
-            "cmd": "python3",
-            "args": true
-          },
-          {
-            "name": "nvidia-smi",
-            "cmd": "nvidia-smi",
-            "args": true
-          }
-        ]
+        "sidecar": false
       },
       "notification": {
         "all": true
-      },
-      "fs": {
-        "all": false,
-        "readFile": true,
-        "writeFile": true,
-        "scope": ["$HOME/.hwarang/**"]
       }
     },
     "bundle": {
@@ -58,48 +35,24 @@
       "category": "Utility",
       "shortDescription": "화랑 AI Grid 에이전트",
       "longDescription": "GPU 공유 네트워크에 참여하여 AI 학습에 기여하고 HWR 코인을 받으세요.",
-      "copyright": "© 2025 Persismore. All rights reserved.",
+      "copyright": "2025 Persismore",
       "macOS": {
-        "minimumSystemVersion": "11.0",
-        "dmg": {
-          "appPosition": { "x": 180, "y": 170 },
-          "applicationFolderPosition": { "x": 480, "y": 170 },
-          "windowSize": { "width": 660, "height": 400 }
-        }
+        "minimumSystemVersion": "11.0"
       },
       "windows": {
         "certificateThumbprint": null,
         "digestAlgorithm": "sha256",
-        "timestampUrl": "",
-        "nsis": {
-          "installMode": "currentUser",
-          "languages": ["Korean", "English"],
-          "displayLanguageSelector": false
-        }
-      },
-      "linux": {
-        "appimage": {
-          "bundleMediaFramework": false
-        }
+        "timestampUrl": ""
       }
     },
     "systemTray": {
       "iconPath": "icons/tray-icon.png",
       "iconAsTemplate": true,
-      "menuOnLeftClick": true,
-      "title": "화랑 Grid"
+      "menuOnLeftClick": true
     },
     "windows": [],
     "security": {
       "csp": null
-    },
-    "updater": {
-      "active": true,
-      "dialog": true,
-      "endpoints": [
-        "https://api.hwarang.ai/agent/update/{{target}}/{{arch}}/{{current_version}}"
-      ],
-      "pubkey": ""
     }
   }
 }

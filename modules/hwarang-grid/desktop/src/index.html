@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>화랑 Grid Agent</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg: #0f172a;
+      --bg2: #1e293b;
+      --bg3: #334155;
+      --text: #f1f5f9;
+      --text2: #94a3b8;
+      --blue: #3b82f6;
+      --green: #10b981;
+      --yellow: #f59e0b;
+      --red: #ef4444;
+      --purple: #8b5cf6;
+      --border: #334155;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    /* 헤더 (드래그 영역) */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 20px;
+      background: var(--bg2);
+      border-bottom: 1px solid var(--border);
+      -webkit-app-region: drag;
+    }
+
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .logo {
+      width: 28px;
+      height: 28px;
+      background: linear-gradient(135deg, var(--blue), var(--purple));
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: bold;
+      font-size: 14px;
+    }
+
+    .header h1 {
+      font-size: 15px;
+      font-weight: 600;
+    }
+
+    .header .version {
+      font-size: 11px;
+      color: var(--text2);
+      background: var(--bg3);
+      padding: 2px 8px;
+      border-radius: 10px;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      -webkit-app-region: no-drag;
+    }
+
+    .status-dot.online { background: var(--green); box-shadow: 0 0 8px var(--green); }
+    .status-dot.idle { background: var(--yellow); }
+    .status-dot.offline { background: var(--red); }
+    .status-dot.training { background: var(--yellow); animation: pulse 1.5s infinite; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    /* 메인 콘텐츠 */
+    .content {
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    /* 통계 카드 */
+    .stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .stat-card {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px;
+    }
+
+    .stat-card .label {
+      font-size: 11px;
+      color: var(--text2);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .stat-card .value {
+      font-size: 22px;
+      font-weight: 700;
+      margin-top: 4px;
+    }
+
+    .stat-card .sub {
+      font-size: 11px;
+      color: var(--text2);
+      margin-top: 2px;
+    }
+
+    .stat-card .value.green { color: var(--green); }
+    .stat-card .value.blue { color: var(--blue); }
+    .stat-card .value.purple { color: var(--purple); }
+    .stat-card .value.yellow { color: var(--yellow); }
+
+    /* GPU 모니터 */
+    .gpu-monitor {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px;
+    }
+
+    .gpu-monitor .title {
+      font-size: 12px;
+      color: var(--text2);
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .gpu-monitor .gpu-name {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .progress-bar {
+      height: 6px;
+      background: var(--bg3);
+      border-radius: 3px;
+      overflow: hidden;
+      margin-top: 6px;
+    }
+
+    .progress-bar .fill {
+      height: 100%;
+      border-radius: 3px;
+      transition: width 0.5s ease;
+    }
+
+    .progress-bar .fill.green { background: var(--green); }
+    .progress-bar .fill.yellow { background: var(--yellow); }
+    .progress-bar .fill.red { background: var(--red); }
+
+    .gpu-stats {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 8px;
+      font-size: 12px;
+      color: var(--text2);
+    }
+
+    /* 활동 로그 */
+    .activity {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px;
+      max-height: 160px;
+      overflow-y: auto;
+    }
+
+    .activity .title {
+      font-size: 12px;
+      color: var(--text2);
+      margin-bottom: 8px;
+    }
+
+    .activity-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 0;
+      font-size: 12px;
+      border-bottom: 1px solid var(--bg3);
+    }
+
+    .activity-item:last-child { border-bottom: none; }
+
+    .activity-item .time {
+      color: var(--text2);
+      font-size: 11px;
+      min-width: 50px;
+    }
+
+    .activity-item .icon {
+      font-size: 14px;
+    }
+
+    /* 컨트롤 버튼 */
+    .controls {
+      display: flex;
+      gap: 8px;
+    }
+
+    .btn {
+      flex: 1;
+      padding: 10px;
+      border: none;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      -webkit-app-region: no-drag;
+    }
+
+    .btn:active { transform: scale(0.97); }
+
+    .btn-primary {
+      background: var(--blue);
+      color: white;
+    }
+
+    .btn-primary:hover { background: #2563eb; }
+
+    .btn-danger {
+      background: var(--red);
+      color: white;
+    }
+
+    .btn-danger:hover { background: #dc2626; }
+
+    .btn-secondary {
+      background: var(--bg3);
+      color: var(--text);
+    }
+
+    .btn-secondary:hover { background: #475569; }
+
+    /* 푸터 */
+    .footer {
+      padding: 10px 20px;
+      text-align: center;
+      font-size: 11px;
+      color: var(--text2);
+      border-top: 1px solid var(--border);
+    }
+
+    .footer a {
+      color: var(--blue);
+      text-decoration: none;
+    }
+
+    /* 추천인 코드 */
+    .referral {
+      background: linear-gradient(135deg, rgba(59,130,246,0.1), rgba(139,92,246,0.1));
+      border: 1px solid rgba(59,130,246,0.3);
+      border-radius: 12px;
+      padding: 12px;
+      text-align: center;
+    }
+
+    .referral .code {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--blue);
+      letter-spacing: 2px;
+      margin: 4px 0;
+    }
+
+    .referral .label {
+      font-size: 11px;
+      color: var(--text2);
+    }
+
+    /* 스크롤바 */
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--bg3); border-radius: 2px; }
+  </style>
+</head>
+<body>
+
+  <!-- 헤더 -->
+  <div class="header">
+    <div class="header-left">
+      <div class="logo">H</div>
+      <h1>화랑 Grid Agent</h1>
+      <span class="version">v1.0.0</span>
+    </div>
+    <div class="status-dot" id="statusDot"></div>
+  </div>
+
+  <div class="content">
+
+    <!-- 통계 -->
+    <div class="stats">
+      <div class="stat-card">
+        <div class="label">오늘 리워드</div>
+        <div class="value green" id="tokensToday">0</div>
+        <div class="sub">HWR</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">총 리워드</div>
+        <div class="value blue" id="tokensTotal">0</div>
+        <div class="sub">HWR</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">오늘 처리</div>
+        <div class="value purple" id="workCount">0</div>
+        <div class="sub">건</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">가동 시간</div>
+        <div class="value yellow" id="uptime">0h</div>
+        <div class="sub" id="uptimeSub">시작 전</div>
+      </div>
+    </div>
+
+    <!-- GPU 모니터 -->
+    <div class="gpu-monitor">
+      <div class="title">
+        <span>GPU</span>
+        <span class="gpu-name" id="gpuName">감지 중...</span>
+      </div>
+      <div class="progress-bar">
+        <div class="fill green" id="gpuBar" style="width: 0%"></div>
+      </div>
+      <div class="gpu-stats">
+        <span>사용률: <strong id="gpuUsage">0</strong>%</span>
+        <span>온도: <strong id="gpuTemp">0</strong>°C</span>
+        <span>VRAM: <strong id="gpuVram">0</strong>GB</span>
+      </div>
+    </div>
+
+    <!-- 활동 로그 -->
+    <div class="activity">
+      <div class="title">최근 활동</div>
+      <div id="activityLog">
+        <div class="activity-item">
+          <span class="time">--:--</span>
+          <span class="icon">⏸</span>
+          <span>에이전트 대기 중</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 추천인 코드 -->
+    <div class="referral">
+      <div class="label">내 추천인 코드 (친구에게 공유하면 5,000 HWR!)</div>
+      <div class="code" id="referralCode">--------</div>
+      <div class="label">클릭하여 복사</div>
+    </div>
+
+    <!-- 컨트롤 -->
+    <div class="controls">
+      <button class="btn btn-primary" id="btnToggle" onclick="toggleAgent()">
+        ▶ 시작
+      </button>
+      <button class="btn btn-secondary" onclick="openDashboard()">
+        📊 대시보드
+      </button>
+    </div>
+
+  </div>
+
+  <div class="footer">
+    <a href="https://hwarang.ai" onclick="openExternal('https://hwarang.ai')">hwarang.ai</a>
+    &nbsp;·&nbsp; Powered by Persismore
+  </div>
+
+  <script>
+    // 상태
+    let agentRunning = false;
+    let activities = [];
+
+    // 에이전트 시작/중지
+    function toggleAgent() {
+      agentRunning = !agentRunning;
+      const btn = document.getElementById('btnToggle');
+
+      if (agentRunning) {
+        btn.textContent = '⏹ 중지';
+        btn.className = 'btn btn-danger';
+        addActivity('🟢', '에이전트 시작됨');
+        updateStatus('idle');
+
+        // Tauri 명령 호출 (실제 에이전트 시작)
+        if (window.__TAURI__) {
+          window.__TAURI__.invoke('start_agent');
+        }
+      } else {
+        btn.textContent = '▶ 시작';
+        btn.className = 'btn btn-primary';
+        addActivity('🔴', '에이전트 중지됨');
+        updateStatus('offline');
+
+        if (window.__TAURI__) {
+          window.__TAURI__.invoke('stop_agent');
+        }
+      }
+    }
+
+    // 상태 업데이트
+    function updateStatus(status) {
+      const dot = document.getElementById('statusDot');
+      dot.className = 'status-dot ' + status;
+    }
+
+    // 활동 로그 추가
+    function addActivity(icon, message) {
+      const now = new Date();
+      const time = now.getHours().toString().padStart(2, '0') + ':' +
+                   now.getMinutes().toString().padStart(2, '0');
+
+      activities.unshift({ time, icon, message });
+      if (activities.length > 20) activities.pop();
+
+      const container = document.getElementById('activityLog');
+      container.innerHTML = activities.map(a =>
+        `<div class="activity-item">
+          <span class="time">${a.time}</span>
+          <span class="icon">${a.icon}</span>
+          <span>${a.message}</span>
+        </div>`
+      ).join('');
+    }
+
+    // 대시보드 열기
+    function openDashboard() {
+      openExternal('https://hwarang.ai/dashboard');
+    }
+
+    function openExternal(url) {
+      if (window.__TAURI__) {
+        window.__TAURI__.shell.open(url);
+      } else {
+        window.open(url, '_blank');
+      }
+    }
+
+    // 추천인 코드 복사
+    document.getElementById('referralCode').addEventListener('click', function() {
+      const code = this.textContent;
+      navigator.clipboard.writeText(code).then(() => {
+        const orig = this.textContent;
+        this.textContent = '복사됨!';
+        setTimeout(() => { this.textContent = orig; }, 1500);
+      });
+    });
+
+    // GPU 사용률 바 색상
+    function getBarColor(usage) {
+      if (usage > 80) return 'red';
+      if (usage > 50) return 'yellow';
+      return 'green';
+    }
+
+    // 주기적 상태 업데이트 (Tauri에서 이벤트로 받거나 폴링)
+    function updateUI(state) {
+      // 토큰
+      document.getElementById('tokensToday').textContent = formatNumber(state.tokens_today || 0);
+      document.getElementById('tokensTotal').textContent = formatNumber(state.tokens_total || 0);
+      document.getElementById('workCount').textContent = state.work_count_today || 0;
+
+      // 가동 시간
+      const mins = state.uptime_minutes || 0;
+      if (mins >= 60) {
+        document.getElementById('uptime').textContent = Math.floor(mins / 60) + 'h';
+        document.getElementById('uptimeSub').textContent = (mins % 60) + '분';
+      } else {
+        document.getElementById('uptime').textContent = mins + 'm';
+        document.getElementById('uptimeSub').textContent = '';
+      }
+
+      // GPU
+      document.getElementById('gpuName').textContent = state.gpu_name || '감지 중...';
+      document.getElementById('gpuUsage').textContent = Math.round(state.gpu_usage_percent || 0);
+      document.getElementById('gpuTemp').textContent = state.gpu_temp || 0;
+      document.getElementById('gpuVram').textContent = state.gpu_vram_gb || 0;
+
+      const bar = document.getElementById('gpuBar');
+      const usage = state.gpu_usage_percent || 0;
+      bar.style.width = usage + '%';
+      bar.className = 'fill ' + getBarColor(usage);
+
+      // 상태
+      if (state.status === 'running' || state.status === 'training') {
+        updateStatus(state.status === 'training' ? 'training' : 'online');
+      } else if (state.status === 'idle') {
+        updateStatus('idle');
+      }
+
+      // 추천인 코드
+      if (state.referral_code) {
+        document.getElementById('referralCode').textContent = state.referral_code;
+      }
+    }
+
+    function formatNumber(n) {
+      if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+      if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+      return n.toString();
+    }
+
+    // Tauri 이벤트 리스너
+    if (window.__TAURI__) {
+      window.__TAURI__.event.listen('agent-state-update', (event) => {
+        updateUI(event.payload);
+      });
+
+      window.__TAURI__.event.listen('agent-activity', (event) => {
+        addActivity(event.payload.icon, event.payload.message);
+      });
+    }
+
+    // 데모 데이터 (개발용, Tauri 없을 때)
+    if (!window.__TAURI__) {
+      setInterval(() => {
+        if (agentRunning) {
+          updateUI({
+            tokens_today: Math.floor(Math.random() * 5000),
+            tokens_total: 123456,
+            work_count_today: Math.floor(Math.random() * 100),
+            uptime_minutes: Math.floor((Date.now() - performance.timing.navigationStart) / 60000),
+            gpu_name: 'NVIDIA RTX 5090',
+            gpu_usage_percent: Math.random() * 80 + 10,
+            gpu_temp: Math.floor(Math.random() * 20 + 55),
+            gpu_vram_gb: 32,
+            status: Math.random() > 0.7 ? 'training' : 'running',
+            referral_code: 'HWR-A3F8',
+          });
+        }
+      }, 3000);
+    }
+  </script>
+</body>
+</html>
