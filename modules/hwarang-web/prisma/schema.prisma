@@ -110,6 +110,11 @@ model Plan {
 
   // 초과 토큰 구매 가능 여부
   allowOverage      Boolean @default(false) // 토큰 소진 후 추가 구매 가능?
+  overagePrice7b    Int     @default(0)    // 초과 토큰 가격 (7B 모델, 원/1K토큰)
+  overagePrice30b   Int     @default(0)    // 초과 토큰 가격 (30B 모델, 원/1K토큰)
+
+  // 사용 가능 모델
+  models            String[]               // ["hwarang-7b", "hwarang-30b"]
 
   // 기능 접근 (플랜으로 제한)
   features          String[]               // ["chat", "api", "code", "legal", "tax", "priority_queue"]
