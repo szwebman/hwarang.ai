@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from hwarang_api.config import Settings
-from hwarang_api.routers import admin, chat, cluster, health, models
+from hwarang_api.routers import admin, chat, cluster, grid, health, models
 from hwarang_api.services.model_manager import ModelManager
 
 logger = logging.getLogger(__name__)
@@ -98,5 +98,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(models.router, prefix="/v1", tags=["Models"])
     app.include_router(admin.router, prefix="/admin", tags=["Admin"])
     app.include_router(cluster.router, prefix="/admin", tags=["Cluster"])
+    app.include_router(grid.router, tags=["Grid/HFL"])
 
     return app

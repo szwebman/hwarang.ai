@@ -83,13 +83,139 @@ class DataCrawlerModule:
             for item in items:
                 f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
+    def upload_to_master(self, master_url: str, agent_id: str) -> dict:
+        """수집 데이터를 마스터 서버에 업로드.
+
+        로컬에 쌓인 크롤링 데이터를 마스터에 전송.
+        마스터가 품질 검증 후 학습 데이터로 변환.
+        업로드 완료된 파일은 .uploaded 마킹.
+        """
+        uploaded = 0
+        failed = 0
+
+        try:
+            import httpx
+            client = httpx.Client(timeout=60)
+
+            for filename in os.listdir(self.storage_path):
+                filepath = os.path.join(self.storage_path, filename)
+
+                # 이미 업로드된 파일 건너뛰기
+                if filename.endswith(".uploaded") or not filename.endswith(".jsonl"):
+                    continue
+
+                try:
+                    with open(filepath, "rb") as f:
+                        response = client.post(
+                            f"{master_url}/grid/data/upload",
+                            data={
+                                "agent_id": agent_id,
+                                "source": filename.split("_")[0],  # law, news, code
+                            },
+                            files={"data_file": (filename, f)},
+                        )
+
+                    if response.status_code == 200:
+                        # 업로드 완료 마킹
+                        os.rename(filepath, filepath + ".uploaded")
+                        uploaded += 1
+                        result = response.json()
+                        reward = result.get("reward", 0)
+                        if reward > 0:
+                            logger.info(f"📤 데이터 업로드: {filename} → +{reward} HWR")
+                    else:
+                        failed += 1
+
+                except Exception as e:
+                    logger.warning(f"업로드 실패 [{filename}]: {e}")
+                    failed += 1
+
+            client.close()
+
+        except ImportError:
+            logger.warning("httpx 없음 → 데이터 업로드 불가")
+            return {"error": "httpx 필요"}
+
+        logger.info(f"데이터 업로드 완료: 성공 {uploaded}, 실패 {failed}")
+        return {"uploaded": uploaded, "failed": failed}
+
+    def convert_to_training_data(self) -> str | None:
+        """수집된 원본 데이터를 SFT 학습 형식(JSONL)으로 변환.
+
+        뉴스 → "이 뉴스를 요약해줘" Q&A
+        법령 → "이 법령을 설명해줘" Q&A
+        코드 → "이 코드를 설명해줘" Q&A
+        """
+        output_path = os.path.join(self.storage_path, "training_data.jsonl")
+        count = 0
+
+        with open(output_path, "w", encoding="utf-8") as fout:
+            for filename in os.listdir(self.storage_path):
+                if not filename.endswith(".jsonl") or filename == "training_data.jsonl":
+                    continue
+
+                filepath = os.path.join(self.storage_path, filename)
+                source = filename.split("_")[0]
+
+                try:
+                    with open(filepath, encoding="utf-8") as fin:
+                        for line in fin:
+                            item = json.loads(line.strip())
+                            training_item = self._to_qa_pair(source, item)
+                            if training_item:
+                                fout.write(json.dumps(training_item, ensure_ascii=False) + "\n")
+                                count += 1
+                except Exception:
+                    continue
+
+        if count > 0:
+            logger.info(f"학습 데이터 변환: {count}건 → {output_path}")
+            return output_path
+        return None
+
+    def _to_qa_pair(self, source: str, item: dict) -> dict | None:
+        """원본 데이터를 Q&A 학습 형식으로 변환."""
+        content = item.get("title", "") or item.get("content", "")
+        if not content or len(content) < 20:
+            return None
+
+        system = "당신은 화랑 AI입니다. 퍼시스모어가 만든 한국형 AI 어시스턴트입니다."
+
+        if source == "law":
+            return {"messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": f"다음 법령에 대해 쉽게 설명해줘: {content}"},
+                {"role": "assistant", "content": f"'{content}' 법령에 대해 설명드리겠습니다.\n\n{item.get('summary', content)}"},
+            ]}
+        elif source == "news":
+            return {"messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": f"다음 뉴스를 요약해줘: {content}"},
+                {"role": "assistant", "content": f"해당 뉴스의 핵심 내용입니다.\n\n{item.get('summary', content)}"},
+            ]}
+        elif source == "code":
+            return {"messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": f"다음 코드를 설명해줘:\n```\n{content}\n```"},
+                {"role": "assistant", "content": f"이 코드를 분석해드리겠습니다.\n\n{item.get('description', '이 코드는 ' + content[:100] + '...')}"},
+            ]}
+        return None
+
     def get_stats(self) -> dict:
         """크롤링 통계."""
-        files = list(os.listdir(self.storage_path))
-        total_size = sum(os.path.getsize(os.path.join(self.storage_path, f)) for f in files)
+        all_files = [f for f in os.listdir(self.storage_path) if not f.startswith(".")]
+        pending = [f for f in all_files if f.endswith(".jsonl") and f != "training_data.jsonl"]
+        uploaded = [f for f in all_files if f.endswith(".uploaded")]
+        total_size = sum(
+            os.path.getsize(os.path.join(self.storage_path, f))
+            for f in all_files
+            if os.path.isfile(os.path.join(self.storage_path, f))
+        )
         return {
             "total_collected": self.collected_count,
-            "files": len(files),
+            "pending_upload": len(pending),
+            "uploaded": len(uploaded),
+            "files": len(all_files),
             "storage_mb": round(total_size / 1024 / 1024, 1),
             "limit_mb": self.config.storage_limit_mb,
         }

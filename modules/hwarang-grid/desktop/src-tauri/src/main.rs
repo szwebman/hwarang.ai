@@ -81,12 +81,27 @@ fn main() {
                             if state.status == "stopped" {
                                 state.status = "idle".into();
                                 state.connected = true;
-                                // TODO: 실제 에이전트 시작
+                                // Python 에이전트 프로세스 시작
+                                let _ = std::process::Command::new("hwarang-agent")
+                                    .arg("--daemon")
+                                    .spawn()
+                                    .map_err(|e| {
+                                        // hwarang-agent 없으면 python으로 직접
+                                        let _ = std::process::Command::new("python3")
+                                            .args(&["-m", "hwarang_agent", "--daemon"])
+                                            .spawn();
+                                        eprintln!("hwarang-agent 명령 없음, python3로 시도: {}", e);
+                                    });
                                 println!("Grid Agent 시작");
                             } else {
                                 state.status = "stopped".into();
                                 state.connected = false;
-                                // TODO: 실제 에이전트 중지
+                                // 에이전트 프로세스 종료 (PID 파일로)
+                                if let Ok(pid) = std::fs::read_to_string("/tmp/hwarang-agent.pid") {
+                                    let _ = std::process::Command::new("kill")
+                                        .arg(pid.trim())
+                                        .output();
+                                }
                                 println!("Grid Agent 중지");
                             }
                             // 트레이 메뉴 갱신
@@ -141,17 +156,51 @@ fn main() {
 
             thread::spawn(move || {
                 loop {
-                    thread::sleep(Duration::from_secs(5));
+                    thread::sleep(Duration::from_secs(10));
 
                     let mut state = bg_state.lock().unwrap();
                     if state.status != "stopped" {
-                        // TODO: 실제 GPU 상태 읽기
-                        // TODO: 실제 작업 수행 + 토큰 적립
+                        // GPU 상태 읽기 (nvidia-smi)
+                        if let Ok(output) = std::process::Command::new("nvidia-smi")
+                            .args(&["--query-gpu=name,utilization.gpu,temperature.gpu", "--format=csv,noheader,nounits"])
+                            .output()
+                        {
+                            if let Ok(text) = String::from_utf8(output.stdout) {
+                                let parts: Vec<&str> = text.trim().split(", ").collect();
+                                if parts.len() >= 3 {
+                                    state.gpu_name = parts[0].to_string();
+                                    state.gpu_usage_percent = parts[1].parse().unwrap_or(0.0);
+                                    state.gpu_temp = parts[2].parse().unwrap_or(0);
+
+                                    // GPU 사용 중이면 running, 아니면 idle
+                                    if state.gpu_usage_percent > 10.0 {
+                                        state.status = "running".into();
+                                    } else {
+                                        state.status = "idle".into();
+                                    }
+                                }
+                            }
+                        }
+
+                        // 에이전트 상태 파일에서 토큰 읽기
+                        let status_file = dirs::home_dir()
+                            .map(|h| h.join(".hwarang").join("agent_status.json"))
+                            .unwrap_or_default();
+
+                        if let Ok(content) = std::fs::read_to_string(&status_file) {
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                                state.tokens_today = json["tokens_today"].as_i64().unwrap_or(0);
+                                state.tokens_total = json["tokens_total"].as_i64().unwrap_or(0);
+                                state.work_count_today = json["work_count_today"].as_i64().unwrap_or(0);
+                                state.connected = json["connected"].as_bool().unwrap_or(false);
+                            }
+                        }
+
                         state.uptime_minutes += 1;
 
                         // 트레이 메뉴 갱신
                         let new_menu = build_tray_menu(&state);
-                        app_handle.tray_handle().set_menu(new_menu).unwrap();
+                        let _ = app_handle.tray_handle().set_menu(new_menu);
                         update_tray_icon(&app_handle, &state);
                     }
                 }
