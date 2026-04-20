@@ -58,16 +58,53 @@ class ABTestModule:
         return results
 
     def _query(self, endpoint: str, prompt: str) -> str:
+        """엔드포인트에 질의. HTTP 또는 로컬 모델 경로 지원."""
         import urllib.request
-        try:
-            req = urllib.request.Request(
-                f"{endpoint}/v1/chat/completions",
-                data=json.dumps({"messages": [{"role": "user", "content": prompt}], "max_tokens": 500}).encode(),
-                headers={"Content-Type": "application/json"},
-            )
-            resp = urllib.request.urlopen(req, timeout=60)
-            return json.loads(resp.read())["choices"][0]["message"]["content"]
-        except: return ""
+
+        # HTTP 엔드포인트
+        if endpoint and endpoint.startswith("http"):
+            try:
+                req = urllib.request.Request(
+                    f"{endpoint}/v1/chat/completions",
+                    data=json.dumps({
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 500,
+                    }).encode(),
+                    headers={"Content-Type": "application/json"},
+                )
+                resp = urllib.request.urlopen(req, timeout=60)
+                return json.loads(resp.read())["choices"][0]["message"]["content"]
+            except Exception:
+                pass
+
+        # 로컬 모델 경로
+        if endpoint and os.path.exists(endpoint):
+            try:
+                import torch
+                from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+
+                cache_key = f"_model_{hashlib.md5(endpoint.encode()).hexdigest()[:8]}"
+                if not hasattr(self, cache_key):
+                    bnb = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16)
+                    tok = AutoTokenizer.from_pretrained(endpoint, trust_remote_code=True)
+                    mdl = AutoModelForCausalLM.from_pretrained(
+                        endpoint, quantization_config=bnb, device_map="auto", trust_remote_code=True)
+                    setattr(self, cache_key, (tok, mdl))
+
+                tok, mdl = getattr(self, cache_key)
+                messages = [{"role": "user", "content": prompt}]
+                text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                inputs = tok(text, return_tensors="pt").to(mdl.device)
+                out = mdl.generate(**inputs, max_new_tokens=500)
+                return tok.decode(out[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+            except ImportError:
+                pass
+            except Exception as e:
+                logger.debug(f"로컬 모델 쿼리 실패: {e}")
+
+        return ""
+
+import os, hashlib
 
     def _score(self, response: str) -> float:
         if not response: return 0

@@ -56,18 +56,66 @@ class TranslatorModule:
         return {"translated": translated, "output": output_path}
 
     def _translate(self, endpoint: str, text: str, src: str, tgt: str) -> str:
+        """번역 실행. HTTP 엔드포인트 → 로컬 모델 → 원본 반환 순."""
         import urllib.request
-        prompt = f"다음 {src} 텍스트를 {tgt}로 번역하세요. 번역만 출력:\n\n{text}"
+
+        lang_names = {"en": "영어", "ko": "한국어", "ja": "일본어", "zh": "중국어"}
+        src_name = lang_names.get(src, src)
+        tgt_name = lang_names.get(tgt, tgt)
+        prompt = f"다음 {src_name} 텍스트를 {tgt_name}로 번역하세요. 번역만 출력:\n\n{text}"
+
+        # 방법 1: HTTP 엔드포인트
+        if endpoint and endpoint.startswith("http"):
+            try:
+                req = urllib.request.Request(
+                    f"{endpoint}/v1/chat/completions",
+                    data=json.dumps({
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 2048,
+                    }).encode(),
+                    headers={"Content-Type": "application/json"},
+                )
+                resp = urllib.request.urlopen(req, timeout=60)
+                return json.loads(resp.read())["choices"][0]["message"]["content"]
+            except Exception:
+                pass
+
+        # 방법 2: 로컬 모델
         try:
-            req = urllib.request.Request(
-                f"{endpoint}/v1/chat/completions",
-                data=json.dumps({"messages": [{"role": "user", "content": prompt}], "max_tokens": 2048}).encode(),
-                headers={"Content-Type": "application/json"},
-            )
-            resp = urllib.request.urlopen(req, timeout=60)
-            return json.loads(resp.read())["choices"][0]["message"]["content"]
-        except:
-            return text
+            import torch
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+
+            if not hasattr(self, "_model"):
+                model_path = None
+                for p in [
+                    os.path.expanduser("~/.hwarang/models/qwen2.5-7b"),
+                    "/mnt/nvme2/hwarang/models/qwen2.5-32b",
+                ]:
+                    if os.path.exists(p):
+                        model_path = p
+                        break
+
+                if model_path:
+                    from transformers import BitsAndBytesConfig
+                    bnb = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16)
+                    self._tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+                    self._model = AutoModelForCausalLM.from_pretrained(
+                        model_path, quantization_config=bnb, device_map="auto", trust_remote_code=True)
+
+            if hasattr(self, "_model"):
+                messages = [{"role": "user", "content": prompt}]
+                chat_text = self._tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                inputs = self._tokenizer(chat_text, return_tensors="pt").to(self._model.device)
+                outputs = self._model.generate(**inputs, max_new_tokens=2048)
+                return self._tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.debug(f"로컬 번역 실패: {e}")
+
+        # 폴백: 원본 반환
+        return text
 
     def _is_english(self, text: str) -> bool:
         english = sum(1 for c in text if 'a' <= c.lower() <= 'z')

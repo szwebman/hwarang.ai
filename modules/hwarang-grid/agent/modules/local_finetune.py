@@ -131,21 +131,59 @@ class LocalFinetuneModule:
             formatted = [{"text": format_conversation(conv)} for conv in conversations]
             dataset = Dataset.from_list(formatted)
 
-            # 2. 모델 로드 (4bit 양자화)
-            logger.info("  모델 로드 중 (INT4 양자화)...")
-            bnb_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.bfloat16,
-                bnb_4bit_use_double_quant=True,
-            )
+            # 2. 모델 로드 (GPU 벤더별 분기)
+            try:
+                from modules.gpu_detector import get_torch_device
+                device_type = get_torch_device()
+            except ImportError:
+                device_type = "cuda" if torch.cuda.is_available() else "cpu"
 
-            model = AutoModelForCausalLM.from_pretrained(
-                model_path,
-                quantization_config=bnb_config,
-                device_map="auto",
-                trust_remote_code=True,
-            )
+            logger.info(f"  디바이스: {device_type}")
+
+            if device_type == "cuda":
+                # NVIDIA: bitsandbytes INT4 양자화
+                logger.info("  모델 로드 중 (INT4 양자화)...")
+                bnb_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_compute_dtype=torch.bfloat16,
+                    bnb_4bit_use_double_quant=True,
+                )
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_path,
+                    quantization_config=bnb_config,
+                    device_map="auto",
+                    trust_remote_code=True,
+                )
+            elif device_type == "mps":
+                # Apple Silicon: float16 (bitsandbytes 미지원)
+                logger.info("  모델 로드 중 (Apple Silicon float16)...")
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_path,
+                    torch_dtype=torch.float16,
+                    device_map="auto",
+                    trust_remote_code=True,
+                    low_cpu_mem_usage=True,
+                )
+            elif device_type == "xpu":
+                # Intel Arc: float16
+                logger.info("  모델 로드 중 (Intel XPU)...")
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_path,
+                    torch_dtype=torch.float16,
+                    device_map="auto",
+                    trust_remote_code=True,
+                )
+            else:
+                # CPU: float32 (느리지만 동작)
+                logger.info("  모델 로드 중 (CPU float32)...")
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_path,
+                    torch_dtype=torch.float32,
+                    device_map="cpu",
+                    trust_remote_code=True,
+                    low_cpu_mem_usage=True,
+                )
 
             tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
             if tokenizer.pad_token is None:
@@ -233,14 +271,20 @@ class LocalFinetuneModule:
 
             # GPU 메모리 해제
             del model, trainer
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+                torch.mps.empty_cache()
 
             return {"status": "success", "path": output_dir, "loss": final_loss}
 
-        except torch.cuda.OutOfMemoryError:
-            logger.error("GPU 메모리 부족! 모델 크기를 줄이거나 batch_size를 줄여주세요.")
-            torch.cuda.empty_cache()
-            return {"status": "failed", "error": "GPU OOM"}
+        except (torch.cuda.OutOfMemoryError if hasattr(torch, 'cuda') else RuntimeError) as oom_err:
+            if "out of memory" in str(oom_err).lower() or "CUDA" in str(oom_err):
+                logger.error("GPU 메모리 부족! 모델 크기를 줄이거나 batch_size를 줄여주세요.")
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                return {"status": "failed", "error": "GPU OOM"}
+            raise
 
         except Exception as e:
             logger.error(f"학습 에러: {e}")

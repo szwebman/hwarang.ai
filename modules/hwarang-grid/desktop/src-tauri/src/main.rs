@@ -160,26 +160,72 @@ fn main() {
 
                     let mut state = bg_state.lock().unwrap();
                     if state.status != "stopped" {
-                        // GPU 상태 읽기 (nvidia-smi)
+                        // GPU 상태 읽기 (NVIDIA → Apple Silicon → AMD 순)
+                        let mut gpu_detected = false;
+
+                        // 1. NVIDIA (nvidia-smi)
                         if let Ok(output) = std::process::Command::new("nvidia-smi")
                             .args(&["--query-gpu=name,utilization.gpu,temperature.gpu", "--format=csv,noheader,nounits"])
                             .output()
                         {
-                            if let Ok(text) = String::from_utf8(output.stdout) {
-                                let parts: Vec<&str> = text.trim().split(", ").collect();
-                                if parts.len() >= 3 {
-                                    state.gpu_name = parts[0].to_string();
-                                    state.gpu_usage_percent = parts[1].parse().unwrap_or(0.0);
-                                    state.gpu_temp = parts[2].parse().unwrap_or(0);
-
-                                    // GPU 사용 중이면 running, 아니면 idle
-                                    if state.gpu_usage_percent > 10.0 {
-                                        state.status = "running".into();
-                                    } else {
-                                        state.status = "idle".into();
+                            if output.status.success() {
+                                if let Ok(text) = String::from_utf8(output.stdout) {
+                                    let parts: Vec<&str> = text.trim().split(", ").collect();
+                                    if parts.len() >= 3 {
+                                        state.gpu_name = parts[0].to_string();
+                                        state.gpu_usage_percent = parts[1].parse().unwrap_or(0.0);
+                                        state.gpu_temp = parts[2].parse().unwrap_or(0);
+                                        gpu_detected = true;
                                     }
                                 }
                             }
+                        }
+
+                        // 2. Apple Silicon (macOS)
+                        #[cfg(target_os = "macos")]
+                        if !gpu_detected {
+                            if let Ok(output) = std::process::Command::new("sysctl")
+                                .args(&["-n", "machdep.cpu.brand_string"])
+                                .output()
+                            {
+                                if let Ok(text) = String::from_utf8(output.stdout) {
+                                    if text.contains("Apple") {
+                                        state.gpu_name = text.trim().to_string();
+                                        // Apple Silicon은 사용률을 직접 측정하기 어려움
+                                        state.gpu_usage_percent = 0.0;
+                                        state.gpu_temp = 0;
+                                        gpu_detected = true;
+                                    }
+                                }
+                            }
+                        }
+
+                        // 3. AMD (rocm-smi)
+                        if !gpu_detected {
+                            if let Ok(output) = std::process::Command::new("rocm-smi")
+                                .args(&["--showproductname"])
+                                .output()
+                            {
+                                if output.status.success() {
+                                    if let Ok(text) = String::from_utf8(output.stdout) {
+                                        if text.contains("GPU") || text.contains("Radeon") {
+                                            state.gpu_name = "AMD GPU".to_string();
+                                            gpu_detected = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if !gpu_detected {
+                            state.gpu_name = "CPU only".to_string();
+                        }
+
+                        // 상태 갱신
+                        if gpu_detected && state.gpu_usage_percent > 10.0 {
+                            state.status = "running".into();
+                        } else if gpu_detected {
+                            state.status = "idle".into();
                         }
 
                         // 에이전트 상태 파일에서 토큰 읽기

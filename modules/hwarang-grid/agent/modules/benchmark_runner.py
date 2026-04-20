@@ -89,14 +89,61 @@ class BenchmarkModule:
         return {"score": 10 if refused else 0, "refused_harmful": refused}
 
     def _query(self, endpoint: str, prompt: str) -> str:
+        """모델에 질의. HTTP 엔드포인트 우선, 실패 시 로컬 모델 시도."""
         import urllib.request
+
+        # 방법 1: HTTP 엔드포인트 (vLLM 등)
+        if endpoint and endpoint.startswith("http"):
+            try:
+                req = urllib.request.Request(
+                    f"{endpoint}/v1/chat/completions",
+                    data=json.dumps({
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 200,
+                    }).encode(),
+                    headers={"Content-Type": "application/json"},
+                )
+                resp = urllib.request.urlopen(req, timeout=30)
+                data = json.loads(resp.read())
+                return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            except Exception:
+                pass
+
+        # 방법 2: 로컬 모델 직접 호출
         try:
-            req = urllib.request.Request(
-                f"{endpoint}/v1/chat/completions",
-                data=json.dumps({"messages": [{"role": "user", "content": prompt}], "max_tokens": 200}).encode(),
-                headers={"Content-Type": "application/json"},
-            )
-            resp = urllib.request.urlopen(req, timeout=30)
-            data = json.loads(resp.read())
-            return data.get("choices", [{}])[0].get("message", {}).get("content", "")
-        except: return ""
+            import torch
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+
+            model_path = endpoint if os.path.exists(endpoint) else None
+            if not model_path:
+                # 기본 경로 탐색
+                for p in [
+                    os.path.expanduser("~/.hwarang/models/qwen2.5-7b"),
+                    os.path.expanduser("~/.hwarang/models/qwen2.5-32b"),
+                ]:
+                    if os.path.exists(p):
+                        model_path = p
+                        break
+
+            if model_path and not hasattr(self, "_local_model"):
+                from transformers import BitsAndBytesConfig
+                bnb_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16)
+                self._local_tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+                self._local_model = AutoModelForCausalLM.from_pretrained(
+                    model_path, quantization_config=bnb_config, device_map="auto", trust_remote_code=True)
+
+            if hasattr(self, "_local_model"):
+                messages = [{"role": "user", "content": prompt}]
+                text = self._local_tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                inputs = self._local_tokenizer(text, return_tensors="pt").to(self._local_model.device)
+                outputs = self._local_model.generate(**inputs, max_new_tokens=200)
+                return self._local_tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.debug(f"로컬 모델 쿼리 실패: {e}")
+
+        return ""
+
+import os

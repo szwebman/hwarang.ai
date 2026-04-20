@@ -41,6 +41,30 @@ class SystemMonitorModule:
         return metrics
 
     def _get_gpu_metrics(self) -> dict:
+        """GPU 메트릭 (NVIDIA/AMD/Intel/Apple Silicon 지원)."""
+        try:
+            from modules.gpu_detector import detect_gpu, get_gpu_metrics
+            gpu_info = detect_gpu()
+            metrics = get_gpu_metrics()
+
+            vram_total = metrics.get("vram_total_gb", 0) * 1024
+            vram_used = metrics.get("vram_used_gb", 0) * 1024
+
+            return {
+                "temperature": metrics.get("temp_c", 0),
+                "utilization": metrics.get("usage_percent", 0),
+                "vram_used_mb": vram_used,
+                "vram_total_mb": vram_total,
+                "vram_used_pct": round(vram_used / max(vram_total, 1) * 100, 1) if vram_total > 0 else 0,
+                "power_watts": metrics.get("power_w", 0),
+                "name": gpu_info.get("name", "unknown"),
+                "vendor": gpu_info.get("vendor", "none"),
+                "compute": gpu_info.get("compute", "cpu"),
+            }
+        except ImportError:
+            pass
+
+        # 폴백: nvidia-smi 직접 호출
         try:
             result = subprocess.run(
                 ["nvidia-smi", "--query-gpu=temperature.gpu,utilization.gpu,memory.used,memory.total,power.draw,name",
@@ -59,9 +83,12 @@ class SystemMonitorModule:
                     "vram_used_pct": round(vram_used / max(vram_total, 1) * 100, 1),
                     "power_watts": float(parts[4]),
                     "name": parts[5].strip(),
+                    "vendor": "nvidia",
                 }
-        except: pass
-        return {"temperature": 0, "utilization": 0, "name": "unknown"}
+        except Exception:
+            pass
+
+        return {"temperature": 0, "utilization": 0, "name": "unknown", "vendor": "none"}
 
     def _get_cpu_metrics(self) -> dict:
         try:

@@ -499,32 +499,25 @@ class HwarangAgent:
     # ════════════════════════════════════════════════════════════
 
     def _detect_gpu(self) -> dict:
-        """GPU 정보 감지."""
+        """GPU 정보 감지 (NVIDIA/AMD/Intel/Apple Silicon 지원)."""
         try:
-            import torch
-            if torch.cuda.is_available():
-                name = torch.cuda.get_device_name(0)
-                vram = torch.cuda.get_device_properties(0).total_mem / (1024**3)
-                return {"name": name, "vram_gb": round(vram, 1)}
+            from modules.gpu_detector import detect_gpu
+            return detect_gpu()
         except ImportError:
             pass
 
-        # nvidia-smi 폴백
+        # 폴백: 기본 감지
         try:
-            import subprocess
-            result = subprocess.run(
-                ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if result.returncode == 0:
-                parts = result.stdout.strip().split(", ")
-                name = parts[0]
-                vram = float(parts[1].replace(" MiB", "")) / 1024
-                return {"name": name, "vram_gb": round(vram, 1)}
-        except Exception:
+            import torch
+            if torch.cuda.is_available():
+                return {"name": torch.cuda.get_device_name(0),
+                        "vram_gb": round(torch.cuda.get_device_properties(0).total_mem / 1024**3, 1)}
+            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                return {"name": "Apple Silicon (MPS)", "vram_gb": 0}
+        except ImportError:
             pass
 
-        return {"name": "unknown", "vram_gb": 0}
+        return {"name": "CPU only", "vram_gb": 0}
 
     # ════════════════════════════════════════════════════════════
     # 기존 모듈 루프
