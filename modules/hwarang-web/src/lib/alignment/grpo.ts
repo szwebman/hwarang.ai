@@ -119,8 +119,8 @@ export async function submitGRPOFeedback(feedback: GRPOFeedback): Promise<{
         reason: feedback.reason,
         betterResponse: feedback.betterResponse,
         categories: feedback.categories,
-        rewards,
-      },
+        rewards: rewards as any,
+      } as any,
     },
   });
 
