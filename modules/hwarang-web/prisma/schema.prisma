@@ -274,8 +274,11 @@ model UsageRecord {
   promptTokens    Int
   completionTokens Int
   totalTokens     Int
+  chargedTokens   Int        @default(0)   // 과금 토큰 (모델별 배수 적용)
+  inputMultiplier Float      @default(1.0) // 입력 토큰 배수
+  outputMultiplier Float     @default(1.0) // 출력 토큰 배수
   latencyMs       Int
-  statusCode      Int      @default(200)
+  statusCode      Int        @default(200)
 
   // 도메인
   domain          String?                  // "code", "legal", "tax"
