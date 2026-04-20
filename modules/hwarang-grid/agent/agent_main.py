@@ -63,6 +63,17 @@ from modules.optimizer import (
 )
 from modules.lora_compressor import NetworkAdaptiveTransfer
 
+# 추가 모듈 (전부 연결)
+from modules.agent_dna import AgentDNAModule
+from modules.agent_guild import AgentGuildModule
+from modules.ai_mentor import AIMentorModule
+from modules.auto_specialization import AutoSpecializationModule
+from modules.marketplace import MarketplaceModule
+from modules.model_distributor import ModelDistributorModule
+from modules.offline_agent import OfflineAgentModule
+from modules.p2p_collaboration import P2PCollaborationModule
+from modules.reputation import ReputationModule
+
 
 class HwarangAgent:
     """화랑 Grid 에이전트.
@@ -132,7 +143,18 @@ class HwarangAgent:
         self.modules["local_finetune"] = LocalFinetuneModule()
         self.modules["sleep_learning"] = SleepLearningModule()
 
-        logger.info(f"초기화된 모듈: {list(self.modules.keys())}")
+        # 추가 모듈 (항상 초기화)
+        self.modules["reputation"] = ReputationModule()
+        self.modules["ai_mentor"] = AIMentorModule()
+        self.modules["auto_specialization"] = AutoSpecializationModule()
+        self.modules["marketplace"] = MarketplaceModule()
+        self.modules["offline_agent"] = OfflineAgentModule()
+        self.modules["model_distributor"] = ModelDistributorModule()
+        self.modules["agent_dna"] = AgentDNAModule()
+        self.modules["agent_guild"] = AgentGuildModule()
+        self.modules["p2p"] = P2PCollaborationModule()
+
+        logger.info(f"초기화된 모듈: {len(self.modules)}개 - {list(self.modules.keys())}")
 
     def start(self):
         """에이전트 시작."""
@@ -166,6 +188,22 @@ class HwarangAgent:
         if "auto_update" in self.modules:
             self._start_thread("auto_update", self._run_auto_update)
 
+        # P2P 피어 발견 시작
+        if "p2p" in self.modules:
+            gpu_info = self._detect_gpu()
+            self.modules["p2p"].start(
+                agent_id=self.agent_id,
+                gpu_name=gpu_info.get("name", ""),
+                vram_gb=gpu_info.get("vram_gb", 0),
+                tier=getattr(self.config, "tier", "lite"),
+            )
+
+        # AI 멘토 관찰 시작
+        self._start_thread("mentor", self._run_mentor)
+
+        # 오프라인 큐 동기화
+        self._start_thread("offline_sync", self._run_offline_sync)
+
         # HFL 학습 루프 (핵심!)
         self._start_thread("hfl_loop", self._run_hfl_loop)
 
@@ -188,6 +226,10 @@ class HwarangAgent:
         })
         self.watchdog.cleanup()
         self.watchdog.reset_crash_count()
+
+        # P2P 중지
+        if "p2p" in self.modules:
+            self.modules["p2p"].stop()
 
         # 커넥션 풀 정리
         ConnectionPool.get().close()
@@ -624,6 +666,39 @@ class HwarangAgent:
                 if self.config.modules.auto_update.auto_restart:
                     updater.apply_update(check["download_url"])
             time.sleep(self.config.modules.auto_update.check_interval_hours * 3600)
+
+    def _run_mentor(self):
+        """AI 멘토: 사용자 질문 패턴 분석."""
+        mentor = self.modules.get("ai_mentor")
+        if not mentor:
+            return
+        while self.running:
+            # 주간 리포트 (매 6시간 체크)
+            try:
+                stats = mentor.get_weekly_report()
+                if stats.get("total_questions", 0) > 0:
+                    logger.info(f"📚 멘토 리포트: {stats.get('total_questions')}건 질문, "
+                                f"주요 분야: {stats.get('top_topics', [])[:3]}")
+            except Exception:
+                pass
+            time.sleep(6 * 3600)
+
+    def _run_offline_sync(self):
+        """오프라인 큐 동기화."""
+        offline = self.modules.get("offline_agent")
+        if not offline:
+            return
+        while self.running:
+            try:
+                if offline.is_online():
+                    synced = offline.sync_queue(self.master_url)
+                    if synced and synced.get("synced", 0) > 0:
+                        logger.info(f"📡 오프라인 큐 동기화: {synced['synced']}건")
+                else:
+                    logger.debug("오프라인 상태 → 큐 대기")
+            except Exception:
+                pass
+            time.sleep(60)
 
 
 # ─── 메인 ────────────────────────────────────────────────────

@@ -52,7 +52,7 @@ def _html_to_text(html: str) -> str:
     return parser.get_text()
 
 
-def _fetch_url(url: str, timeout: int = 10) -> str | None:
+def _fetch_url(url: str, timeout: int = 10):
     """URL에서 콘텐츠를 가져옴."""
     try:
         req = Request(url, headers={
@@ -479,7 +479,7 @@ class DataCrawlerModule:
 
         return {"uploaded": uploaded, "failed": failed}
 
-    def convert_to_training_data(self) -> str | None:
+    def convert_to_training_data(self):
         """수집 데이터를 SFT 학습 형식(JSONL)으로 변환."""
         output_path = os.path.join(self.storage_path, "training_data.jsonl")
         count = 0
@@ -509,7 +509,7 @@ class DataCrawlerModule:
             return output_path
         return None
 
-    def _to_qa_pair(self, source: str, item: dict, system: str) -> dict | None:
+    def _to_qa_pair(self, source: str, item: dict, system: str):
         """원본 데이터를 Q&A 학습 형식으로 변환."""
         title = item.get("title", "")
         desc = item.get("description", "") or item.get("summary", "")

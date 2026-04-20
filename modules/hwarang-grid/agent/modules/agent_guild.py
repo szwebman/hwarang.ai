@@ -55,7 +55,7 @@ class Guild:
         return sum(m.vram_gb for m in self.members)
 
     @property
-    def leader(self) -> GuildMember | None:
+    def leader(self):
         leaders = [m for m in self.members if m.is_leader]
         return leaders[0] if leaders else None
 
@@ -66,7 +66,7 @@ class Guild:
 
 class AgentGuildModule:
     def __init__(self, config=None):
-        self.my_guild: Guild | None = None
+        self.my_guild: Guild  = None
         self.available_guilds: list[Guild] = []
         self.data_path = os.path.expanduser("~/.hwarang/guild.json") if 'os' in dir() else "/tmp/guild.json"
 
@@ -147,7 +147,7 @@ class AgentGuildModule:
 
         return {"status": "left", "remaining_members": guild.member_count}
 
-    def elect_leader(self, guild: Guild) -> GuildMember | None:
+    def elect_leader(self, guild: Guild):
         """리더 선출 (평판 최고)."""
         if not guild.members:
             return None

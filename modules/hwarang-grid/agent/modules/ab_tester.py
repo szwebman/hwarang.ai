@@ -6,7 +6,7 @@
 보상: A/B 테스트 1회 15 HWR
 """
 
-import time, json, logging, random
+import time, json, logging, random, os, hashlib
 
 logger = logging.getLogger(__name__)
 
@@ -103,8 +103,6 @@ class ABTestModule:
                 logger.debug(f"로컬 모델 쿼리 실패: {e}")
 
         return ""
-
-import os, hashlib
 
     def _score(self, response: str) -> float:
         if not response: return 0

@@ -44,7 +44,7 @@ class AIMentorModule:
 
         self._save()
 
-    def get_suggestion(self, question: str) -> str | None:
+    def get_suggestion(self, question: str):
         """현재 질문에 대한 맞춤 제안."""
         keywords = self._extract_keywords(question)
 

@@ -22,7 +22,7 @@ class ResponseCacheModule:
     def _cache_key(self, prompt: str) -> str:
         return hashlib.md5(prompt.strip().lower().encode()).hexdigest()
 
-    def get(self, prompt: str) -> str | None:
+    def get(self, prompt: str):
         key = self._cache_key(prompt)
         entry = self.cache.get(key)
         if entry:

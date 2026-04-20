@@ -54,7 +54,7 @@ class P2PCollaborationModule:
         self.peers: dict[str, PeerInfo] = {}
         self._running = False
         self._threads: list[threading.Thread] = []
-        self._http_server: HTTPServer | None = None
+        self._http_server: HTTPServer  = None
         self._my_ip = self._get_local_ip()
 
     def _get_local_ip(self) -> str:
@@ -215,7 +215,7 @@ class P2PCollaborationModule:
     # 작업 위임/수신
     # ════════════════════════════════════════════════════════════
 
-    def delegate_task(self, task_type: str, payload: dict) -> dict | None:
+    def delegate_task(self, task_type: str, payload: dict):
         """가용 피어에게 작업 위임."""
         peer = self._find_best_peer()
         if not peer:
@@ -235,7 +235,7 @@ class P2PCollaborationModule:
             logger.warning(f"위임 실패 → {peer.agent_id}: {e}")
             return None
 
-    def _find_best_peer(self) -> PeerInfo | None:
+    def _find_best_peer(self):
         now = time.time()
         available = [p for p in self.peers.values()
                      if p.status == "idle" and p.load_percent < 80 and now - p.last_seen < PEER_TIMEOUT]

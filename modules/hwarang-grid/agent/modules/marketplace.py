@@ -46,7 +46,7 @@ class MarketplaceModule:
         self.listings[listing.skill].append(listing)
         logger.info(f"마켓 등록: {listing.agent_id} → {listing.skill} @ {listing.price_hwr} HWR")
 
-    def find_best_provider(self, skill: str, priority: str = "quality") -> ServiceListing | None:
+    def find_best_provider(self, skill: str, priority: str = "quality"):
         """요청에 맞는 최적 제공자 찾기.
 
         priority: "quality" | "price" | "speed" | "balanced"

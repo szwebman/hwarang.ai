@@ -63,7 +63,7 @@ class SafetyFilterModule:
             response = re.sub(pattern, "[개인정보 마스킹]", response)
         return response
 
-    def _detect_hallucination(self, response: str) -> str | None:
+    def _detect_hallucination(self, response: str):
         """환각 간이 감지."""
         # 존재하지 않는 법 조항 패턴
         fake_law = re.search(r"(민법|형법)\s*제?\s*(\d{4,})조", response)
