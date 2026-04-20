@@ -102,9 +102,9 @@ export function applyHQL(requestBody: any, state: QuantumState): any {
 
   return {
     ...requestBody,
-    // 메인 LoRA
-    model: primary.adapterName,
-    // 추가 LoRA (서버가 지원하면)
+    // 모델명은 원본 유지 (LoRA 어댑터가 실제 로드된 경우에만 교체)
+    // model: primary.adapterName,  // ← LoRA 미지원 시 모델명 덮어쓰기 방지
+    // 추가 LoRA 힌트 (서버가 지원하면 참고)
     extra_body: {
       ...(requestBody.extra_body || {}),
       lora_mixture: state.mixtures.map((m) => ({
