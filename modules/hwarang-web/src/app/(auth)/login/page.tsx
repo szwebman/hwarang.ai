@@ -2,11 +2,13 @@
 
 import { signIn } from "next-auth/react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useState, Suspense } from "react";
 
-export default function LoginPage() {
+function LoginInner() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const callbackUrl = searchParams.get("callbackUrl") || "/dashboard";
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -27,7 +29,7 @@ export default function LoginPage() {
       if (result?.error) {
         setError("이메일 또는 비밀번호가 올바르지 않습니다");
       } else {
-        router.push("/dashboard");
+        router.push(callbackUrl);
       }
     } catch {
       setError("로그인 중 오류가 발생했습니다");
@@ -116,7 +118,7 @@ export default function LoginPage() {
         {/* 소셜 로그인 */}
         <div className="space-y-2">
           <button
-            onClick={() => signIn("google", { callbackUrl: "/dashboard" })}
+            onClick={() => signIn("google", { callbackUrl })}
             className="w-full flex items-center justify-center gap-3 px-4 py-2.5 rounded-xl border text-sm font-medium"
             style={{ borderColor: "var(--border)" }}
           >
@@ -130,7 +132,7 @@ export default function LoginPage() {
           </button>
 
           <button
-            onClick={() => signIn("kakao", { callbackUrl: "/dashboard" })}
+            onClick={() => signIn("kakao", { callbackUrl })}
             className="w-full flex items-center justify-center gap-3 px-4 py-2.5 rounded-xl text-sm font-medium"
             style={{ background: "#FEE500", color: "#000000" }}
           >
@@ -152,5 +154,13 @@ export default function LoginPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={null}>
+      <LoginInner />
+    </Suspense>
   );
 }
