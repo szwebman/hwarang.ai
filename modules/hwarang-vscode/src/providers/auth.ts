@@ -244,7 +244,7 @@ export class AuthManager {
   async loginWithEmail(email: string, password: string): Promise<boolean> {
     const apiUrl = this.getApiUrl();
     try {
-      const resp = await fetch(`${apiUrl}/v1/auth/login`, {
+      const resp = await fetch(`${apiUrl}/api/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),
@@ -286,19 +286,33 @@ export class AuthManager {
     if (!this._apiKey) return false;
     const apiUrl = this.getApiUrl();
 
-    try {
-      const resp = await fetch(`${apiUrl}/v1/users/me`, {
-        headers: { Authorization: `Bearer ${this._apiKey}` },
-      });
-      if (!resp.ok) return false;
+    // Next.js Route Handler 경로 (/api/users/me) 시도, 실패 시 /api/v1/users/me
+    const endpoints = [`${apiUrl}/api/users/me`, `${apiUrl}/api/v1/users/me`];
 
-      this._user = (await resp.json()) as UserInfo;
-      this.updateStatusBar();
-      this._onAuthChanged.fire(this._user);
-      return true;
-    } catch {
-      return false;
+    for (const url of endpoints) {
+      try {
+        const resp = await fetch(url, {
+          headers: { Authorization: `Bearer ${this._apiKey}` },
+        });
+        if (!resp.ok) {
+          if (resp.status === 401 || resp.status === 403) {
+            // 인증 실패 - 키가 잘못됨
+            return false;
+          }
+          // 404 등은 다음 엔드포인트 시도
+          continue;
+        }
+
+        this._user = (await resp.json()) as UserInfo;
+        this.updateStatusBar();
+        this._onAuthChanged.fire(this._user);
+        return true;
+      } catch (e) {
+        // 네트워크 오류 - 다음 엔드포인트 시도
+        continue;
+      }
     }
+    return false;
   }
 
   async refreshTokenBalance(): Promise<void> {
