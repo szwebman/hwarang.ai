@@ -25,6 +25,7 @@ function VSCodeAuthInner() {
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState(false);
+  const [autoStarted, setAutoStarted] = useState(false);
 
   // 로그인 안 되어 있으면 로그인 페이지로
   useEffect(() => {
@@ -70,12 +71,27 @@ function VSCodeAuthInner() {
       // 짧은 지연 후 리다이렉트
       setTimeout(() => {
         window.location.href = callbackUrl;
-      }, 1200);
+      }, 800);
     } catch (e: any) {
       setError(e.message);
       setConnecting(false);
     }
   };
+
+  // 로그인 완료 + callback_port가 있으면 자동으로 연결 시작
+  useEffect(() => {
+    if (
+      status === "authenticated" &&
+      callbackPort &&
+      !autoStarted &&
+      !connecting &&
+      !success
+    ) {
+      setAutoStarted(true);
+      handleConnect();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status, callbackPort, autoStarted]);
 
   if (status === "loading") {
     return (

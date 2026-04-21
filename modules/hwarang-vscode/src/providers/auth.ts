@@ -80,35 +80,62 @@ export class AuthManager {
 
   async loginWithBrowser(): Promise<boolean> {
     return new Promise(async (resolve) => {
-      // 로컬 콜백 서버 시작
-      const port = await this.startCallbackServer((apiKey) => {
-        this.loginWithApiKey(apiKey).then(resolve);
-      });
+      let settled = false;
+      const finish = (ok: boolean) => {
+        if (settled) return;
+        settled = true;
+        this.stopCallbackServer();
+        resolve(ok);
+      };
 
-      // 브라우저에서 인증 페이지 열기
-      const apiUrl = this.getApiUrl();
-      const authUrl = `${apiUrl}/auth/vscode?callback_port=${port}&editor=vscode`;
+      try {
+        // 로컬 콜백 서버 시작 (API 키 수신)
+        const port = await this.startCallbackServer(async (apiKey) => {
+          const ok = await this.loginWithApiKey(apiKey);
+          finish(ok);
+        });
 
-      vscode.env.openExternal(vscode.Uri.parse(authUrl));
+        // 브라우저에서 인증 페이지 열기
+        const apiUrl = this.getApiUrl();
+        const authUrl = `${apiUrl}/auth/vscode?callback_port=${port}&editor=vscode`;
+        vscode.env.openExternal(vscode.Uri.parse(authUrl));
 
-      vscode.window.withProgress(
-        {
-          location: vscode.ProgressLocation.Notification,
-          title: "화랑 AI: 브라우저에서 로그인하는 중...",
-          cancellable: true,
-        },
-        async (_progress, token) => {
-          token.onCancellationRequested(() => {
-            this.stopCallbackServer();
-            resolve(false);
-          });
+        // 진행 알림 (5분 타임아웃, 사용자 취소 가능)
+        vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: "화랑 AI: 브라우저에서 로그인을 완료해주세요",
+            cancellable: true,
+          },
+          async (progress, token) => {
+            progress.report({
+              message: "브라우저에서 로그인 후 자동으로 연결됩니다",
+            });
 
-          // 60초 타임아웃
-          await new Promise((r) => setTimeout(r, 60000));
-          this.stopCallbackServer();
-          resolve(false);
-        }
-      );
+            token.onCancellationRequested(() => finish(false));
+
+            // 5분 대기 (300초) — NextAuth OAuth는 시간이 걸릴 수 있음
+            const TIMEOUT_MS = 5 * 60 * 1000;
+            const start = Date.now();
+            while (!settled && Date.now() - start < TIMEOUT_MS) {
+              await new Promise((r) => setTimeout(r, 500));
+              if (token.isCancellationRequested) break;
+            }
+
+            if (!settled) {
+              vscode.window.showWarningMessage(
+                "화랑 AI: 로그인 시간이 초과되었습니다. 다시 시도하세요."
+              );
+              finish(false);
+            }
+          }
+        );
+      } catch (e: any) {
+        vscode.window.showErrorMessage(
+          `화랑 AI: 콜백 서버 시작 실패 - ${e.message}`
+        );
+        finish(false);
+      }
     });
   }
 
@@ -116,35 +143,63 @@ export class AuthManager {
     onApiKey: (key: string) => void
   ): Promise<number> {
     return new Promise((resolve, reject) => {
-      this._callbackServer = http.createServer((req, res) => {
-        const url = new URL(req.url || "", "http://localhost");
-        const apiKey = url.searchParams.get("api_key") || url.searchParams.get("token");
+      // 기존 서버가 있으면 먼저 정리
+      this.stopCallbackServer();
+
+      const server = http.createServer((req, res) => {
+        // CORS 허용 (hwarang.ai에서 리다이렉트 시)
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+        res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+        if (req.method === "OPTIONS") {
+          res.writeHead(204);
+          res.end();
+          return;
+        }
+
+        const url = new URL(req.url || "", "http://127.0.0.1");
+
+        // 헬스체크
+        if (url.pathname === "/health") {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("ok");
+          return;
+        }
+
+        const apiKey =
+          url.searchParams.get("api_key") || url.searchParams.get("token");
 
         if (apiKey) {
-          // 성공 페이지
           res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-          res.end(`<!DOCTYPE html><html><body style="font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;background:#1a1a2e;color:#fff;">
-            <div style="text-align:center;">
-              <div style="width:64px;height:64px;margin:0 auto 16px;border-radius:16px;background:linear-gradient(135deg,#6366f1,#8b5cf6);display:flex;align-items:center;justify-content:center;font-size:28px;font-weight:bold;color:#fff;">H</div>
-              <h2>로그인 완료!</h2>
-              <p style="opacity:0.7;">VS Code로 돌아가세요. 이 창은 닫아도 됩니다.</p>
-            </div>
-          </body></html>`);
+          res.end(`<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"><title>로그인 완료</title></head><body style="font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;background:linear-gradient(135deg,#0f172a 0%,#1e1b4b 50%,#312e81 100%);color:#fff;margin:0;">
+  <div style="text-align:center;padding:40px;">
+    <div style="width:64px;height:64px;margin:0 auto 20px;border-radius:16px;background:linear-gradient(135deg,#c084fc,#7c3aed);display:flex;align-items:center;justify-content:center;font-size:28px;font-weight:bold;color:#fff;box-shadow:0 10px 30px rgba(124,58,237,0.4);">H</div>
+    <h2 style="margin:0 0 8px;font-size:24px;">로그인 완료!</h2>
+    <p style="opacity:0.7;font-size:14px;margin:0;">VS Code로 돌아가주세요. 이 창은 닫으셔도 됩니다.</p>
+  </div>
+  <script>setTimeout(function(){window.close()}, 2000)</script>
+</body></html>`);
 
-          this.stopCallbackServer();
-          onApiKey(apiKey);
+          // 응답 완료 후 콜백 실행 (서버는 조금 더 유지)
+          res.on("finish", () => {
+            setTimeout(() => onApiKey(apiKey), 100);
+          });
         } else {
-          res.writeHead(400, { "Content-Type": "text/plain" });
-          res.end("Missing api_key parameter");
+          res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
+          res.end("api_key 파라미터가 없습니다");
         }
       });
 
-      this._callbackServer.listen(0, "127.0.0.1", () => {
-        const addr = this._callbackServer!.address() as { port: number };
-        resolve(addr.port);
+      server.on("error", (err) => {
+        reject(err);
       });
 
-      this._callbackServer.on("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address() as { port: number };
+        this._callbackServer = server;
+        resolve(addr.port);
+      });
     });
   }
 
