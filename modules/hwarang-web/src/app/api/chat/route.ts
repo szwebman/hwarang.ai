@@ -16,6 +16,7 @@
 import { NextRequest } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/db";
+import crypto from "crypto";
 import { applyFullAlignment } from "@/lib/alignment";
 import { detectDomain } from "@/lib/alignment/tacs";
 import { applyOptimization } from "@/lib/optimization";
@@ -26,14 +27,36 @@ import { selectModel } from "@/lib/innovation/hntl";
 import { hybridServing } from "@/lib/serving/hybrid-serving";
 import { calculateResponseWeight, enrichResponseWithWeight, buildResponseWeightMeta } from "@/lib/serving/response-weight";
 
-export async function POST(request: NextRequest) {
-  // ─── 1. 인증 ────────────────────────────────────────
+async function resolveUserId(request: NextRequest): Promise<string | null> {
+  // Bearer API 키 (VS Code 확장팩 등)
+  const authHeader = request.headers.get("authorization");
+  if (authHeader?.startsWith("Bearer ")) {
+    const rawKey = authHeader.slice(7).trim();
+    if (rawKey) {
+      const keyHash = crypto.createHash("sha256").update(rawKey).digest("hex");
+      const apiKey = await prisma.apiKey.findFirst({
+        where: { keyHash, isActive: true },
+        select: { userId: true, id: true },
+      });
+      if (apiKey) {
+        prisma.apiKey
+          .update({ where: { id: apiKey.id }, data: { lastUsedAt: new Date() } })
+          .catch(() => {});
+        return apiKey.userId;
+      }
+    }
+  }
+  // NextAuth 세션
   const session = await auth();
-  if (!session?.user?.id) {
+  return session?.user?.id || null;
+}
+
+export async function POST(request: NextRequest) {
+  // ─── 1. 인증 (세션 또는 API 키) ────────────────────────
+  const userId = await resolveUserId(request);
+  if (!userId) {
     return Response.json({ error: "로그인이 필요합니다" }, { status: 401 });
   }
-
-  const userId = session.user.id;
   let body = await request.json();
 
   // ─── 2. 유저 먼저 로드 (플랜 필요) ──────────────────

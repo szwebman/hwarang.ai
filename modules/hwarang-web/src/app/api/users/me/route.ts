@@ -1,19 +1,49 @@
 /**
  * 현재 사용자 정보 API
  * GET /api/users/me - 내 정보 + 토큰 잔액 + 플랜
+ *
+ * 인증 방법 (둘 중 하나):
+ * 1. NextAuth 세션 쿠키 (웹 브라우저)
+ * 2. Bearer API 키 헤더: Authorization: Bearer hk-xxx (VS Code 확장팩 등)
  */
 
+import { NextRequest } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/db";
+import crypto from "crypto";
 
-export async function GET() {
-  const session = await auth();
-
-  if (!session?.user?.id) {
-    return Response.json({ error: "로그인이 필요합니다" }, { status: 401 });
+async function resolveUserId(request: NextRequest): Promise<string | null> {
+  // 1. Bearer API 키 확인
+  const authHeader = request.headers.get("authorization");
+  if (authHeader?.startsWith("Bearer ")) {
+    const rawKey = authHeader.slice(7).trim();
+    if (rawKey) {
+      const keyHash = crypto.createHash("sha256").update(rawKey).digest("hex");
+      const apiKey = await prisma.apiKey.findFirst({
+        where: { keyHash, isActive: true },
+        select: { userId: true, id: true },
+      });
+      if (apiKey) {
+        // 사용 기록 업데이트 (비동기, fire-and-forget)
+        prisma.apiKey
+          .update({ where: { id: apiKey.id }, data: { lastUsedAt: new Date() } })
+          .catch(() => {});
+        return apiKey.userId;
+      }
+    }
   }
 
-  const userId = session.user.id;
+  // 2. NextAuth 세션
+  const session = await auth();
+  return session?.user?.id || null;
+}
+
+export async function GET(request: NextRequest) {
+  const userId = await resolveUserId(request);
+
+  if (!userId) {
+    return Response.json({ error: "로그인이 필요합니다" }, { status: 401 });
+  }
 
   try {
     const user = await prisma.user.findUnique({
@@ -56,12 +86,14 @@ export async function GET() {
       image: user.image,
       role: user.role,
       plan: user.plan,
-      tokens: user.tokenBalance ? {
-        balance: user.tokenBalance.balance,
-        dailyUsed: user.tokenBalance.dailyUsed,
-        dailyLimit: user.tokenBalance.dailyLimit,
-        totalUsed: user.tokenBalance.totalUsed,
-      } : null,
+      tokens: user.tokenBalance
+        ? {
+            balance: user.tokenBalance.balance,
+            dailyUsed: user.tokenBalance.dailyUsed,
+            dailyLimit: user.tokenBalance.dailyLimit,
+            totalUsed: user.tokenBalance.totalUsed,
+          }
+        : null,
       apiKeys: user.apiKeys,
       stats: {
         conversations: user._count.conversations,

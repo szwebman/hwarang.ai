@@ -146,6 +146,13 @@ export class AuthManager {
       // 기존 서버가 있으면 먼저 정리
       this.stopCallbackServer();
 
+      let handled = false;
+      const handleOnce = (key: string) => {
+        if (handled) return;
+        handled = true;
+        onApiKey(key);
+      };
+
       const server = http.createServer((req, res) => {
         // CORS 허용 (hwarang.ai에서 리다이렉트 시)
         res.setHeader("Access-Control-Allow-Origin", "*");
@@ -171,6 +178,9 @@ export class AuthManager {
           url.searchParams.get("api_key") || url.searchParams.get("token");
 
         if (apiKey) {
+          // 먼저 콜백 실행 (즉시 처리, 중복 호출 방지)
+          handleOnce(apiKey);
+
           res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
           res.end(`<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"><title>로그인 완료</title></head><body style="font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;background:linear-gradient(135deg,#0f172a 0%,#1e1b4b 50%,#312e81 100%);color:#fff;margin:0;">
   <div style="text-align:center;padding:40px;">
@@ -180,11 +190,6 @@ export class AuthManager {
   </div>
   <script>setTimeout(function(){window.close()}, 2000)</script>
 </body></html>`);
-
-          // 응답 완료 후 콜백 실행 (서버는 조금 더 유지)
-          res.on("finish", () => {
-            setTimeout(() => onApiKey(apiKey), 100);
-          });
         } else {
           res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
           res.end("api_key 파라미터가 없습니다");
