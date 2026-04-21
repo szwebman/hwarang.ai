@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 
 interface MessageInputProps {
-  onSend: (message: string) => void;
+  onSend: (message: string, files?: File[]) => void;
   disabled?: boolean;
   placeholder?: string;
 }
@@ -11,20 +11,41 @@ interface MessageInputProps {
 export function MessageInput({ onSend, disabled, placeholder }: MessageInputProps) {
   const [input, setInput] = useState("");
   const [focused, setFocused] = useState(false);
+  const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleSend = () => {
     const trimmed = input.trim();
-    if (!trimmed || disabled) return;
-    onSend(trimmed);
+    if (!trimmed && attachedFiles.length === 0) return;
+    if (disabled) return;
+    onSend(trimmed, attachedFiles.length > 0 ? attachedFiles : undefined);
     setInput("");
+    setAttachedFiles([]);
 
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
 
-    // 전송 후 포커스 유지
     setTimeout(() => textareaRef.current?.focus(), 0);
+  };
+
+  const handleFileSelect = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length > 0) {
+      setAttachedFiles((prev) => [...prev, ...files]);
+    }
+  };
+
+  const removeFile = (index: number) => {
+    setAttachedFiles((prev) => prev.filter((_, i) => i !== index));
   };
 
   // 응답 완료 시 (disabled가 false로 바뀌면) 자동 포커스
@@ -49,30 +70,68 @@ export function MessageInput({ onSend, disabled, placeholder }: MessageInputProp
     }
   };
 
-  const hasContent = input.trim().length > 0;
+  const hasContent = input.trim().length > 0 || attachedFiles.length > 0;
 
   return (
-    <div
-      className="flex items-end gap-3 rounded-2xl border px-4 py-3 transition-all duration-200"
-      style={{
-        borderColor: focused ? "var(--primary)" : "var(--border)",
-        background: "var(--background)",
-        boxShadow: focused ? `0 0 0 3px color-mix(in srgb, var(--primary) 15%, transparent)` : "var(--shadow-sm)",
-      }}
-    >
-      {/* Attachment button */}
-      <button
-        className="p-1.5 rounded-lg hover:bg-[var(--muted)] transition-colors shrink-0 mb-0.5"
-        style={{ color: "var(--muted-foreground)" }}
-        title="파일 첨부"
-      >
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-          <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-        </svg>
-      </button>
+    <div className="flex flex-col gap-2">
+      {/* 첨부 파일 미리보기 */}
+      {attachedFiles.length > 0 && (
+        <div className="flex flex-wrap gap-2 px-2">
+          {attachedFiles.map((file, i) => (
+            <div
+              key={i}
+              className="flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs"
+              style={{ background: "var(--muted)", borderColor: "var(--border)" }}
+            >
+              <span className="max-w-[150px] truncate">{file.name}</span>
+              <span style={{ color: "var(--muted-foreground)" }}>
+                ({(file.size / 1024).toFixed(0)}KB)
+              </span>
+              <button
+                onClick={() => removeFile(i)}
+                className="ml-1 hover:text-red-500 transition-colors"
+                style={{ color: "var(--muted-foreground)" }}
+              >
+                &times;
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
-      {/* Textarea */}
-      <textarea
+      <div
+        className="flex items-end gap-3 rounded-2xl border px-4 py-3 transition-all duration-200"
+        style={{
+          borderColor: focused ? "var(--primary)" : "var(--border)",
+          background: "var(--background)",
+          boxShadow: focused ? `0 0 0 3px color-mix(in srgb, var(--primary) 15%, transparent)` : "var(--shadow-sm)",
+        }}
+      >
+        {/* 숨겨진 파일 input */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          accept="image/*,.pdf,.txt,.md,.py,.js,.ts,.json,.csv,.xlsx,.doc,.docx"
+          onChange={handleFileChange}
+          className="hidden"
+        />
+
+        {/* Attachment button */}
+        <button
+          onClick={handleFileSelect}
+          disabled={disabled}
+          className="p-1.5 rounded-lg hover:bg-[var(--muted)] transition-colors shrink-0 mb-0.5 disabled:opacity-30"
+          style={{ color: "var(--muted-foreground)" }}
+          title="파일 첨부"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+          </svg>
+        </button>
+
+        {/* Textarea */}
+        <textarea
         ref={textareaRef}
         value={input}
         onChange={(e) => setInput(e.target.value)}
@@ -111,6 +170,7 @@ export function MessageInput({ onSend, disabled, placeholder }: MessageInputProp
           <path d="m12 5 7 7-7 7" />
         </svg>
       </button>
+      </div>
     </div>
   );
 }

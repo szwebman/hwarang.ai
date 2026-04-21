@@ -2,6 +2,8 @@
 
 import type { Message } from "@/types/chat";
 import { MarkdownRenderer } from "./markdown-renderer";
+import { CodePreview, extractHtmlBlocks } from "./code-preview";
+import { useMemo } from "react";
 
 interface MessageBubbleProps {
   message: Message;
@@ -9,6 +11,12 @@ interface MessageBubbleProps {
 
 export function MessageBubble({ message }: MessageBubbleProps) {
   const isUser = message.role === "user";
+
+  // HTML 코드 블록 감지 (어시스턴트 메시지만)
+  const { text, htmlBlocks } = useMemo(() => {
+    if (isUser) return { text: message.content, htmlBlocks: [] };
+    return extractHtmlBlocks(message.content);
+  }, [message.content, isUser]);
 
   return (
     <div className={`flex gap-3 py-4 ${isUser ? "justify-end" : ""}`}>
@@ -21,8 +29,8 @@ export function MessageBubble({ message }: MessageBubbleProps) {
 
       {/* Message content */}
       <div
-        className={`max-w-[80%] rounded-2xl px-4 py-3 shadow-sm ${
-          isUser ? "rounded-br-lg" : "rounded-bl-lg"
+        className={`rounded-2xl px-4 py-3 shadow-sm ${
+          isUser ? "max-w-[80%] rounded-br-lg" : "max-w-[85%] rounded-bl-lg"
         }`}
         style={{
           background: isUser ? "var(--message-user-bg)" : "var(--message-assistant-bg)",
@@ -32,9 +40,16 @@ export function MessageBubble({ message }: MessageBubbleProps) {
         {isUser ? (
           <p className="text-sm whitespace-pre-wrap leading-relaxed">{message.content}</p>
         ) : (
-          <div className="text-sm prose prose-sm dark:prose-invert max-w-none">
-            <MarkdownRenderer content={message.content} />
-          </div>
+          <>
+            <div className="text-sm prose prose-sm dark:prose-invert max-w-none">
+              <MarkdownRenderer content={text} />
+            </div>
+
+            {/* HTML 코드 미리보기 (Artifacts 스타일) */}
+            {htmlBlocks.map((html, i) => (
+              <CodePreview key={i} code={html} language="HTML" />
+            ))}
+          </>
         )}
       </div>
 
