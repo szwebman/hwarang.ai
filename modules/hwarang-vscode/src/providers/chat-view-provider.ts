@@ -842,7 +842,7 @@ function addToolCall(fn, summary) {
   d.className = 'tool-block';
   const short = summary.length > 80 ? summary.slice(0, 80) + '...' : summary;
   d.innerHTML =
-    '<div class="tool-head" onclick="this.parentElement.classList.toggle(\'open\')">' +
+    '<div class="tool-head" onclick="this.parentElement.classList.toggle(\\\'open\\\')">' +
       '<span class="tool-arrow">&#9654;</span>' +
       '<span class="tool-fn">' + esc(fn) + '</span>' +
       '<span class="tool-summary">' + esc(short) + '</span>' +
