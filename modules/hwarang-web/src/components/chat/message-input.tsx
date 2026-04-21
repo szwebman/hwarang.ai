@@ -12,13 +12,24 @@ export function MessageInput({ onSend, disabled, placeholder }: MessageInputProp
   const [input, setInput] = useState("");
   const [focused, setFocused] = useState(false);
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
+  const [isComposing, setIsComposing] = useState(false);
+  const lastSendAtRef = useRef(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleSend = () => {
+    // IME 조합 중이면 전송 안 함 (한글 중복 전송 방지)
+    if (isComposing) return;
+
     const trimmed = input.trim();
     if (!trimmed && attachedFiles.length === 0) return;
     if (disabled) return;
+
+    // 짧은 시간 내 중복 전송 방지
+    const now = Date.now();
+    if (now - lastSendAtRef.current < 200) return;
+    lastSendAtRef.current = now;
+
     onSend(trimmed, attachedFiles.length > 0 ? attachedFiles : undefined);
     setInput("");
     setAttachedFiles([]);
@@ -56,7 +67,14 @@ export function MessageInput({ onSend, disabled, placeholder }: MessageInputProp
   }, [disabled]);
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey) {
+    // IME 조합 중인 Enter 무시 (한글 입력 중복 방지)
+    if (
+      e.key === "Enter" &&
+      !e.shiftKey &&
+      !e.nativeEvent.isComposing &&
+      !isComposing &&
+      e.keyCode !== 229
+    ) {
       e.preventDefault();
       handleSend();
     }
@@ -100,7 +118,7 @@ export function MessageInput({ onSend, disabled, placeholder }: MessageInputProp
       )}
 
       <div
-        className="flex items-end gap-3 rounded-2xl border px-4 py-3 transition-all duration-200"
+        className="flex items-center gap-3 rounded-2xl border px-4 py-2 transition-all duration-200"
         style={{
           borderColor: focused ? "var(--primary)" : "var(--border)",
           background: "var(--background)",
@@ -121,8 +139,8 @@ export function MessageInput({ onSend, disabled, placeholder }: MessageInputProp
         <button
           onClick={handleFileSelect}
           disabled={disabled}
-          className="p-1.5 rounded-lg hover:bg-[var(--muted)] transition-colors shrink-0 mb-0.5 disabled:opacity-30"
-          style={{ color: "var(--muted-foreground)" }}
+          className="p-1.5 rounded-lg hover:bg-[var(--muted)] transition-colors shrink-0 self-end disabled:opacity-30"
+          style={{ color: "var(--muted-foreground)", marginBottom: "2px" }}
           title="파일 첨부"
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -132,28 +150,39 @@ export function MessageInput({ onSend, disabled, placeholder }: MessageInputProp
 
         {/* Textarea */}
         <textarea
-        ref={textareaRef}
-        value={input}
-        onChange={(e) => setInput(e.target.value)}
-        onKeyDown={handleKeyDown}
-        onInput={handleInput}
-        onFocus={() => setFocused(true)}
-        onBlur={() => setFocused(false)}
-        placeholder={placeholder || "메시지를 입력하세요..."}
-        disabled={disabled}
-        rows={1}
-        className="flex-1 resize-none bg-transparent outline-none text-sm leading-relaxed placeholder:text-[var(--muted-foreground)]"
-        style={{ maxHeight: "200px" }}
-      />
+          ref={textareaRef}
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={handleKeyDown}
+          onInput={handleInput}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          onCompositionStart={() => setIsComposing(true)}
+          onCompositionEnd={() => setIsComposing(false)}
+          placeholder={placeholder || "메시지를 입력하세요..."}
+          disabled={disabled}
+          rows={1}
+          className="flex-1 resize-none bg-transparent outline-none text-sm placeholder:text-[var(--muted-foreground)]"
+          style={{
+            maxHeight: "200px",
+            lineHeight: "24px",
+            padding: "6px 0",
+            margin: 0,
+            minHeight: "24px",
+            display: "block",
+            verticalAlign: "middle",
+          }}
+        />
 
       {/* Send button */}
       <button
         onClick={handleSend}
         disabled={disabled || !hasContent}
-        className="p-2 rounded-xl transition-all duration-200 disabled:opacity-30 disabled:scale-100 hover:scale-105 active:scale-95 shrink-0 mb-0.5"
+        className="p-2 rounded-xl transition-all duration-200 disabled:opacity-30 disabled:scale-100 hover:scale-105 active:scale-95 shrink-0 self-end"
         style={{
           background: hasContent ? "var(--primary)" : "var(--muted)",
           color: hasContent ? "var(--primary-foreground)" : "var(--muted-foreground)",
+          marginBottom: "2px",
         }}
       >
         <svg
