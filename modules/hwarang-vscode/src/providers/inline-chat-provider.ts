@@ -1,7 +1,6 @@
 /**
- * Inline Chat - Ctrl+I to chat directly in the editor.
- *
- * Shows a diff of proposed changes and lets the user accept/reject.
+ * 인라인 채팅 - Ctrl+I로 편집기에서 직접 AI ��화
+ * 제안된 변경사항을 diff로 보여주고 수락/거부
  */
 
 import * as vscode from "vscode";
@@ -21,16 +20,13 @@ export class InlineChatProvider {
     const language = document.languageId;
     const fileName = vscode.workspace.asRelativePath(document.uri);
 
-    // Build the full prompt with context
     let fullPrompt: string;
     if (selectedText) {
       fullPrompt =
-        `The user selected the following code in ${fileName} (${language}) and asks: "${prompt}"\n\n` +
-        `Selected code:\n\`\`\`${language}\n${selectedText}\n\`\`\`\n\n` +
-        `Please provide the replacement code ONLY (no explanation, no markdown fences). ` +
-        `The output will directly replace the selected code.`;
+        `사용자가 ${fileName} (${language}) 파일에서 다음 코드를 선택하고 요청합니다: "${prompt}"\n\n` +
+        `선택된 코드:\n\`\`\`${language}\n${selectedText}\n\`\`\`\n\n` +
+        `교체할 코드만 출력하세요 (설명 없이, 마크다운 펜스 없이). 출력이 선택 영역을 직접 대체합니다.`;
     } else {
-      // No selection: generate code at cursor position
       const line = selection.active.line;
       const context = document.getText(
         new vscode.Range(
@@ -41,19 +37,18 @@ export class InlineChatProvider {
         )
       );
       fullPrompt =
-        `The user is at line ${line + 1} in ${fileName} (${language}) and asks: "${prompt}"\n\n` +
-        `Surrounding code:\n\`\`\`${language}\n${context}\n\`\`\`\n\n` +
-        `Please provide the code to insert at the cursor position ONLY (no explanation, no markdown fences).`;
+        `사용자가 ${fileName} (${language}) 파일의 ${line + 1}번째 줄에서 요청합니다: "${prompt}"\n\n` +
+        `주변 코드:\n\`\`\`${language}\n${context}\n\`\`\`\n\n` +
+        `커서 위치에 삽입할 코드만 출력하세요 (설명 없이, 마크다운 펜스 없이).`;
     }
 
-    // Show progress
     await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
-        title: "Hwarang AI: Generating...",
+        title: "화랑 AI: 코드 생성 중...",
         cancellable: true,
       },
-      async (progress, token) => {
+      async (_progress, token) => {
         let response = "";
 
         for await (const chunk of this.agentLoop.streamResponse(fullPrompt)) {
@@ -63,7 +58,7 @@ export class InlineChatProvider {
 
         if (!response.trim()) return;
 
-        // Strip markdown code fences if present
+        // 마크다운 코드 펜스 제거
         let code = response.trim();
         const fenceMatch = code.match(/^```\w*\n([\s\S]*?)```$/);
         if (fenceMatch) {
@@ -71,21 +66,19 @@ export class InlineChatProvider {
         }
 
         if (selectedText) {
-          // Replace selection: show diff
           const edit = new vscode.WorkspaceEdit();
           edit.replace(document.uri, selection, code);
 
           const confirm = await vscode.window.showInformationMessage(
-            "Apply Hwarang's suggestion?",
-            "Apply",
-            "Show Diff",
-            "Cancel"
+            "화랑의 제안을 적용할까요?",
+            "적용",
+            "비교 보기",
+            "취소"
           );
 
-          if (confirm === "Apply") {
+          if (confirm === "적용") {
             await vscode.workspace.applyEdit(edit);
-          } else if (confirm === "Show Diff") {
-            // Create a temp document with the proposed change
+          } else if (confirm === "비교 보기") {
             const fullText = document.getText();
             const newText =
               fullText.substring(0, document.offsetAt(selection.start)) +
@@ -101,30 +94,29 @@ export class InlineChatProvider {
               "vscode.diff",
               document.uri,
               proposedDoc.uri,
-              `${fileName}: Current ↔ Hwarang's Suggestion`
+              `${fileName}: 현재 ↔ 화랑 제안`
             );
 
             const apply = await vscode.window.showInformationMessage(
-              "Apply this change?",
-              "Apply",
-              "Cancel"
+              "이 변경사항을 적용할까요?",
+              "적용",
+              "취소"
             );
-            if (apply === "Apply") {
+            if (apply === "적용") {
               await vscode.workspace.applyEdit(edit);
             }
           }
         } else {
-          // Insert at cursor
           const edit = new vscode.WorkspaceEdit();
           edit.insert(document.uri, selection.active, code);
 
           const confirm = await vscode.window.showInformationMessage(
-            "Insert Hwarang's code at cursor?",
-            "Insert",
-            "Cancel"
+            "화랑이 생성한 코드를 삽입할까요?",
+            "삽입",
+            "취소"
           );
 
-          if (confirm === "Insert") {
+          if (confirm === "삽입") {
             await vscode.workspace.applyEdit(edit);
           }
         }

@@ -1,14 +1,17 @@
 /**
- * 인증 + 토큰 관리 - Claude Code와 동일한 경험
+ * 인증 관리 - Claude Code 방식 브라우저 OAuth 로그인
  *
- * 기능:
- * - API 키 또는 이메일/비밀번호 로그인
- * - 토큰 잔액 실시간 표시 (상태바)
- * - 토큰 소진 시 경고
- * - 로그인 상태 영구 저장 (SecretStorage)
+ * 로그인 흐름:
+ * 1. 사용자가 "로그인" 클릭
+ * 2. 브라우저에서 hwarang.ai/auth/vscode 열림
+ * 3. 사이트에서 로그인 완료 → 콜백으로 API 키 전달
+ * 4. VS Code가 API 키 수신 → SecretStorage 저장
+ *
+ * 대안: API 키 직접 입력
  */
 
 import * as vscode from "vscode";
+import * as http from "http";
 
 export interface UserInfo {
   id: string;
@@ -34,27 +37,27 @@ export class AuthManager {
   private _apiKey: string | null = null;
   private _user: UserInfo | null = null;
   private _refreshInterval: NodeJS.Timer | null = null;
+  private _callbackServer: http.Server | null = null;
 
-  // 이벤트: 로그인/로그아웃/토큰 변경 시
   private _onAuthChanged = new vscode.EventEmitter<UserInfo | null>();
   readonly onAuthChanged = this._onAuthChanged.event;
 
   constructor(context: vscode.ExtensionContext) {
     this.context = context;
 
-    // 상태바: 토큰 잔액 표시
     this.statusBarItem = vscode.window.createStatusBarItem(
-      vscode.StatusBarAlignment.Right, 99
+      vscode.StatusBarAlignment.Right,
+      99
     );
     this.statusBarItem.command = "hwarang.showTokenStatus";
     context.subscriptions.push(this.statusBarItem);
   }
 
-  /**
-   * 초기화: 저장된 API 키로 자동 로그인
-   */
+  // ============================================================
+  // 초기화
+  // ============================================================
+
   async initialize(): Promise<boolean> {
-    // SecretStorage에서 API 키 복구
     const savedKey = await this.context.secrets.get("hwarang-api-key");
     if (savedKey) {
       this._apiKey = savedKey;
@@ -63,7 +66,6 @@ export class AuthManager {
         this.startTokenRefresh();
         return true;
       }
-      // 키가 만료됨
       await this.context.secrets.delete("hwarang-api-key");
       this._apiKey = null;
     }
@@ -72,34 +74,115 @@ export class AuthManager {
     return false;
   }
 
-  /**
-   * API 키로 로그인
-   */
+  // ============================================================
+  // 로그인 방법 1: 브라우저 OAuth (Claude Code 방식)
+  // ============================================================
+
+  async loginWithBrowser(): Promise<boolean> {
+    return new Promise(async (resolve) => {
+      // 로컬 콜백 서버 시작
+      const port = await this.startCallbackServer((apiKey) => {
+        this.loginWithApiKey(apiKey).then(resolve);
+      });
+
+      // 브라우저에서 인증 페이지 열기
+      const apiUrl = this.getApiUrl();
+      const authUrl = `${apiUrl}/auth/vscode?callback_port=${port}&editor=vscode`;
+
+      vscode.env.openExternal(vscode.Uri.parse(authUrl));
+
+      vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: "화랑 AI: 브라우저에서 로그인하는 중...",
+          cancellable: true,
+        },
+        async (_progress, token) => {
+          token.onCancellationRequested(() => {
+            this.stopCallbackServer();
+            resolve(false);
+          });
+
+          // 60초 타임아웃
+          await new Promise((r) => setTimeout(r, 60000));
+          this.stopCallbackServer();
+          resolve(false);
+        }
+      );
+    });
+  }
+
+  private startCallbackServer(
+    onApiKey: (key: string) => void
+  ): Promise<number> {
+    return new Promise((resolve, reject) => {
+      this._callbackServer = http.createServer((req, res) => {
+        const url = new URL(req.url || "", "http://localhost");
+        const apiKey = url.searchParams.get("api_key") || url.searchParams.get("token");
+
+        if (apiKey) {
+          // 성공 페이지
+          res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+          res.end(`<!DOCTYPE html><html><body style="font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;background:#1a1a2e;color:#fff;">
+            <div style="text-align:center;">
+              <div style="width:64px;height:64px;margin:0 auto 16px;border-radius:16px;background:linear-gradient(135deg,#6366f1,#8b5cf6);display:flex;align-items:center;justify-content:center;font-size:28px;font-weight:bold;color:#fff;">H</div>
+              <h2>로그인 완료!</h2>
+              <p style="opacity:0.7;">VS Code로 돌아가세요. 이 창은 닫아도 됩니다.</p>
+            </div>
+          </body></html>`);
+
+          this.stopCallbackServer();
+          onApiKey(apiKey);
+        } else {
+          res.writeHead(400, { "Content-Type": "text/plain" });
+          res.end("Missing api_key parameter");
+        }
+      });
+
+      this._callbackServer.listen(0, "127.0.0.1", () => {
+        const addr = this._callbackServer!.address() as { port: number };
+        resolve(addr.port);
+      });
+
+      this._callbackServer.on("error", reject);
+    });
+  }
+
+  private stopCallbackServer() {
+    if (this._callbackServer) {
+      this._callbackServer.close();
+      this._callbackServer = null;
+    }
+  }
+
+  // ============================================================
+  // 로그인 방법 2: API 키 직접 입력
+  // ============================================================
+
   async loginWithApiKey(apiKey: string): Promise<boolean> {
     this._apiKey = apiKey;
 
     const success = await this.fetchUserInfo();
     if (success) {
-      // 키 영구 저장
       await this.context.secrets.store("hwarang-api-key", apiKey);
       this.startTokenRefresh();
       vscode.window.showInformationMessage(
-        `Hwarang AI: ${this._user!.name}님으로 로그인했습니다 (${this._user!.plan?.displayName || "Free"})`
+        `화랑 AI: ${this._user!.name}님, 환영합니다! (${this._user!.plan?.displayName || "무료"} 플랜)`
       );
       return true;
     }
 
     this._apiKey = null;
-    vscode.window.showErrorMessage("Hwarang AI: 유효하지 않은 API 키입니다");
+    vscode.window.showErrorMessage("화랑 AI: 유효하지 않은 API 키입니다");
     return false;
   }
 
-  /**
-   * 이메일/비밀번호로 로그인 → API 키 발급
-   */
+  // ============================================================
+  // 로그��� 방법 3: 이메일/비밀번호
+  // ============================================================
+
   async loginWithEmail(email: string, password: string): Promise<boolean> {
     const apiUrl = this.getApiUrl();
-
     try {
       const resp = await fetch(`${apiUrl}/v1/auth/login`, {
         method: "POST",
@@ -109,21 +192,22 @@ export class AuthManager {
 
       if (!resp.ok) {
         const error = await resp.text();
-        vscode.window.showErrorMessage(`로그인 실패: ${error}`);
+        vscode.window.showErrorMessage(`로��인 실패: ${error}`);
         return false;
       }
 
-      const data = await resp.json() as { api_key: string };
+      const data = (await resp.json()) as { api_key: string };
       return await this.loginWithApiKey(data.api_key);
     } catch (e: any) {
-      vscode.window.showErrorMessage(`연결 실패: ${e.message}`);
+      vscode.window.showErrorMessage(`서버 연결 실패: ${e.message}`);
       return false;
     }
   }
 
-  /**
-   * 로그아웃
-   */
+  // ============================================================
+  // 로그아웃
+  // ============================================================
+
   async logout(): Promise<void> {
     this._apiKey = null;
     this._user = null;
@@ -131,25 +215,24 @@ export class AuthManager {
     this.stopTokenRefresh();
     this.updateStatusBar();
     this._onAuthChanged.fire(null);
-    vscode.window.showInformationMessage("Hwarang AI: 로그아웃되었습니다");
+    vscode.window.showInformationMessage("화랑 AI: 로그아웃 완료");
   }
 
-  /**
-   * 서버에서 사용자 정보 + 토큰 잔액 조회
-   */
+  // ============================================================
+  // 사용자 정보 조회
+  // ============================================================
+
   async fetchUserInfo(): Promise<boolean> {
     if (!this._apiKey) return false;
-
     const apiUrl = this.getApiUrl();
 
     try {
       const resp = await fetch(`${apiUrl}/v1/users/me`, {
-        headers: { "Authorization": `Bearer ${this._apiKey}` },
+        headers: { Authorization: `Bearer ${this._apiKey}` },
       });
-
       if (!resp.ok) return false;
 
-      this._user = await resp.json() as UserInfo;
+      this._user = (await resp.json()) as UserInfo;
       this.updateStatusBar();
       this._onAuthChanged.fire(this._user);
       return true;
@@ -158,50 +241,40 @@ export class AuthManager {
     }
   }
 
-  /**
-   * 토큰 사용 후 잔액 갱신 (매 요청 후)
-   */
   async refreshTokenBalance(): Promise<void> {
     await this.fetchUserInfo();
   }
 
-  /**
-   * 요청 전 토큰 체크
-   */
   canMakeRequest(estimatedTokens: number = 500): { allowed: boolean; reason?: string } {
     if (!this._user) {
-      return { allowed: false, reason: "로그인이 필요합니다" };
+      return { allowed: false, reason: "로그인이 필요합니��" };
     }
-
     const tokens = this._user.tokens;
     if (!tokens) {
-      return { allowed: false, reason: "토큰 정보를 불러올 수 없습니다" };
+      return { allowed: false, reason: "토��� 정보를 불러올 수 없습니다" };
     }
-
-    // 잔액 체크
     if (tokens.balance < estimatedTokens) {
       return {
         allowed: false,
-        reason: `토큰 부족: ${tokens.balance.toLocaleString()}개 남음 (예상 ${estimatedTokens}개 필요)`,
+        reason: `토큰 부족: ${tokens.balance.toLocaleString()}�� 남음`,
       };
     }
-
-    // 일일 한도 체크
     if (tokens.dailyUsed + estimatedTokens > tokens.dailyLimit) {
       return {
         allowed: false,
-        reason: `오늘 한도 초과: ${tokens.dailyUsed.toLocaleString()}/${tokens.dailyLimit.toLocaleString()} 사용 (자정에 리셋)`,
+        reason: `일일 한도 초과 (자정에 리셋)`,
       };
     }
-
     return { allowed: true };
   }
 
-  // ---- 상태바 ----
+  // ============================================================
+  // 상태바
+  // ============================================================
 
   private updateStatusBar(): void {
     if (!this._user || !this._user.tokens) {
-      this.statusBarItem.text = "$(key) Hwarang: 로그인";
+      this.statusBarItem.text = "$(key) 화랑 AI: 로그인";
       this.statusBarItem.tooltip = "클릭하여 로그인";
       this.statusBarItem.backgroundColor = undefined;
       this.statusBarItem.show();
@@ -210,48 +283,44 @@ export class AuthManager {
 
     const tokens = this._user.tokens;
     const balance = tokens.balance;
-    const dailyUsed = tokens.dailyUsed;
-    const dailyLimit = tokens.dailyLimit;
-    const dailyPercent = Math.round((dailyUsed / Math.max(dailyLimit, 1)) * 100);
-
-    // 토큰 포맷
-    const formatTokens = (n: number) => {
+    const fmt = (n: number) => {
       if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
       if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`;
       return n.toString();
     };
 
-    // 잔액에 따라 색상 변경
     if (balance < 1000) {
-      this.statusBarItem.text = `$(warning) ${formatTokens(balance)} 토큰`;
-      this.statusBarItem.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
+      this.statusBarItem.text = `$(warning) ${fmt(balance)} ��큰`;
+      this.statusBarItem.backgroundColor = new vscode.ThemeColor(
+        "statusBarItem.warningBackground"
+      );
     } else {
-      this.statusBarItem.text = `$(pulse) ${formatTokens(balance)} 토큰`;
+      this.statusBarItem.text = `$(pulse) ${fmt(balance)} 토큰`;
       this.statusBarItem.backgroundColor = undefined;
     }
 
+    const dailyPct = Math.round(
+      (tokens.dailyUsed / Math.max(tokens.dailyLimit, 1)) * 100
+    );
     this.statusBarItem.tooltip = [
-      `Hwarang AI - ${this._user.name}`,
-      `플랜: ${this._user.plan?.displayName || "Free"}`,
+      `화랑 AI - ${this._user.name}`,
+      `플랜: ${this._user.plan?.displayName || "무료"}`,
       ``,
-      `잔여 토큰: ${balance.toLocaleString()}`,
-      `오늘 사용: ${dailyUsed.toLocaleString()} / ${dailyLimit.toLocaleString()} (${dailyPercent}%)`,
-      `누적 사용: ${tokens.totalUsed.toLocaleString()}`,
-      ``,
-      `클릭하여 상세 보기`,
+      `잔여: ${balance.toLocaleString()} 토큰`,
+      `오늘: ${tokens.dailyUsed.toLocaleString()} / ${tokens.dailyLimit.toLocaleString()} (${dailyPct}%)`,
+      `누적: ${tokens.totalUsed.toLocaleString()}`,
     ].join("\n");
 
     this.statusBarItem.show();
   }
 
-  // ---- 자동 갱신 ----
+  // ============================================================
+  // 자동 갱신
+  // ============================================================
 
   private startTokenRefresh(): void {
     this.stopTokenRefresh();
-    // 60초마다 토큰 잔액 갱신
-    this._refreshInterval = setInterval(() => {
-      this.fetchUserInfo();
-    }, 60_000);
+    this._refreshInterval = setInterval(() => this.fetchUserInfo(), 60_000);
   }
 
   private stopTokenRefresh(): void {
@@ -261,19 +330,27 @@ export class AuthManager {
     }
   }
 
-  // ---- Getter ----
+  // ============================================================
+  // Getters
+  // ============================================================
 
-  get isLoggedIn(): boolean { return this._user !== null; }
-  get user(): UserInfo | null { return this._user; }
-  get apiKey(): string | null { return this._apiKey; }
+  get isLoggedIn(): boolean {
+    return this._user !== null;
+  }
+  get user(): UserInfo | null {
+    return this._user;
+  }
+  get apiKey(): string | null {
+    return this._apiKey;
+  }
 
   getAuthHeaders(): Record<string, string> {
     if (!this._apiKey) return {};
-    return { "Authorization": `Bearer ${this._apiKey}` };
+    return { Authorization: `Bearer ${this._apiKey}` };
   }
 
   private getApiUrl(): string {
     const config = vscode.workspace.getConfiguration("hwarang");
-    return config.get("apiUrl", "http://localhost:8000");
+    return config.get("apiUrl", "https://hwarang.ai");
   }
 }

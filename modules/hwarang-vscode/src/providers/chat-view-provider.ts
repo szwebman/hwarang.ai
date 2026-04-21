@@ -1,8 +1,13 @@
 /**
- * Chat View Provider - Sidebar webview panel for chat.
+ * Chat View Provider - Claude Code 스타일 사이드바 채팅
  *
- * Manages the webview that displays the chat UI and handles
- * communication between the webview and the extension.
+ * UI 특징:
+ * - 미니멀 다크 디자인 (Claude Code 스타일)
+ * - 터미널 느낌의 깔끔한 레이아웃
+ * - 도구 호출은 접히는 블록으로 표시
+ * - Markdown + 코드 블록 (복사/삽입/적용 버튼)
+ * - 슬래시 명령어 지원
+ * - 전체 한글 UI
  */
 
 import * as vscode from "vscode";
@@ -33,7 +38,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     webviewView.webview.html = this.getWebviewContent();
 
-    // Handle messages from webview
     webviewView.webview.onDidReceiveMessage(async (message) => {
       switch (message.type) {
         case "sendMessage":
@@ -42,22 +46,33 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         case "newChat":
           this.newChat();
           break;
+        case "stopGeneration":
+          this.agentLoop.abort();
+          break;
+        case "insertCode":
+          this.insertCodeToEditor(message.code);
+          break;
+        case "applyDiff":
+          this.applyCodeToFile(message.code, message.language);
+          break;
+        case "copyCode":
+          vscode.env.clipboard.writeText(message.code);
+          vscode.window.showInformationMessage("클립보드에 복사됨");
+          break;
+        case "openFile":
+          this.openFileInEditor(message.path);
+          break;
+        case "slashCommand":
+          await this.handleSlashCommand(message.command, message.args);
+          break;
       }
     });
   }
 
-  /**
-   * Send a message to the chat (from commands).
-   */
   async sendMessage(text: string) {
     if (this.webviewView) {
-      // Show the sidebar
       this.webviewView.show?.(true);
-
-      // Post user message to webview
       this.webviewView.webview.postMessage({ type: "addUserMessage", text });
-
-      // Process with agent
       await this.handleUserMessage(text);
     }
   }
@@ -72,13 +87,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (!webview) return;
 
     try {
-      // Signal start of response
       webview.postMessage({ type: "startResponse" });
 
       for await (const msg of this.agentLoop.run(text)) {
         switch (msg.role) {
           case "assistant":
-            webview.postMessage({ type: "assistantMessage", text: msg.content });
+            webview.postMessage({ type: "assistantChunk", text: msg.content });
             break;
           case "tool_call":
             webview.postMessage({
@@ -99,416 +113,914 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
       webview.postMessage({ type: "endResponse" });
     } catch (e: any) {
-      webview.postMessage({
-        type: "error",
-        text: `Error: ${e.message}`,
-      });
+      webview.postMessage({ type: "error", text: e.message });
     }
   }
 
+  private async handleSlashCommand(command: string, args: string) {
+    const editor = vscode.window.activeTextEditor;
+    const selection = editor?.document.getText(editor.selection) || "";
+    const lang = editor?.document.languageId || "";
+    const file = editor
+      ? vscode.workspace.asRelativePath(editor.document.uri)
+      : "";
+
+    const prompts: Record<string, string> = {
+      explain: "이 코드를 자세히 설명해줘:",
+      fix: "이 코드에서 버그를 찾아서 고쳐줘:",
+      refactor: "이 코드를 더 깔끔하게 리팩토링해줘:",
+      test: "이 코드의 유닛 테스트를 작성해줘:",
+      doc: "이 코드에 문서화 주석을 추가해줘:",
+      review: "이 코드를 리뷰하고 개선점을 제안해줘:",
+    };
+
+    const prompt = prompts[command] || args;
+    let fullPrompt = prompt;
+    if (selection) {
+      fullPrompt += `\n\n파일: ${file}\n언어: ${lang}\n\n\`\`\`${lang}\n${selection}\n\`\`\``;
+    }
+    if (args && prompts[command]) {
+      fullPrompt = `${prompt} ${args}`;
+    }
+
+    await this.sendMessage(fullPrompt);
+  }
+
+  private async insertCodeToEditor(code: string) {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      vscode.window.showWarningMessage("열린 편집기가 없습니다");
+      return;
+    }
+    await editor.edit((edit) => {
+      if (editor.selection.isEmpty) {
+        edit.insert(editor.selection.active, code);
+      } else {
+        edit.replace(editor.selection, code);
+      }
+    });
+  }
+
+  private async applyCodeToFile(code: string, language: string) {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      const doc = await vscode.workspace.openTextDocument({
+        content: code,
+        language,
+      });
+      await vscode.window.showTextDocument(doc);
+      return;
+    }
+    const confirm = await vscode.window.showInformationMessage(
+      "이 코드를 어떻게 적용할까요?",
+      "선택 영역 교체",
+      "커서에 삽입",
+      "새 파일",
+      "취소"
+    );
+    if (confirm === "선택 영역 교체" && !editor.selection.isEmpty) {
+      await editor.edit((edit) => edit.replace(editor.selection, code));
+    } else if (confirm === "커서에 삽입") {
+      await editor.edit((edit) => edit.insert(editor.selection.active, code));
+    } else if (confirm === "새 파일") {
+      const doc = await vscode.workspace.openTextDocument({
+        content: code,
+        language,
+      });
+      await vscode.window.showTextDocument(doc);
+    }
+  }
+
+  private async openFileInEditor(filePath: string) {
+    const folders = vscode.workspace.workspaceFolders;
+    if (!folders?.length) return;
+    const uri = vscode.Uri.joinPath(folders[0].uri, filePath);
+    try {
+      const doc = await vscode.workspace.openTextDocument(uri);
+      await vscode.window.showTextDocument(doc, { preview: true });
+    } catch {
+      vscode.window.showWarningMessage(`파일을 찾을 수 없습니다: ${filePath}`);
+    }
+  }
+
+  // ============================================================
+  // Claude Code 스타일 Webview HTML
+  // ============================================================
+
   private getWebviewContent(): string {
     return /*html*/ `<!DOCTYPE html>
-<html lang="en">
+<html lang="ko">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
+/* ==============================================
+   화랑 AI - Claude Code 스타일 UI
+   ============================================== */
+* { box-sizing: border-box; margin: 0; padding: 0; }
 
-  body {
-    font-family: var(--vscode-font-family);
-    font-size: var(--vscode-font-size);
-    color: var(--vscode-foreground);
-    background: var(--vscode-sideBar-background);
-    display: flex;
-    flex-direction: column;
-    height: 100vh;
-    overflow: hidden;
-  }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-size: 13px;
+  color: var(--vscode-foreground);
+  background: var(--vscode-editor-background);
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+  line-height: 1.55;
+}
 
-  /* Header */
-  .header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 8px 12px;
-    border-bottom: 1px solid var(--vscode-panel-border);
-  }
-  .header h3 {
-    font-size: 12px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    opacity: 0.7;
-  }
-  .header button {
-    background: none;
-    border: none;
-    color: var(--vscode-foreground);
-    cursor: pointer;
-    padding: 4px;
-    border-radius: 4px;
-    font-size: 14px;
-  }
-  .header button:hover {
-    background: var(--vscode-toolbar-hoverBackground);
-  }
+/* === 상단 바 === */
+.topbar {
+  display: flex;
+  align-items: center;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  gap: 10px;
+  flex-shrink: 0;
+}
+.topbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+}
+.brand-icon {
+  width: 20px; height: 20px;
+  border-radius: 5px;
+  background: linear-gradient(135deg, #c084fc, #7c3aed);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700; color: #fff;
+}
+.brand-name {
+  font-size: 13px;
+  font-weight: 600;
+  opacity: 0.9;
+}
+.topbar-btn {
+  background: none;
+  border: 1px solid var(--vscode-input-border, rgba(255,255,255,0.1));
+  color: var(--vscode-foreground);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0.8;
+  transition: all 0.15s;
+}
+.topbar-btn:hover {
+  opacity: 1;
+  background: var(--vscode-toolbar-hoverBackground);
+}
 
-  /* Messages */
-  .messages {
-    flex: 1;
-    overflow-y: auto;
-    padding: 12px;
-  }
+/* === 메시지 영역 === */
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0;
+}
+.messages::-webkit-scrollbar { width: 5px; }
+.messages::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.08);
+  border-radius: 3px;
+}
+.messages::-webkit-scrollbar-thumb:hover {
+  background: rgba(255,255,255,0.15);
+}
 
-  .message {
-    margin-bottom: 16px;
-    animation: fadeIn 0.2s ease-out;
-  }
+/* === 개별 메시지 === */
+.msg {
+  padding: 14px 16px;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  animation: msgIn 0.15s ease-out;
+}
+@keyframes msgIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
 
-  @keyframes fadeIn {
-    from { opacity: 0; transform: translateY(4px); }
-    to { opacity: 1; transform: translateY(0); }
-  }
+.msg-label {
+  font-size: 11px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.msg-label .dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.msg.user-msg { background: rgba(255,255,255,0.02); }
+.msg.user-msg .dot { background: #60a5fa; }
+.msg.user-msg .msg-label { color: #60a5fa; }
 
-  .message-role {
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    margin-bottom: 4px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-  .role-user { color: var(--vscode-terminal-ansiCyan); }
-  .role-assistant { color: var(--vscode-terminal-ansiGreen); }
-  .role-tool { color: var(--vscode-terminal-ansiYellow); }
+.msg.ai-msg { background: transparent; }
+.msg.ai-msg .dot { background: #c084fc; }
+.msg.ai-msg .msg-label { color: #c084fc; }
 
-  .message-content {
-    padding: 8px 12px;
-    border-radius: 8px;
-    line-height: 1.5;
-    font-size: 13px;
-    white-space: pre-wrap;
-    word-wrap: break-word;
-  }
+.msg-text {
+  font-size: 13px;
+  line-height: 1.65;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
 
-  .msg-user .message-content {
-    background: var(--vscode-input-background);
-    border: 1px solid var(--vscode-input-border);
-  }
-  .msg-assistant .message-content {
-    background: var(--vscode-editor-background);
-    border: 1px solid var(--vscode-panel-border);
-  }
-  .msg-tool .message-content {
-    background: var(--vscode-textBlockQuote-background);
-    border-left: 3px solid var(--vscode-terminal-ansiYellow);
-    font-family: var(--vscode-editor-font-family);
-    font-size: 12px;
-    max-height: 200px;
-    overflow-y: auto;
-  }
+/* === Markdown === */
+.msg-text h1 { font-size: 17px; font-weight: 700; margin: 14px 0 8px; }
+.msg-text h2 { font-size: 15px; font-weight: 600; margin: 12px 0 6px; }
+.msg-text h3 { font-size: 13px; font-weight: 600; margin: 10px 0 4px; }
+.msg-text p { margin: 6px 0; }
+.msg-text ul, .msg-text ol { padding-left: 20px; margin: 6px 0; }
+.msg-text li { margin: 3px 0; }
+.msg-text strong { font-weight: 600; }
+.msg-text em { font-style: italic; }
+.msg-text blockquote {
+  border-left: 2px solid rgba(255,255,255,0.15);
+  padding: 2px 12px;
+  margin: 8px 0;
+  opacity: 0.85;
+}
+.msg-text hr {
+  border: none;
+  border-top: 1px solid rgba(255,255,255,0.08);
+  margin: 12px 0;
+}
+.msg-text a {
+  color: #93c5fd;
+  text-decoration: none;
+}
+.msg-text a:hover { text-decoration: underline; }
 
-  /* Code blocks */
-  .message-content pre {
-    background: var(--vscode-textCodeBlock-background);
-    padding: 8px 10px;
-    border-radius: 6px;
-    overflow-x: auto;
-    margin: 8px 0;
-    font-family: var(--vscode-editor-font-family);
-    font-size: 12px;
-  }
-  .message-content code {
-    font-family: var(--vscode-editor-font-family);
-    font-size: 12px;
-  }
-  .message-content :not(pre) > code {
-    background: var(--vscode-textCodeBlock-background);
-    padding: 1px 4px;
-    border-radius: 3px;
-  }
+/* === 코드 블록 (Claude 스타일) === */
+.codeblock {
+  margin: 10px 0;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.08);
+  overflow: hidden;
+}
+.codeblock-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: rgba(255,255,255,0.04);
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+.codeblock-lang {
+  font-size: 11px;
+  color: rgba(255,255,255,0.45);
+  font-weight: 500;
+}
+.codeblock-actions {
+  display: flex;
+  gap: 2px;
+}
+.codeblock-actions button {
+  background: none;
+  border: none;
+  color: rgba(255,255,255,0.4);
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.codeblock-actions button:hover {
+  background: rgba(255,255,255,0.08);
+  color: rgba(255,255,255,0.8);
+}
+.codeblock pre {
+  margin: 0;
+  padding: 12px 14px;
+  overflow-x: auto;
+  background: rgba(0,0,0,0.2);
+}
+.codeblock code {
+  font-family: "SF Mono", "Fira Code", "JetBrains Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  tab-size: 4;
+}
 
-  /* Typing indicator */
-  .typing {
-    display: flex;
-    gap: 4px;
-    padding: 8px 12px;
-  }
-  .typing span {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--vscode-terminal-ansiGreen);
-    animation: pulse 1.2s infinite;
-  }
-  .typing span:nth-child(2) { animation-delay: 0.2s; }
-  .typing span:nth-child(3) { animation-delay: 0.4s; }
+/* 인라인 코드 */
+.msg-text code:not(.codeblock code) {
+  background: rgba(255,255,255,0.07);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-family: "SF Mono", "Fira Code", Menlo, monospace;
+  font-size: 12px;
+}
 
-  @keyframes pulse {
-    0%, 100% { opacity: 0.3; }
-    50% { opacity: 1; }
-  }
+/* === 도구 호출 블록 === */
+.tool-block {
+  margin: 8px 0;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.06);
+  overflow: hidden;
+}
+.tool-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.12s;
+  font-size: 12px;
+}
+.tool-head:hover { background: rgba(255,255,255,0.03); }
+.tool-arrow {
+  font-size: 9px;
+  opacity: 0.4;
+  transition: transform 0.15s;
+}
+.tool-block.open .tool-arrow { transform: rotate(90deg); }
+.tool-fn {
+  font-weight: 600;
+  color: #fbbf24;
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 12px;
+}
+.tool-summary {
+  color: rgba(255,255,255,0.35);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.tool-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-weight: 500;
+}
+.tool-badge.running {
+  background: rgba(251,191,36,0.15);
+  color: #fbbf24;
+}
+.tool-badge.done {
+  background: rgba(74,222,128,0.12);
+  color: #4ade80;
+}
+.tool-body {
+  display: none;
+  padding: 10px 14px;
+  background: rgba(0,0,0,0.15);
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  max-height: 180px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: rgba(255,255,255,0.55);
+}
+.tool-block.open .tool-body { display: block; }
 
-  /* Empty state */
-  .empty-state {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    height: 100%;
-    opacity: 0.6;
-    text-align: center;
-    padding: 20px;
-  }
-  .empty-state .logo {
-    width: 48px;
-    height: 48px;
-    border-radius: 12px;
-    background: linear-gradient(135deg, #6366f1, #8b5cf6);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: white;
-    font-weight: bold;
-    font-size: 20px;
-    margin-bottom: 12px;
-  }
-  .empty-state p {
-    font-size: 12px;
-    margin-top: 4px;
-  }
+/* === 로딩 === */
+.thinking {
+  padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: rgba(255,255,255,0.4);
+}
+.thinking-dots {
+  display: flex; gap: 3px;
+}
+.thinking-dots span {
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: #c084fc;
+  animation: dotPulse 1.4s infinite;
+}
+.thinking-dots span:nth-child(2) { animation-delay: 0.15s; }
+.thinking-dots span:nth-child(3) { animation-delay: 0.3s; }
+@keyframes dotPulse {
+  0%,100% { opacity: 0.2; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1); }
+}
 
-  /* Quick actions */
-  .quick-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-top: 12px;
-  }
-  .quick-action {
-    padding: 4px 10px;
-    border-radius: 12px;
-    font-size: 11px;
-    border: 1px solid var(--vscode-input-border);
-    background: var(--vscode-input-background);
-    color: var(--vscode-foreground);
-    cursor: pointer;
-  }
-  .quick-action:hover {
-    background: var(--vscode-list-hoverBackground);
-  }
+/* === 빈 상태 (웰컴) === */
+.welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 32px 20px;
+  text-align: center;
+}
+.welcome-icon {
+  width: 52px; height: 52px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #c084fc 0%, #7c3aed 50%, #6366f1 100%);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 24px; font-weight: 800; color: #fff;
+  margin-bottom: 16px;
+  box-shadow: 0 8px 24px rgba(124,58,237,0.25);
+}
+.welcome h2 {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.welcome p {
+  font-size: 12px;
+  opacity: 0.5;
+  max-width: 260px;
+  line-height: 1.5;
+}
+.welcome-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 20px;
+  justify-content: center;
+}
+.welcome-btn {
+  padding: 6px 14px;
+  border-radius: 8px;
+  font-size: 12px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.03);
+  color: var(--vscode-foreground);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.welcome-btn:hover {
+  background: rgba(255,255,255,0.07);
+  border-color: rgba(192,132,252,0.3);
+}
 
-  /* Input */
-  .input-area {
-    padding: 8px 12px;
-    border-top: 1px solid var(--vscode-panel-border);
-  }
-  .input-wrapper {
-    display: flex;
-    align-items: flex-end;
-    gap: 6px;
-    border: 1px solid var(--vscode-input-border);
-    border-radius: 8px;
-    background: var(--vscode-input-background);
-    padding: 6px 10px;
-  }
-  .input-wrapper:focus-within {
-    border-color: var(--vscode-focusBorder);
-  }
-  textarea {
-    flex: 1;
-    background: transparent;
-    border: none;
-    color: var(--vscode-input-foreground);
-    font-family: var(--vscode-font-family);
-    font-size: 13px;
-    resize: none;
-    outline: none;
-    max-height: 150px;
-    line-height: 1.4;
-  }
-  .send-btn {
-    background: var(--vscode-button-background);
-    color: var(--vscode-button-foreground);
-    border: none;
-    border-radius: 6px;
-    padding: 4px 8px;
-    cursor: pointer;
-    font-size: 12px;
-    white-space: nowrap;
-  }
-  .send-btn:hover {
-    background: var(--vscode-button-hoverBackground);
-  }
-  .send-btn:disabled {
-    opacity: 0.4;
-    cursor: default;
-  }
+/* === 입력 영역 === */
+.input-area {
+  padding: 12px 16px 14px;
+  border-top: 1px solid var(--vscode-panel-border);
+  flex-shrink: 0;
+}
+
+/* 슬래시 명령어 자동완성 */
+.slash-popup {
+  display: none;
+  margin-bottom: 6px;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--vscode-editor-background);
+}
+.slash-popup.show { display: block; }
+.slash-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: background 0.1s;
+}
+.slash-item:hover { background: rgba(255,255,255,0.05); }
+.slash-cmd {
+  font-family: "SF Mono", Menlo, monospace;
+  font-weight: 600;
+  color: #c084fc;
+  min-width: 72px;
+}
+.slash-desc {
+  color: rgba(255,255,255,0.4);
+}
+
+/* 입력 박스 */
+.input-box {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 12px;
+  padding: 8px 12px;
+  transition: border-color 0.15s;
+}
+.input-box:focus-within {
+  border-color: rgba(192,132,252,0.4);
+}
+
+textarea {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--vscode-foreground);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-size: 13px;
+  resize: none;
+  outline: none;
+  max-height: 140px;
+  line-height: 1.45;
+}
+textarea::placeholder {
+  color: rgba(255,255,255,0.25);
+}
+
+.btn-send {
+  background: #7c3aed;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.btn-send:hover { background: #6d28d9; }
+.btn-send:disabled { opacity: 0.3; cursor: default; }
+
+.btn-stop {
+  background: #dc2626;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  display: none;
+  white-space: nowrap;
+  transition: background 0.15s;
+}
+.btn-stop.show { display: inline-block; }
+.btn-stop:hover { background: #b91c1c; }
+
+.input-hint {
+  font-size: 10px;
+  color: rgba(255,255,255,0.2);
+  text-align: center;
+  margin-top: 6px;
+}
 </style>
 </head>
 <body>
-  <div class="header">
-    <h3>Hwarang AI</h3>
-    <button onclick="newChat()" title="New Chat">✨ New</button>
+  <!-- 상단 바 -->
+  <div class="topbar">
+    <div class="topbar-brand">
+      <div class="brand-icon">H</div>
+      <span class="brand-name">화랑 AI</span>
+    </div>
+    <button class="topbar-btn" onclick="newChat()">새 대화</button>
   </div>
 
+  <!-- 메시지 -->
   <div class="messages" id="messages">
-    <div class="empty-state" id="emptyState">
-      <div class="logo">H</div>
-      <strong>Hwarang AI</strong>
-      <p>Ask me to edit files, write code, or explain your project.</p>
-      <div class="quick-actions">
-        <button class="quick-action" onclick="quickSend('Explain this project structure')">📁 Explain project</button>
-        <button class="quick-action" onclick="quickSend('Find and fix bugs in the current file')">🐛 Find bugs</button>
-        <button class="quick-action" onclick="quickSend('Write unit tests for the current file')">🧪 Write tests</button>
+    <div class="welcome" id="welcome">
+      <div class="welcome-icon">H</div>
+      <h2>화랑 AI</h2>
+      <p>파일 수정, 코드 작성, 명령어 실행, 프로젝트 분석 등 무엇이든 물어보세요.</p>
+      <div class="welcome-actions">
+        <button class="welcome-btn" onclick="quickSend('이 프로젝트 구조를 설명해줘')">프로젝트 분석</button>
+        <button class="welcome-btn" onclick="quickSend('/fix')">버그 수정</button>
+        <button class="welcome-btn" onclick="quickSend('/test')">테스트 작성</button>
+        <button class="welcome-btn" onclick="quickSend('/refactor')">리팩토링</button>
+        <button class="welcome-btn" onclick="quickSend('/explain')">코드 설명</button>
+        <button class="welcome-btn" onclick="quickSend('/review')">코드 리뷰</button>
       </div>
     </div>
   </div>
 
+  <!-- 입력 -->
   <div class="input-area">
-    <div class="input-wrapper">
+    <div class="slash-popup" id="slashPopup">
+      <div class="slash-item" onclick="pickSlash('explain')">
+        <span class="slash-cmd">/explain</span>
+        <span class="slash-desc">코드 설명</span>
+      </div>
+      <div class="slash-item" onclick="pickSlash('fix')">
+        <span class="slash-cmd">/fix</span>
+        <span class="slash-desc">버그 찾아 수정</span>
+      </div>
+      <div class="slash-item" onclick="pickSlash('refactor')">
+        <span class="slash-cmd">/refactor</span>
+        <span class="slash-desc">리팩토링</span>
+      </div>
+      <div class="slash-item" onclick="pickSlash('test')">
+        <span class="slash-cmd">/test</span>
+        <span class="slash-desc">테스트 코드 생성</span>
+      </div>
+      <div class="slash-item" onclick="pickSlash('doc')">
+        <span class="slash-cmd">/doc</span>
+        <span class="slash-desc">문서화 주석 추가</span>
+      </div>
+      <div class="slash-item" onclick="pickSlash('review')">
+        <span class="slash-cmd">/review</span>
+        <span class="slash-desc">코드 리뷰</span>
+      </div>
+    </div>
+    <div class="input-box">
       <textarea
         id="input"
         rows="1"
-        placeholder="Ask Hwarang..."
-        onkeydown="handleKey(event)"
-        oninput="autoResize(this)"
+        placeholder="화랑에게 물어보세요... (/ 로 명령어)"
+        onkeydown="onKey(event)"
+        oninput="onInput(this)"
       ></textarea>
-      <button class="send-btn" id="sendBtn" onclick="send()">Send</button>
+      <button class="btn-send" id="btnSend" onclick="send()">전송</button>
+      <button class="btn-stop" id="btnStop" onclick="stop()">중지</button>
     </div>
+    <div class="input-hint">Enter 전송 · Shift+Enter 줄바꿈</div>
   </div>
 
 <script>
-  const vscode = acquireVsCodeApi();
-  const messagesEl = document.getElementById('messages');
-  const inputEl = document.getElementById('input');
-  const sendBtn = document.getElementById('sendBtn');
-  const emptyState = document.getElementById('emptyState');
-  let isProcessing = false;
+const vscode = acquireVsCodeApi();
+const $msgs = document.getElementById('messages');
+const $input = document.getElementById('input');
+const $send = document.getElementById('btnSend');
+const $stop = document.getElementById('btnStop');
+const $welcome = document.getElementById('welcome');
+const $slash = document.getElementById('slashPopup');
 
-  function send() {
-    const text = inputEl.value.trim();
-    if (!text || isProcessing) return;
-    inputEl.value = '';
-    inputEl.style.height = 'auto';
-    addMessage('user', text);
-    vscode.postMessage({ type: 'sendMessage', text });
+let busy = false;
+let curAI = null;       // 현재 AI 메시지의 .msg-text
+let curTool = null;     // 현재 tool-block
+
+// ======== 전송 ========
+
+function send() {
+  const t = $input.value.trim();
+  if (!t || busy) return;
+  $input.value = '';
+  $input.style.height = 'auto';
+  $slash.classList.remove('show');
+
+  const slashRe = /^\\/([a-z]+)(?:\\s+(.*))?$/;
+  const m = t.match(slashRe);
+  if (m) {
+    addUser(t);
+    vscode.postMessage({ type: 'slashCommand', command: m[1], args: m[2] || '' });
+    return;
   }
+  addUser(t);
+  vscode.postMessage({ type: 'sendMessage', text: t });
+}
 
-  function quickSend(text) {
-    addMessage('user', text);
-    vscode.postMessage({ type: 'sendMessage', text });
+function quickSend(t) { $input.value = t; send(); }
+function newChat() { vscode.postMessage({ type: 'newChat' }); }
+function stop() { vscode.postMessage({ type: 'stopGeneration' }); }
+
+function pickSlash(cmd) {
+  $input.value = '/' + cmd + ' ';
+  $input.focus();
+  $slash.classList.remove('show');
+}
+
+// ======== 입력 핸들링 ========
+
+function onKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+  if (e.key === 'Escape') $slash.classList.remove('show');
+}
+
+function onInput(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 140) + 'px';
+
+  const v = el.value;
+  if (v.startsWith('/') && !v.includes(' ')) {
+    $slash.classList.add('show');
+    const f = v.slice(1).toLowerCase();
+    document.querySelectorAll('.slash-item').forEach(h => {
+      const c = h.querySelector('.slash-cmd').textContent.slice(1);
+      h.style.display = c.startsWith(f) ? 'flex' : 'none';
+    });
+  } else {
+    $slash.classList.remove('show');
   }
+}
 
-  function newChat() {
-    vscode.postMessage({ type: 'newChat' });
+// ======== 메시지 렌더링 ========
+
+function hideWelcome() {
+  if ($welcome) $welcome.style.display = 'none';
+}
+
+function scroll() {
+  $msgs.scrollTop = $msgs.scrollHeight;
+}
+
+function addUser(text) {
+  hideWelcome();
+  const d = document.createElement('div');
+  d.className = 'msg user-msg';
+  d.innerHTML =
+    '<div class="msg-label"><span class="dot"></span>나</div>' +
+    '<div class="msg-text">' + esc(text) + '</div>';
+  $msgs.appendChild(d);
+  scroll();
+}
+
+function startAI() {
+  hideWelcome();
+  const d = document.createElement('div');
+  d.className = 'msg ai-msg';
+  d.innerHTML =
+    '<div class="msg-label"><span class="dot"></span>화랑</div>' +
+    '<div class="msg-text"></div>';
+  $msgs.appendChild(d);
+  curAI = d.querySelector('.msg-text');
+  scroll();
+}
+
+function addToolCall(fn, summary) {
+  hideWelcome();
+  curAI = null;
+
+  const d = document.createElement('div');
+  d.className = 'tool-block';
+  const short = summary.length > 80 ? summary.slice(0, 80) + '...' : summary;
+  d.innerHTML =
+    '<div class="tool-head" onclick="this.parentElement.classList.toggle(\'open\')">' +
+      '<span class="tool-arrow">&#9654;</span>' +
+      '<span class="tool-fn">' + esc(fn) + '</span>' +
+      '<span class="tool-summary">' + esc(short) + '</span>' +
+      '<span class="tool-badge running">실행중</span>' +
+    '</div>' +
+    '<div class="tool-body"></div>';
+  $msgs.appendChild(d);
+  curTool = d;
+  scroll();
+}
+
+function addToolResult(fn, output) {
+  if (curTool) {
+    curTool.querySelector('.tool-body').textContent = output;
+    const badge = curTool.querySelector('.tool-badge');
+    badge.textContent = '완료';
+    badge.className = 'tool-badge done';
+    curTool = null;
   }
+  scroll();
+}
 
-  function handleKey(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      send();
-    }
-  }
+function showThinking() {
+  removeThinking();
+  const d = document.createElement('div');
+  d.id = 'thinking';
+  d.className = 'thinking';
+  d.innerHTML = '<div class="thinking-dots"><span></span><span></span><span></span></div> 생각하는 중...';
+  $msgs.appendChild(d);
+  scroll();
+}
 
-  function autoResize(el) {
-    el.style.height = 'auto';
-    el.style.height = Math.min(el.scrollHeight, 150) + 'px';
-  }
+function removeThinking() {
+  document.getElementById('thinking')?.remove();
+}
 
-  function addMessage(role, content, toolName) {
-    if (emptyState) emptyState.style.display = 'none';
+// ======== Markdown ========
 
-    const div = document.createElement('div');
-    div.className = 'message msg-' + role;
+function md(text) {
+  if (!text) return '';
+  let h = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 
-    const roleLabel = {
-      user: '👤 You',
-      assistant: '🤖 Hwarang',
-      tool_call: '🔧 Tool: ' + (toolName || ''),
-      tool_result: '📋 Result: ' + (toolName || ''),
-    }[role] || role;
-
-    const roleClass = role.startsWith('tool') ? 'role-tool' : 'role-' + role;
-
-    div.innerHTML =
-      '<div class="message-role ' + roleClass + '">' + roleLabel + '</div>' +
-      '<div class="message-content">' + escapeHtml(content) + '</div>';
-
-    messagesEl.appendChild(div);
-    messagesEl.scrollTop = messagesEl.scrollHeight;
-  }
-
-  function addTypingIndicator() {
-    const div = document.createElement('div');
-    div.id = 'typing';
-    div.className = 'typing';
-    div.innerHTML = '<span></span><span></span><span></span>';
-    messagesEl.appendChild(div);
-    messagesEl.scrollTop = messagesEl.scrollHeight;
-  }
-
-  function removeTypingIndicator() {
-    document.getElementById('typing')?.remove();
-  }
-
-  function escapeHtml(text) {
-    // Basic markdown: code blocks and inline code
-    text = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    text = text.replace(/\`\`\`([\\s\\S]*?)\`\`\`/g, '<pre><code>$1</code></pre>');
-    text = text.replace(/\`([^\`]+)\`/g, '<code>$1</code>');
-    text = text.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>');
-    return text;
-  }
-
-  // Handle messages from extension
-  window.addEventListener('message', (event) => {
-    const msg = event.data;
-    switch (msg.type) {
-      case 'addUserMessage':
-        addMessage('user', msg.text);
-        break;
-      case 'startResponse':
-        isProcessing = true;
-        sendBtn.disabled = true;
-        addTypingIndicator();
-        break;
-      case 'assistantMessage':
-        removeTypingIndicator();
-        addMessage('assistant', msg.text);
-        break;
-      case 'toolCall':
-        removeTypingIndicator();
-        addMessage('tool_call', msg.text, msg.toolName);
-        addTypingIndicator();
-        break;
-      case 'toolResult':
-        removeTypingIndicator();
-        addMessage('tool_result', msg.text, msg.toolName);
-        addTypingIndicator();
-        break;
-      case 'endResponse':
-        removeTypingIndicator();
-        isProcessing = false;
-        sendBtn.disabled = false;
-        break;
-      case 'error':
-        removeTypingIndicator();
-        addMessage('assistant', '❌ ' + msg.text);
-        isProcessing = false;
-        sendBtn.disabled = false;
-        break;
-      case 'clearChat':
-        messagesEl.innerHTML = '';
-        if (emptyState) {
-          messagesEl.appendChild(emptyState);
-          emptyState.style.display = '';
-        }
-        break;
-    }
+  // 코드 블록
+  const codeBlockRe = new RegExp('&#96;&#96;&#96;(\\\\w*)\\\\n([\\\\s\\\\S]*?)&#96;&#96;&#96;', 'g');
+  // Use backtick-based matching after HTML escape
+  const cbRe = /\x60\x60\x60(\\w*)\\n([\\s\\S]*?)\x60\x60\x60/g;
+  h = h.replace(cbRe, function(_, lang, code) {
+    const lb = lang || 'code';
+    return '<div class="codeblock">' +
+      '<div class="codeblock-head">' +
+        '<span class="codeblock-lang">' + lb + '</span>' +
+        '<div class="codeblock-actions">' +
+          '<button onclick="doCopy(this)">복사</button>' +
+          '<button onclick="doInsert(this)">삽입</button>' +
+          '<button onclick="doApply(this,\\x27' + lb + '\\x27)">적용</button>' +
+        '</div>' +
+      '</div>' +
+      '<pre><code>' + code + '</code></pre>' +
+    '</div>';
   });
+
+  // 인라인 코드
+  const icRe = /\x60([^\x60]+)\x60/g;
+  h = h.replace(icRe, '<code>$1</code>');
+
+  // 헤더
+  h = h.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  h = h.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+  h = h.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+
+  // 볼드/이탤릭
+  h = h.replace(/[*][*](.+?)[*][*]/g, '<strong>$1</strong>');
+  h = h.replace(/[*](.+?)[*]/g, '<em>$1</em>');
+
+  // 인용
+  h = h.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
+
+  // 리스트
+  h = h.replace(/^[-*] (.+)$/gm, '<li>$1</li>');
+  h = h.replace(/((<li>.*<\\/li>)\\n?)+/g, '<ul>$&</ul>');
+  h = h.replace(/^\\d+[.] (.+)$/gm, '<li>$1</li>');
+
+  // 수평선
+  h = h.replace(/^---$/gm, '<hr>');
+
+  // 링크
+  h = h.replace(/\\[([^\\]]+)\\]\\(([^)]+)\\)/g, '<a href="#">$1</a>');
+
+  // 줄바꿈
+  h = h.replace(/\\n\\n/g, '</p><p>');
+  h = h.replace(/\\n/g, '<br>');
+
+  return '<p>' + h + '</p>';
+}
+
+function esc(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ======== 코드 액션 ========
+
+function getCode(btn) {
+  return btn.closest('.codeblock').querySelector('code').textContent;
+}
+function doCopy(btn) { vscode.postMessage({ type: 'copyCode', code: getCode(btn) }); }
+function doInsert(btn) { vscode.postMessage({ type: 'insertCode', code: getCode(btn) }); }
+function doApply(btn, lang) { vscode.postMessage({ type: 'applyDiff', code: getCode(btn), language: lang }); }
+
+// ======== 메시지 수신 ========
+
+window.addEventListener('message', e => {
+  const m = e.data;
+  switch (m.type) {
+    case 'addUserMessage':
+      addUser(m.text);
+      break;
+
+    case 'startResponse':
+      busy = true;
+      $send.disabled = true;
+      $stop.classList.add('show');
+      curAI = null;
+      showThinking();
+      break;
+
+    case 'assistantChunk':
+      removeThinking();
+      if (!curAI) startAI();
+      curAI.innerHTML = md(m.text);
+      scroll();
+      break;
+
+    case 'toolCall':
+      removeThinking();
+      addToolCall(m.toolName, m.text);
+      showThinking();
+      break;
+
+    case 'toolResult':
+      removeThinking();
+      addToolResult(m.toolName, m.text);
+      showThinking();
+      break;
+
+    case 'endResponse':
+      removeThinking();
+      busy = false;
+      $send.disabled = false;
+      $stop.classList.remove('show');
+      curAI = null;
+      curTool = null;
+      break;
+
+    case 'error':
+      removeThinking();
+      const ed = document.createElement('div');
+      ed.className = 'msg ai-msg';
+      ed.innerHTML =
+        '<div class="msg-label" style="color:#f87171;"><span class="dot" style="background:#f87171;"></span>오류</div>' +
+        '<div class="msg-text" style="color:#f87171;">' + esc(m.text) + '</div>';
+      $msgs.appendChild(ed);
+      busy = false;
+      $send.disabled = false;
+      $stop.classList.remove('show');
+      scroll();
+      break;
+
+    case 'clearChat':
+      $msgs.innerHTML = '';
+      if ($welcome) {
+        $msgs.appendChild($welcome);
+        $welcome.style.display = '';
+      }
+      curAI = null;
+      curTool = null;
+      break;
+  }
+});
 </script>
 </body>
 </html>`;

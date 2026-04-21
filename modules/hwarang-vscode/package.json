@@ -1,8 +1,8 @@
 {
   "name": "hwarang-vscode",
-  "displayName": "Hwarang AI",
-  "description": "AI coding assistant for VS Code - chat, file editing, code generation, terminal execution",
-  "version": "0.1.0",
+  "displayName": "화랑 AI",
+  "description": "AI 코딩 어시스턴트 - 채팅, 파일 편집, 터미널 실행, 코드 검색",
+  "version": "0.3.0",
   "publisher": "hwarang",
   "license": "MIT",
   "engines": {
@@ -18,7 +18,10 @@
     "assistant",
     "code generation",
     "chat",
-    "hwarang"
+    "hwarang",
+    "화랑",
+    "코딩",
+    "coding assistant"
   ],
   "activationEvents": [
     "onStartupFinished"
@@ -29,54 +32,55 @@
     "commands": [
       {
         "command": "hwarang.login",
-        "title": "Hwarang: Login",
+        "title": "화랑 AI: 로그인",
         "icon": "$(sign-in)"
       },
       {
         "command": "hwarang.logout",
-        "title": "Hwarang: Logout",
+        "title": "화랑 AI: 로그아웃",
         "icon": "$(sign-out)"
       },
       {
         "command": "hwarang.showTokenStatus",
-        "title": "Hwarang: Token Status",
+        "title": "화랑 AI: 토큰 현황",
         "icon": "$(pulse)"
       },
       {
         "command": "hwarang.openChat",
-        "title": "Hwarang: Open Chat",
+        "title": "화랑 AI: 채팅 열기",
         "icon": "$(comment-discussion)"
       },
       {
         "command": "hwarang.newChat",
-        "title": "Hwarang: New Chat"
+        "title": "화랑 AI: 새 대화",
+        "icon": "$(add)"
       },
       {
         "command": "hwarang.explainSelection",
-        "title": "Hwarang: Explain Selection"
+        "title": "화랑 AI: 코드 설명"
       },
       {
         "command": "hwarang.fixSelection",
-        "title": "Hwarang: Fix Selection"
+        "title": "화랑 AI: 버그 수정"
       },
       {
         "command": "hwarang.refactorSelection",
-        "title": "Hwarang: Refactor Selection"
+        "title": "화랑 AI: 리팩토링"
       },
       {
         "command": "hwarang.generateTests",
-        "title": "Hwarang: Generate Tests"
+        "title": "화랑 AI: 테스트 생성"
       },
       {
         "command": "hwarang.inlineChat",
-        "title": "Hwarang: Inline Chat (Ctrl+I)"
+        "title": "화랑 AI: 인라인 채팅"
       }
     ],
     "viewsContainers": {
       "activitybar": [
         {
           "id": "hwarang-sidebar",
-          "title": "Hwarang AI",
+          "title": "화랑 AI",
           "icon": "media/sidebar-icon.svg"
         }
       ]
@@ -86,7 +90,7 @@
         {
           "type": "webview",
           "id": "hwarang.chatView",
-          "name": "Chat"
+          "name": "채팅"
         }
       ]
     },
@@ -119,7 +123,7 @@
     "submenus": [
       {
         "id": "hwarang.editorContext",
-        "label": "Hwarang AI"
+        "label": "화랑 AI"
       }
     ],
     "keybindings": [
@@ -133,71 +137,81 @@
         "key": "ctrl+i",
         "mac": "cmd+i",
         "when": "editorTextFocus"
+      },
+      {
+        "command": "hwarang.newChat",
+        "key": "ctrl+shift+n",
+        "mac": "cmd+shift+n",
+        "when": "hwarang.chatView.visible"
       }
     ],
     "configuration": {
-      "title": "Hwarang AI",
+      "title": "화랑 AI",
       "properties": {
         "hwarang.provider": {
           "type": "string",
           "default": "hwarang",
           "enum": ["hwarang", "openai", "anthropic"],
-          "description": "LLM provider to use"
+          "enumDescriptions": [
+            "화랑 AI (기본, hwarang.ai)",
+            "OpenAI (API 키 필요)",
+            "Anthropic Claude (API 키 필요)"
+          ],
+          "description": "LLM 공급자 선택"
         },
         "hwarang.apiUrl": {
           "type": "string",
-          "default": "http://localhost:8000",
-          "description": "Hwarang API server URL"
+          "default": "https://hwarang.ai",
+          "description": "화랑 AI API 서버 주소"
         },
         "hwarang.model": {
           "type": "string",
-          "default": "hwarang-small",
-          "description": "Model to use for completions"
+          "default": "hwarang-default",
+          "description": "사용할 모델"
         },
         "hwarang.openaiApiKey": {
           "type": "string",
           "default": "",
-          "description": "OpenAI API key (if using OpenAI provider)"
+          "description": "OpenAI API 키 (OpenAI 공급자 사용 시)"
         },
         "hwarang.anthropicApiKey": {
           "type": "string",
           "default": "",
-          "description": "Anthropic API key (if using Anthropic provider)"
+          "description": "Anthropic API 키 (Anthropic 공급자 사용 시)"
         },
         "hwarang.temperature": {
           "type": "number",
           "default": 0.7,
           "minimum": 0,
           "maximum": 2,
-          "description": "Sampling temperature"
+          "description": "샘플링 온도 (0: 정확, 2: 창의적)"
         },
         "hwarang.maxTokens": {
           "type": "number",
           "default": 4096,
-          "description": "Maximum tokens in response"
+          "description": "응답 최대 토큰 수"
         },
         "hwarang.autoApplyEdits": {
           "type": "boolean",
           "default": false,
-          "description": "Automatically apply file edits without confirmation"
+          "description": "파일 수정 시 확인 없이 자동 적용 (주의)"
         }
       }
     }
   },
   "scripts": {
     "vscode:prepublish": "npm run build",
-    "build": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
-    "watch": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --watch",
-    "lint": "eslint src/",
-    "package": "vsce package"
+    "build": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify --sourcemap",
+    "watch": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --watch --sourcemap",
+    "lint": "tsc --noEmit",
+    "package": "vsce package --no-dependencies"
   },
   "devDependencies": {
     "@types/vscode": "^1.90.0",
     "@types/node": "^22.0.0",
     "esbuild": "^0.21.0",
     "typescript": "^5.5.0",
-    "@vscode/vsce": "^2.27.0",
-    "eslint": "^9.0.0"
+    "@vscode/vsce": "^2.27.0"
   },
   "dependencies": {}
 }

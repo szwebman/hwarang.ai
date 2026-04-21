@@ -1,8 +1,8 @@
 /**
- * LLM Client - Communicates with Hwarang API / OpenAI / Anthropic.
+ * LLM Client - Hwarang AI API (SSE streaming) + OpenAI/Anthropic fallback
  *
- * Reads configuration from VS Code settings and provides a unified
- * interface for chat completions with streaming.
+ * Primary: https://hwarang.ai/api/chat (SSE)
+ * Auth: Bearer token from AuthManager
  */
 
 import * as vscode from "vscode";
@@ -38,6 +38,7 @@ interface Config {
 
 export class LLMClient {
   private config: Config;
+  private abortController: AbortController | null = null;
 
   constructor() {
     this.config = this.loadConfig();
@@ -47,12 +48,17 @@ export class LLMClient {
     this.config = this.loadConfig();
   }
 
+  abort() {
+    this.abortController?.abort();
+    this.abortController = null;
+  }
+
   private loadConfig(): Config {
     const cfg = vscode.workspace.getConfiguration("hwarang");
     return {
       provider: cfg.get("provider", "hwarang"),
-      apiUrl: cfg.get("apiUrl", "http://localhost:8000"),
-      model: cfg.get("model", "hwarang-small"),
+      apiUrl: cfg.get("apiUrl", "https://hwarang.ai"),
+      model: cfg.get("model", "hwarang-default"),
       openaiApiKey: cfg.get("openaiApiKey", ""),
       anthropicApiKey: cfg.get("anthropicApiKey", ""),
       temperature: cfg.get("temperature", 0.7),
@@ -60,57 +66,64 @@ export class LLMClient {
     };
   }
 
-  /**
-   * Send a chat completion request (non-streaming).
-   */
-  async chat(
-    messages: ChatMessage[],
-    tools?: object[]
-  ): Promise<LLMResponse> {
-    const { provider } = this.config;
-
-    if (provider === "anthropic") {
-      return this.chatAnthropic(messages, tools);
-    }
-
-    // Hwarang and OpenAI use the same OpenAI-compatible format
-    return this.chatOpenAICompat(messages, tools);
+  private getApiKey(): string | null {
+    // Try to get from SecretStorage via auth headers
+    const cfg = vscode.workspace.getConfiguration("hwarang");
+    return cfg.get("_apiKey", null);
   }
 
   /**
-   * Stream a chat completion, yielding text chunks.
+   * Non-streaming chat completion with tool support.
+   */
+  async chat(messages: ChatMessage[], tools?: object[]): Promise<LLMResponse> {
+    const { provider } = this.config;
+    if (provider === "anthropic") return this.chatAnthropic(messages, tools);
+    if (provider === "openai") return this.chatOpenAI(messages, tools);
+    return this.chatHwarang(messages, tools);
+  }
+
+  /**
+   * SSE streaming chat completion.
    */
   async *streamChat(
-    messages: ChatMessage[]
+    messages: ChatMessage[],
+    signal?: AbortSignal
   ): AsyncGenerator<string, void, unknown> {
     const { provider } = this.config;
-
     if (provider === "anthropic") {
-      yield* this.streamAnthropic(messages);
+      yield* this.streamAnthropic(messages, signal);
       return;
     }
-
-    yield* this.streamOpenAICompat(messages);
-  }
-
-  // ---- OpenAI-compatible (Hwarang API & OpenAI) ----
-
-  private getOpenAIBaseUrl(): string {
-    if (this.config.provider === "openai") {
-      return "https://api.openai.com/v1";
+    if (provider === "openai") {
+      yield* this.streamOpenAI(messages, signal);
+      return;
     }
-    return `${this.config.apiUrl}/v1`;
+    yield* this.streamHwarang(messages, signal);
   }
 
-  private getOpenAIHeaders(): Record<string, string> {
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (this.config.provider === "openai" && this.config.openaiApiKey) {
-      headers["Authorization"] = `Bearer ${this.config.openaiApiKey}`;
+  // ================================================================
+  // Hwarang AI (Primary) - SSE endpoint
+  // ================================================================
+
+  private getHwarangHeaders(): Record<string, string> {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "Accept": "text/event-stream",
+    };
+    // API key injected by AuthManager
+    const apiKey = (this as any)._injectedApiKey;
+    if (apiKey) {
+      headers["Authorization"] = `Bearer ${apiKey}`;
     }
     return headers;
   }
 
-  private async chatOpenAICompat(
+  /** Inject API key from AuthManager (avoids circular dependency) */
+  setApiKey(key: string | null) {
+    (this as any)._injectedApiKey = key;
+  }
+
+  private async chatHwarang(
     messages: ChatMessage[],
     tools?: object[]
   ): Promise<LLMResponse> {
@@ -121,32 +134,43 @@ export class LLMClient {
       max_tokens: this.config.maxTokens,
       stream: false,
     };
-    if (tools?.length) {
-      body.tools = tools;
-    }
+    if (tools?.length) body.tools = tools;
 
-    const resp = await fetch(`${this.getOpenAIBaseUrl()}/chat/completions`, {
+    const url = `${this.config.apiUrl}/api/chat`;
+    const resp = await fetch(url, {
       method: "POST",
-      headers: this.getOpenAIHeaders(),
+      headers: this.getHwarangHeaders(),
       body: JSON.stringify(body),
     });
 
     if (!resp.ok) {
-      throw new Error(`API error ${resp.status}: ${await resp.text()}`);
+      const errText = await resp.text();
+      throw new Error(`Hwarang API ${resp.status}: ${errText}`);
     }
 
-    const data = await resp.json() as any;
-    const choice = data.choices[0];
+    const data = (await resp.json()) as any;
 
+    // Support both OpenAI-compatible and custom format
+    if (data.choices) {
+      const choice = data.choices[0];
+      return {
+        content: choice.message?.content ?? null,
+        toolCalls: choice.message?.tool_calls || null,
+        finishReason: choice.finish_reason || "stop",
+      };
+    }
+
+    // Custom Hwarang format
     return {
-      content: choice.message.content,
-      toolCalls: choice.message.tool_calls || null,
-      finishReason: choice.finish_reason || "stop",
+      content: data.response || data.content || data.message || null,
+      toolCalls: data.tool_calls || null,
+      finishReason: data.finish_reason || "stop",
     };
   }
 
-  private async *streamOpenAICompat(
-    messages: ChatMessage[]
+  private async *streamHwarang(
+    messages: ChatMessage[],
+    signal?: AbortSignal
   ): AsyncGenerator<string, void, unknown> {
     const body = {
       model: this.config.model,
@@ -156,46 +180,88 @@ export class LLMClient {
       stream: true,
     };
 
-    const resp = await fetch(`${this.getOpenAIBaseUrl()}/chat/completions`, {
+    const url = `${this.config.apiUrl}/api/chat`;
+    const resp = await fetch(url, {
       method: "POST",
-      headers: this.getOpenAIHeaders(),
+      headers: this.getHwarangHeaders(),
       body: JSON.stringify(body),
+      signal,
     });
 
     if (!resp.ok) {
-      throw new Error(`API error ${resp.status}: ${await resp.text()}`);
+      const errText = await resp.text();
+      throw new Error(`Hwarang API ${resp.status}: ${errText}`);
     }
 
-    const reader = resp.body!.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith("data: ")) continue;
-        const data = trimmed.slice(6);
-        if (data === "[DONE]") return;
-
-        try {
-          const parsed = JSON.parse(data);
-          const content = parsed.choices?.[0]?.delta?.content;
-          if (content) yield content;
-        } catch {
-          // skip malformed chunks
-        }
-      }
-    }
+    yield* this.parseSSEStream(resp, signal);
   }
 
-  // ---- Anthropic ----
+  // ================================================================
+  // OpenAI compatible
+  // ================================================================
+
+  private async chatOpenAI(
+    messages: ChatMessage[],
+    tools?: object[]
+  ): Promise<LLMResponse> {
+    const body: Record<string, unknown> = {
+      model: this.config.model || "gpt-4o",
+      messages,
+      temperature: this.config.temperature,
+      max_tokens: this.config.maxTokens,
+      stream: false,
+    };
+    if (tools?.length) body.tools = tools;
+
+    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.config.openaiApiKey}`,
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!resp.ok) throw new Error(`OpenAI ${resp.status}: ${await resp.text()}`);
+
+    const data = (await resp.json()) as any;
+    const choice = data.choices[0];
+    return {
+      content: choice.message.content,
+      toolCalls: choice.message.tool_calls || null,
+      finishReason: choice.finish_reason || "stop",
+    };
+  }
+
+  private async *streamOpenAI(
+    messages: ChatMessage[],
+    signal?: AbortSignal
+  ): AsyncGenerator<string, void, unknown> {
+    const body = {
+      model: this.config.model || "gpt-4o",
+      messages,
+      temperature: this.config.temperature,
+      max_tokens: this.config.maxTokens,
+      stream: true,
+    };
+
+    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.config.openaiApiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal,
+    });
+
+    if (!resp.ok) throw new Error(`OpenAI ${resp.status}: ${await resp.text()}`);
+    yield* this.parseSSEStream(resp, signal);
+  }
+
+  // ================================================================
+  // Anthropic
+  // ================================================================
 
   private async chatAnthropic(
     messages: ChatMessage[],
@@ -203,7 +269,10 @@ export class LLMClient {
   ): Promise<LLMResponse> {
     let systemMsg = "";
     const chatMsgs = messages.filter((m) => {
-      if (m.role === "system") { systemMsg = m.content; return false; }
+      if (m.role === "system") {
+        systemMsg = m.content;
+        return false;
+      }
       return true;
     });
 
@@ -232,11 +301,9 @@ export class LLMClient {
       body: JSON.stringify(body),
     });
 
-    if (!resp.ok) {
-      throw new Error(`Anthropic error ${resp.status}: ${await resp.text()}`);
-    }
+    if (!resp.ok) throw new Error(`Anthropic ${resp.status}: ${await resp.text()}`);
 
-    const data = await resp.json() as any;
+    const data = (await resp.json()) as any;
     let content = "";
     const toolCalls: ToolCall[] = [];
 
@@ -259,11 +326,15 @@ export class LLMClient {
   }
 
   private async *streamAnthropic(
-    messages: ChatMessage[]
+    messages: ChatMessage[],
+    signal?: AbortSignal
   ): AsyncGenerator<string, void, unknown> {
     let systemMsg = "";
     const chatMsgs = messages.filter((m) => {
-      if (m.role === "system") { systemMsg = m.content; return false; }
+      if (m.role === "system") {
+        systemMsg = m.content;
+        return false;
+      }
       return true;
     });
 
@@ -284,11 +355,10 @@ export class LLMClient {
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify(body),
+      signal,
     });
 
-    if (!resp.ok) {
-      throw new Error(`Anthropic error ${resp.status}: ${await resp.text()}`);
-    }
+    if (!resp.ok) throw new Error(`Anthropic ${resp.status}: ${await resp.text()}`);
 
     const reader = resp.body!.getReader();
     const decoder = new TextDecoder();
@@ -297,6 +367,7 @@ export class LLMClient {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      if (signal?.aborted) break;
 
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split("\n");
@@ -313,6 +384,64 @@ export class LLMClient {
           // skip
         }
       }
+    }
+  }
+
+  // ================================================================
+  // Shared SSE parser (OpenAI-compatible format)
+  // ================================================================
+
+  private async *parseSSEStream(
+    resp: Response,
+    signal?: AbortSignal
+  ): AsyncGenerator<string, void, unknown> {
+    const reader = resp.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (signal?.aborted) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data: ")) continue;
+          const data = trimmed.slice(6);
+          if (data === "[DONE]") return;
+
+          try {
+            const parsed = JSON.parse(data);
+            // OpenAI format
+            const content = parsed.choices?.[0]?.delta?.content;
+            if (content) {
+              yield content;
+              continue;
+            }
+            // Hwarang custom format
+            if (parsed.text) {
+              yield parsed.text;
+              continue;
+            }
+            if (parsed.content) {
+              yield parsed.content;
+              continue;
+            }
+            if (parsed.delta) {
+              yield typeof parsed.delta === "string" ? parsed.delta : parsed.delta.content || "";
+            }
+          } catch {
+            // Skip malformed chunks
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
     }
   }
 }
