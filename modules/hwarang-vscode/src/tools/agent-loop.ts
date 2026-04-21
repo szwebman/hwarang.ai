@@ -75,6 +75,16 @@ export class AgentLoop {
     return this._isRunning;
   }
 
+  /**
+   * 저장된 대화를 복원 (user/assistant만, 도구 호출 제외)
+   */
+  restoreHistory(messages: { role: "user" | "assistant"; content: string }[]) {
+    this.conversationHistory = messages.map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
+  }
+
   clearHistory() {
     this.conversationHistory = [];
   }

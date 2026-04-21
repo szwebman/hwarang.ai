@@ -34,7 +34,7 @@ export async function activate(context: vscode.ExtensionContext) {
   });
 
   // 3. 사이드바 채팅
-  chatViewProvider = new ChatViewProvider(context.extensionUri, agentLoop);
+  chatViewProvider = new ChatViewProvider(context.extensionUri, agentLoop, context);
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider("hwarang.chatView", chatViewProvider, {
       webviewOptions: { retainContextWhenHidden: true },

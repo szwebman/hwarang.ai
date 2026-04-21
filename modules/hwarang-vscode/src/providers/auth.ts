@@ -222,8 +222,9 @@ export class AuthManager {
   async loginWithApiKey(apiKey: string): Promise<boolean> {
     this._apiKey = apiKey;
 
-    const success = await this.fetchUserInfo();
-    if (success) {
+    // 검증 시도 (디버그 정보 포함)
+    const result = await this.verifyApiKey();
+    if (result.ok) {
       await this.context.secrets.store("hwarang-api-key", apiKey);
       this.startTokenRefresh();
       vscode.window.showInformationMessage(
@@ -233,8 +234,50 @@ export class AuthManager {
     }
 
     this._apiKey = null;
-    vscode.window.showErrorMessage("화랑 AI: 유효하지 않은 API 키입니다");
+    const msg = result.detail
+      ? `화랑 AI 로그인 실패: ${result.detail}`
+      : "화랑 AI: 유효하지 않은 API 키입니다";
+    vscode.window.showErrorMessage(msg);
     return false;
+  }
+
+  /**
+   * API 키 유효성 검증 (디버그 정보 포함)
+   */
+  private async verifyApiKey(): Promise<{ ok: boolean; detail?: string }> {
+    if (!this._apiKey) return { ok: false, detail: "API 키가 없음" };
+
+    const apiUrl = this.getApiUrl();
+    const endpoints = [`${apiUrl}/api/users/me`, `${apiUrl}/api/v1/users/me`];
+
+    const errors: string[] = [];
+
+    for (const url of endpoints) {
+      try {
+        const resp = await fetch(url, {
+          headers: { Authorization: `Bearer ${this._apiKey}` },
+        });
+
+        if (resp.ok) {
+          this._user = (await resp.json()) as UserInfo;
+          this.updateStatusBar();
+          this._onAuthChanged.fire(this._user);
+          return { ok: true };
+        }
+
+        const bodyText = await resp.text().catch(() => "(no body)");
+        errors.push(`${url.replace(apiUrl, "")} → ${resp.status} ${bodyText.slice(0, 100)}`);
+
+        // 401이면 키 자체가 무효이므로 다른 엔드포인트 시도 안 함
+        if (resp.status === 401 || resp.status === 403) {
+          return { ok: false, detail: errors.join(" | ") };
+        }
+      } catch (e: any) {
+        errors.push(`${url.replace(apiUrl, "")} → ${e.message}`);
+      }
+    }
+
+    return { ok: false, detail: errors.join(" | ") || "알 수 없는 오류" };
   }
 
   // ============================================================
@@ -347,7 +390,8 @@ export class AuthManager {
   // ============================================================
 
   private updateStatusBar(): void {
-    if (!this._user || !this._user.tokens) {
+    // 로그인되지 않은 경우
+    if (!this._user) {
       this.statusBarItem.text = "$(key) 화랑 AI: 로그인";
       this.statusBarItem.tooltip = "클릭하여 로그인";
       this.statusBarItem.backgroundColor = undefined;
@@ -355,34 +399,59 @@ export class AuthManager {
       return;
     }
 
-    const tokens = this._user.tokens;
-    const balance = tokens.balance;
     const fmt = (n: number) => {
       if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
       if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`;
       return n.toString();
     };
 
-    if (balance < 1000) {
-      this.statusBarItem.text = `$(warning) ${fmt(balance)} ��큰`;
+    // 로그인 되었지만 토큰 정보가 없는 경우
+    if (!this._user.tokens) {
+      this.statusBarItem.text = `$(account) ${this._user.name || "화랑 AI"}`;
+      this.statusBarItem.tooltip = [
+        `화랑 AI - ${this._user.name}`,
+        `${this._user.email || ""}`,
+        `플랜: ${this._user.plan?.displayName || this._user.plan?.name || "무료"}`,
+        ``,
+        `토큰 정보를 불러오는 중...`,
+      ].join("\n");
+      this.statusBarItem.backgroundColor = undefined;
+      this.statusBarItem.show();
+      return;
+    }
+
+    const tokens = this._user.tokens;
+    const balance = tokens.balance || 0;
+    const dailyLimit = tokens.dailyLimit || 0;
+    const dailyUsed = tokens.dailyUsed || 0;
+    const totalUsed = tokens.totalUsed || 0;
+
+    // 잔액에 따른 경고 색상
+    if (balance < 1000 && balance > 0) {
+      this.statusBarItem.text = `$(warning) ${fmt(balance)} 토큰`;
       this.statusBarItem.backgroundColor = new vscode.ThemeColor(
         "statusBarItem.warningBackground"
+      );
+    } else if (balance === 0) {
+      this.statusBarItem.text = `$(error) 토큰 소진`;
+      this.statusBarItem.backgroundColor = new vscode.ThemeColor(
+        "statusBarItem.errorBackground"
       );
     } else {
       this.statusBarItem.text = `$(pulse) ${fmt(balance)} 토큰`;
       this.statusBarItem.backgroundColor = undefined;
     }
 
-    const dailyPct = Math.round(
-      (tokens.dailyUsed / Math.max(tokens.dailyLimit, 1)) * 100
-    );
+    const dailyPct =
+      dailyLimit > 0 ? Math.round((dailyUsed / dailyLimit) * 100) : 0;
     this.statusBarItem.tooltip = [
       `화랑 AI - ${this._user.name}`,
-      `플랜: ${this._user.plan?.displayName || "무료"}`,
+      `${this._user.email || ""}`,
+      `플랜: ${this._user.plan?.displayName || this._user.plan?.name || "무료"}`,
       ``,
       `잔여: ${balance.toLocaleString()} 토큰`,
-      `오늘: ${tokens.dailyUsed.toLocaleString()} / ${tokens.dailyLimit.toLocaleString()} (${dailyPct}%)`,
-      `누적: ${tokens.totalUsed.toLocaleString()}`,
+      `오늘: ${dailyUsed.toLocaleString()} / ${dailyLimit.toLocaleString()} (${dailyPct}%)`,
+      `누적 사용: ${totalUsed.toLocaleString()}`,
     ].join("\n");
 
     this.statusBarItem.show();

@@ -13,15 +13,200 @@
 import * as vscode from "vscode";
 import { AgentLoop, AgentMessage } from "../tools/agent-loop";
 
+interface StoredMessage {
+  role: "user" | "assistant" | "tool_call" | "tool_result";
+  content: string;
+  toolName?: string;
+  timestamp: number;
+}
+
+interface Conversation {
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  messages: StoredMessage[];
+}
+
+const HISTORY_KEY = "hwarang.conversations";
+const CURRENT_ID_KEY = "hwarang.currentConversationId";
+const MAX_CONVERSATIONS = 50;
+
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   private webviewView?: vscode.WebviewView;
   private agentLoop: AgentLoop;
+  private context: vscode.ExtensionContext;
+  private currentConversationId: string | null = null;
+  private currentMessages: StoredMessage[] = [];
 
   constructor(
     private readonly extensionUri: vscode.Uri,
-    agentLoop: AgentLoop
+    agentLoop: AgentLoop,
+    context: vscode.ExtensionContext
   ) {
     this.agentLoop = agentLoop;
+    this.context = context;
+  }
+
+  // ============================================================
+  // 대화 기록 저장/불러오기
+  // ============================================================
+
+  private getConversations(): Conversation[] {
+    return this.context.globalState.get<Conversation[]>(HISTORY_KEY, []);
+  }
+
+  private async saveConversations(list: Conversation[]) {
+    // 최대 개수 제한
+    const trimmed = list
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .slice(0, MAX_CONVERSATIONS);
+    await this.context.globalState.update(HISTORY_KEY, trimmed);
+  }
+
+  private async persistCurrent() {
+    if (!this.currentConversationId || this.currentMessages.length === 0) return;
+
+    const all = this.getConversations();
+    const existing = all.find((c) => c.id === this.currentConversationId);
+    const firstUserMsg = this.currentMessages.find((m) => m.role === "user");
+    const title = firstUserMsg
+      ? firstUserMsg.content.slice(0, 50).replace(/\s+/g, " ").trim()
+      : "새 대화";
+
+    if (existing) {
+      existing.messages = this.currentMessages;
+      existing.updatedAt = Date.now();
+      existing.title = title;
+    } else {
+      all.unshift({
+        id: this.currentConversationId,
+        title,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        messages: this.currentMessages,
+      });
+    }
+    await this.saveConversations(all);
+  }
+
+  private async startNewConversation() {
+    await this.persistCurrent();
+    this.currentConversationId = `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    this.currentMessages = [];
+    await this.context.globalState.update(
+      CURRENT_ID_KEY,
+      this.currentConversationId
+    );
+    this.agentLoop.clearHistory();
+  }
+
+  private async loadConversation(id: string) {
+    await this.persistCurrent();
+
+    const all = this.getConversations();
+    const conv = all.find((c) => c.id === id);
+    if (!conv) return;
+
+    this.currentConversationId = id;
+    this.currentMessages = [...conv.messages];
+    await this.context.globalState.update(CURRENT_ID_KEY, id);
+
+    // 에이전트 히스토리에도 반영
+    this.agentLoop.clearHistory();
+    this.agentLoop.restoreHistory(
+      conv.messages
+        .filter((m) => m.role === "user" || m.role === "assistant")
+        .map((m) => ({
+          role: m.role as "user" | "assistant",
+          content: m.content,
+        }))
+    );
+
+    // 웹뷰에 복원 메시지 전송
+    if (this.webviewView) {
+      this.webviewView.webview.postMessage({ type: "clearChat" });
+      for (const msg of conv.messages) {
+        this.webviewView.webview.postMessage({
+          type: "restoreMessage",
+          role: msg.role,
+          content: msg.content,
+          toolName: msg.toolName,
+        });
+      }
+    }
+  }
+
+  private async deleteConversation(id: string) {
+    const all = this.getConversations().filter((c) => c.id !== id);
+    await this.saveConversations(all);
+    if (this.currentConversationId === id) {
+      this.currentConversationId = null;
+      this.currentMessages = [];
+      this.agentLoop.clearHistory();
+      this.webviewView?.webview.postMessage({ type: "clearChat" });
+    }
+  }
+
+  private async showHistory() {
+    await this.persistCurrent();
+    const all = this.getConversations();
+    if (all.length === 0) {
+      vscode.window.showInformationMessage("저장된 대화가 없습니다");
+      return;
+    }
+
+    type HistoryItem = vscode.QuickPickItem & { id?: string; action?: string };
+
+    const items: HistoryItem[] = all.map((c) => {
+      const date = new Date(c.updatedAt);
+      const dateStr = `${date.getMonth() + 1}/${date.getDate()} ${date
+        .getHours()
+        .toString()
+        .padStart(2, "0")}:${date.getMinutes().toString().padStart(2, "0")}`;
+      return {
+        id: c.id,
+        label: `$(comment-discussion) ${c.title}`,
+        description: dateStr,
+        detail: `${c.messages.length}개 메시지`,
+      };
+    });
+
+    items.push(
+      { label: "", kind: vscode.QuickPickItemKind.Separator },
+      {
+        label: "$(trash) 모든 대화 삭제",
+        action: "clear-all",
+      }
+    );
+
+    const pick = await vscode.window.showQuickPick(items, {
+      placeHolder: "이전 대화를 선택하거나 삭제하세요",
+      matchOnDescription: true,
+      matchOnDetail: true,
+    });
+
+    if (!pick) return;
+
+    if (pick.action === "clear-all") {
+      const confirm = await vscode.window.showWarningMessage(
+        "모든 대화 기록을 삭제할까요?",
+        { modal: true },
+        "삭제"
+      );
+      if (confirm === "삭제") {
+        await this.saveConversations([]);
+        this.currentConversationId = null;
+        this.currentMessages = [];
+        this.agentLoop.clearHistory();
+        this.webviewView?.webview.postMessage({ type: "clearChat" });
+      }
+      return;
+    }
+
+    if (pick.id) {
+      await this.loadConversation(pick.id);
+    }
   }
 
   resolveWebviewView(
@@ -44,7 +229,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           await this.handleUserMessage(message.text);
           break;
         case "newChat":
-          this.newChat();
+          await this.newChat();
+          break;
+        case "showHistory":
+          await this.showHistory();
           break;
         case "stopGeneration":
           this.agentLoop.abort();
@@ -67,6 +255,44 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           break;
       }
     });
+
+    // 이전 세션 복원
+    this.restorePreviousSession();
+  }
+
+  private async restorePreviousSession() {
+    const prevId = this.context.globalState.get<string>(CURRENT_ID_KEY);
+    if (!prevId) return;
+
+    const all = this.getConversations();
+    const conv = all.find((c) => c.id === prevId);
+    if (!conv || conv.messages.length === 0) return;
+
+    this.currentConversationId = prevId;
+    this.currentMessages = [...conv.messages];
+
+    this.agentLoop.clearHistory();
+    this.agentLoop.restoreHistory(
+      conv.messages
+        .filter((m) => m.role === "user" || m.role === "assistant")
+        .map((m) => ({
+          role: m.role as "user" | "assistant",
+          content: m.content,
+        }))
+    );
+
+    // 웹뷰에 복원 메시지 전송 (약간의 지연 후)
+    setTimeout(() => {
+      if (!this.webviewView) return;
+      for (const msg of conv.messages) {
+        this.webviewView.webview.postMessage({
+          type: "restoreMessage",
+          role: msg.role,
+          content: msg.content,
+          toolName: msg.toolName,
+        });
+      }
+    }, 200);
   }
 
   async sendMessage(text: string) {
@@ -77,8 +303,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  newChat() {
-    this.agentLoop.clearHistory();
+  async newChat() {
+    await this.startNewConversation();
     this.webviewView?.webview.postMessage({ type: "clearChat" });
   }
 
@@ -86,10 +312,34 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const webview = this.webviewView?.webview;
     if (!webview) return;
 
+    // 새 대화 ID가 없으면 생성
+    if (!this.currentConversationId) {
+      this.currentConversationId = `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      await this.context.globalState.update(
+        CURRENT_ID_KEY,
+        this.currentConversationId
+      );
+    }
+
+    // 사용자 메시지 기록
+    this.currentMessages.push({
+      role: "user",
+      content: text,
+      timestamp: Date.now(),
+    });
+
     try {
       webview.postMessage({ type: "startResponse" });
 
       for await (const msg of this.agentLoop.run(text)) {
+        // 메시지 기록
+        this.currentMessages.push({
+          role: msg.role,
+          content: msg.content,
+          toolName: msg.toolName,
+          timestamp: Date.now(),
+        });
+
         switch (msg.role) {
           case "assistant":
             webview.postMessage({ type: "assistantChunk", text: msg.content });
@@ -112,8 +362,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
 
       webview.postMessage({ type: "endResponse" });
+      // 대화 영구 저장
+      await this.persistCurrent();
     } catch (e: any) {
       webview.postMessage({ type: "error", text: e.message });
+      await this.persistCurrent();
     }
   }
 
@@ -598,12 +851,12 @@ body {
 /* 입력 박스 */
 .input-box {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   gap: 8px;
   background: rgba(255,255,255,0.04);
   border: 1px solid rgba(255,255,255,0.08);
   border-radius: 12px;
-  padding: 8px 12px;
+  padding: 6px 10px 6px 12px;
   transition: border-color 0.15s;
 }
 .input-box:focus-within {
@@ -620,10 +873,15 @@ textarea {
   resize: none;
   outline: none;
   max-height: 140px;
-  line-height: 1.45;
+  line-height: 20px;
+  padding: 4px 0;
+  margin: 0;
+  vertical-align: middle;
+  display: block;
 }
 textarea::placeholder {
   color: rgba(255,255,255,0.25);
+  line-height: 20px;
 }
 
 .btn-send {
@@ -672,7 +930,10 @@ textarea::placeholder {
       <div class="brand-icon">H</div>
       <span class="brand-name">화랑 AI</span>
     </div>
-    <button class="topbar-btn" onclick="newChat()">새 대화</button>
+    <div style="display:flex; gap:6px;">
+      <button class="topbar-btn" onclick="showHistory()" title="이전 대화 보기">이전 대화</button>
+      <button class="topbar-btn" onclick="newChat()" title="새 대화 시작">새 대화</button>
+    </div>
   </div>
 
   <!-- 메시지 -->
@@ -727,6 +988,8 @@ textarea::placeholder {
         placeholder="화랑에게 물어보세요... (/ 로 명령어)"
         onkeydown="onKey(event)"
         oninput="onInput(this)"
+        oncompositionstart="onCompositionStart()"
+        oncompositionend="onCompositionEnd()"
       ></textarea>
       <button class="btn-send" id="btnSend" onclick="send()">전송</button>
       <button class="btn-stop" id="btnStop" onclick="stop()">중지</button>
@@ -750,6 +1013,9 @@ let curTool = null;     // 현재 tool-block
 // ======== 전송 ========
 
 function send() {
+  // IME 조합 중이면 전송 안 함
+  if (isComposing) return;
+
   const t = $input.value.trim();
   if (!t || busy) return;
   $input.value = '';
@@ -769,6 +1035,7 @@ function send() {
 
 function quickSend(t) { $input.value = t; send(); }
 function newChat() { vscode.postMessage({ type: 'newChat' }); }
+function showHistory() { vscode.postMessage({ type: 'showHistory' }); }
 function stop() { vscode.postMessage({ type: 'stopGeneration' }); }
 
 function pickSlash(cmd) {
@@ -779,8 +1046,23 @@ function pickSlash(cmd) {
 
 // ======== 입력 핸들링 ========
 
+// IME(한글 등) 조합 중인지 추적
+let isComposing = false;
+let lastSendAt = 0;
+
+function onCompositionStart() { isComposing = true; }
+function onCompositionEnd() { isComposing = false; }
+
 function onKey(e) {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+  // IME 조합 중 Enter는 무시 (한글 입력 시 중복 전송 방지)
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !isComposing && e.keyCode !== 229) {
+    // 짧은 시간 내 중복 Enter 방지 (200ms)
+    const now = Date.now();
+    if (now - lastSendAt < 200) { e.preventDefault(); return; }
+    lastSendAt = now;
+    e.preventDefault();
+    send();
+  }
   if (e.key === 'Escape') $slash.classList.remove('show');
 }
 
@@ -1018,6 +1300,26 @@ window.addEventListener('message', e => {
       }
       curAI = null;
       curTool = null;
+      break;
+
+    case 'restoreMessage':
+      // 저장된 대화 복원
+      hideWelcome();
+      if (m.role === 'user') {
+        addUser(m.content);
+      } else if (m.role === 'assistant') {
+        const d = document.createElement('div');
+        d.className = 'msg ai-msg';
+        d.innerHTML =
+          '<div class="msg-label"><span class="dot"></span>화랑</div>' +
+          '<div class="msg-text">' + md(m.content) + '</div>';
+        $msgs.appendChild(d);
+        scroll();
+      } else if (m.role === 'tool_call') {
+        addToolCall(m.toolName || 'tool', m.content);
+      } else if (m.role === 'tool_result') {
+        addToolResult(m.toolName || 'tool', m.content);
+      }
       break;
   }
 });
