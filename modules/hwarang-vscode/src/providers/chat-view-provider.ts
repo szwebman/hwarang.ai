@@ -26,11 +26,16 @@ interface Conversation {
   createdAt: number;
   updatedAt: number;
   messages: StoredMessage[];
+  workspacePath?: string;  // 이 대화가 시작된 워크스페이스
+  workspaceName?: string;
 }
 
-const HISTORY_KEY = "hwarang.conversations";
+// Claude Code 방식: 워크스페이스별 대화 저장
+// 구조: { [workspacePath]: Conversation[] }
+const HISTORY_KEY = "hwarang.conversations.byWorkspace";
 const CURRENT_ID_KEY = "hwarang.currentConversationId";
-const MAX_CONVERSATIONS = 50;
+const MAX_CONVERSATIONS_PER_WORKSPACE = 50;
+const NO_WORKSPACE_KEY = "__global__";
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   private webviewView?: vscode.WebviewView;
@@ -49,24 +54,65 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   // ============================================================
-  // 대화 기록 저장/불러오기
+  // 대화 기록 저장/불러오기 (Claude Code 방식: 워크스페이스별)
   // ============================================================
 
+  /** 현재 워크스페이스 식별자 (폴더 경로 또는 "__global__") */
+  private getWorkspaceKey(): string {
+    const folders = vscode.workspace.workspaceFolders;
+    if (!folders?.length) return NO_WORKSPACE_KEY;
+    return folders[0].uri.fsPath;
+  }
+
+  private getWorkspaceName(): string {
+    const folders = vscode.workspace.workspaceFolders;
+    if (!folders?.length) return "(워크스페이스 없음)";
+    return folders[0].name;
+  }
+
+  /** 전체 워크스페이스별 맵 */
+  private getAllConversations(): Record<string, Conversation[]> {
+    return this.context.globalState.get<Record<string, Conversation[]>>(HISTORY_KEY, {});
+  }
+
+  /** 현재 워크스페이스의 대화만 */
   private getConversations(): Conversation[] {
-    return this.context.globalState.get<Conversation[]>(HISTORY_KEY, []);
+    const all = this.getAllConversations();
+    return all[this.getWorkspaceKey()] || [];
   }
 
   private async saveConversations(list: Conversation[]) {
-    // 최대 개수 제한
+    const all = this.getAllConversations();
     const trimmed = list
       .sort((a, b) => b.updatedAt - a.updatedAt)
-      .slice(0, MAX_CONVERSATIONS);
-    await this.context.globalState.update(HISTORY_KEY, trimmed);
+      .slice(0, MAX_CONVERSATIONS_PER_WORKSPACE);
+    all[this.getWorkspaceKey()] = trimmed;
+    await this.context.globalState.update(HISTORY_KEY, all);
+  }
+
+  /** 워크스페이스별 "마지막 활성 대화 ID" */
+  private getCurrentIdForWorkspace(): string | undefined {
+    const map = this.context.globalState.get<Record<string, string>>(
+      CURRENT_ID_KEY,
+      {}
+    );
+    return map[this.getWorkspaceKey()];
+  }
+
+  private async setCurrentIdForWorkspace(id: string) {
+    const map = this.context.globalState.get<Record<string, string>>(
+      CURRENT_ID_KEY,
+      {}
+    );
+    map[this.getWorkspaceKey()] = id;
+    await this.context.globalState.update(CURRENT_ID_KEY, map);
   }
 
   private async persistCurrent() {
     if (!this.currentConversationId || this.currentMessages.length === 0) return;
 
+    const workspacePath = this.getWorkspaceKey();
+    const workspaceName = this.getWorkspaceName();
     const all = this.getConversations();
     const existing = all.find((c) => c.id === this.currentConversationId);
     const firstUserMsg = this.currentMessages.find((m) => m.role === "user");
@@ -78,6 +124,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       existing.messages = this.currentMessages;
       existing.updatedAt = Date.now();
       existing.title = title;
+      existing.workspacePath = workspacePath;
+      existing.workspaceName = workspaceName;
     } else {
       all.unshift({
         id: this.currentConversationId,
@@ -85,6 +133,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         createdAt: Date.now(),
         updatedAt: Date.now(),
         messages: this.currentMessages,
+        workspacePath,
+        workspaceName,
       });
     }
     await this.saveConversations(all);
@@ -104,13 +154,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private async loadConversation(id: string) {
     await this.persistCurrent();
 
-    const all = this.getConversations();
-    const conv = all.find((c) => c.id === id);
+    // 현재 워크스페이스뿐 아니라 모든 워크스페이스에서 검색
+    let conv: Conversation | undefined;
+    const all = this.getAllConversations();
+    for (const convs of Object.values(all)) {
+      conv = convs.find((c) => c.id === id);
+      if (conv) break;
+    }
     if (!conv) return;
 
     this.currentConversationId = id;
     this.currentMessages = [...conv.messages];
-    await this.context.globalState.update(CURRENT_ID_KEY, id);
+    await this.setCurrentIdForWorkspace(id);
 
     // 에이전트 히스토리에도 반영
     this.agentLoop.clearHistory();
@@ -148,54 +203,147 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async showHistory() {
+  private async showHistory(showAllWorkspaces = false) {
     await this.persistCurrent();
-    const all = this.getConversations();
-    if (all.length === 0) {
-      vscode.window.showInformationMessage("저장된 대화가 없습니다");
+
+    const all = this.getAllConversations();
+    const currentKey = this.getWorkspaceKey();
+    const currentName = this.getWorkspaceName();
+
+    // 현재 워크스페이스의 대화 우선, 옵션에 따라 전체도 표시
+    const currentConvs = (all[currentKey] || []).sort(
+      (a, b) => b.updatedAt - a.updatedAt
+    );
+    const otherConvs: Array<Conversation & { _wsName: string }> = [];
+    for (const [key, convs] of Object.entries(all)) {
+      if (key === currentKey) continue;
+      for (const c of convs) {
+        otherConvs.push({
+          ...c,
+          _wsName: c.workspaceName || (key === NO_WORKSPACE_KEY ? "(워크스페이스 없음)" : key.split("/").pop() || key),
+        });
+      }
+    }
+    otherConvs.sort((a, b) => b.updatedAt - a.updatedAt);
+
+    const totalCount = currentConvs.length + (showAllWorkspaces ? otherConvs.length : 0);
+    if (totalCount === 0) {
+      const pick = await vscode.window.showInformationMessage(
+        `저장된 대화가 없습니다 (현재: ${currentName})`,
+        "다른 워크스페이스 보기"
+      );
+      if (pick === "다른 워크스페이스 보기" && otherConvs.length > 0) {
+        return this.showHistory(true);
+      }
       return;
     }
 
     type HistoryItem = vscode.QuickPickItem & { id?: string; action?: string };
 
-    const items: HistoryItem[] = all.map((c) => {
-      const date = new Date(c.updatedAt);
-      const dateStr = `${date.getMonth() + 1}/${date.getDate()} ${date
+    const formatDate = (ts: number) => {
+      const date = new Date(ts);
+      return `${date.getMonth() + 1}/${date.getDate()} ${date
         .getHours()
         .toString()
         .padStart(2, "0")}:${date.getMinutes().toString().padStart(2, "0")}`;
-      return {
-        id: c.id,
-        label: `$(comment-discussion) ${c.title}`,
-        description: dateStr,
-        detail: `${c.messages.length}개 메시지`,
-      };
+    };
+
+    const items: HistoryItem[] = [];
+
+    // 현재 워크스페이스 섹션
+    items.push({
+      label: `$(folder-opened) ${currentName}`,
+      kind: vscode.QuickPickItemKind.Separator,
     });
 
-    items.push(
-      { label: "", kind: vscode.QuickPickItemKind.Separator },
-      {
-        label: "$(trash) 모든 대화 삭제",
-        action: "clear-all",
+    if (currentConvs.length === 0) {
+      items.push({
+        label: "$(info) 이 워크스페이스에 저장된 대화 없음",
+      });
+    } else {
+      for (const c of currentConvs) {
+        items.push({
+          id: c.id,
+          label: `$(comment-discussion) ${c.title}`,
+          description: formatDate(c.updatedAt),
+          detail: `${c.messages.length}개 메시지`,
+        });
       }
-    );
+    }
+
+    // 다른 워크스페이스 섹션 (옵션)
+    if (showAllWorkspaces && otherConvs.length > 0) {
+      items.push({
+        label: "$(archive) 다른 워크스페이스",
+        kind: vscode.QuickPickItemKind.Separator,
+      });
+      for (const c of otherConvs) {
+        items.push({
+          id: c.id,
+          label: `$(comment-discussion) ${c.title}`,
+          description: `${formatDate(c.updatedAt)} · ${c._wsName}`,
+          detail: `${c.messages.length}개 메시지`,
+        });
+      }
+    }
+
+    // 액션
+    items.push({ label: "", kind: vscode.QuickPickItemKind.Separator });
+    if (!showAllWorkspaces && otherConvs.length > 0) {
+      items.push({
+        label: `$(archive) 다른 워크스페이스 대화도 보기 (${otherConvs.length}개)`,
+        action: "show-all",
+      });
+    }
+    items.push({
+      label: "$(trash) 이 워크스페이스 대화 모두 삭제",
+      action: "clear-workspace",
+    });
+    if (otherConvs.length > 0 || currentConvs.length > 0) {
+      items.push({
+        label: "$(trash) 전체 대화 삭제 (모든 워크스페이스)",
+        action: "clear-all",
+      });
+    }
 
     const pick = await vscode.window.showQuickPick(items, {
-      placeHolder: "이전 대화를 선택하거나 삭제하세요",
+      placeHolder: showAllWorkspaces
+        ? "대화 선택 (모든 워크스페이스)"
+        : `이전 대화 선택 — ${currentName}`,
       matchOnDescription: true,
       matchOnDetail: true,
     });
 
     if (!pick) return;
 
-    if (pick.action === "clear-all") {
+    if (pick.action === "show-all") {
+      return this.showHistory(true);
+    }
+
+    if (pick.action === "clear-workspace") {
       const confirm = await vscode.window.showWarningMessage(
-        "모든 대화 기록을 삭제할까요?",
+        `'${currentName}' 워크스페이스의 모든 대화를 삭제할까요?`,
         { modal: true },
         "삭제"
       );
       if (confirm === "삭제") {
         await this.saveConversations([]);
+        this.currentConversationId = null;
+        this.currentMessages = [];
+        this.agentLoop.clearHistory();
+        this.webviewView?.webview.postMessage({ type: "clearChat" });
+      }
+      return;
+    }
+
+    if (pick.action === "clear-all") {
+      const confirm = await vscode.window.showWarningMessage(
+        "모든 워크스페이스의 대화를 삭제할까요? 되돌릴 수 없습니다.",
+        { modal: true },
+        "전체 삭제"
+      );
+      if (confirm === "전체 삭제") {
+        await this.context.globalState.update(HISTORY_KEY, {});
         this.currentConversationId = null;
         this.currentMessages = [];
         this.agentLoop.clearHistory();
@@ -256,12 +404,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
     });
 
+    // 워크스페이스 이름 전송
+    webviewView.webview.postMessage({
+      type: "setWorkspace",
+      name: this.getWorkspaceName(),
+    });
+
     // 이전 세션 복원
     this.restorePreviousSession();
   }
 
   private async restorePreviousSession() {
-    const prevId = this.context.globalState.get<string>(CURRENT_ID_KEY);
+    const prevId = this.getCurrentIdForWorkspace();
     if (!prevId) return;
 
     const all = this.getConversations();
@@ -928,7 +1082,10 @@ textarea::placeholder {
   <div class="topbar">
     <div class="topbar-brand">
       <div class="brand-icon">H</div>
-      <span class="brand-name">화랑 AI</span>
+      <div style="display:flex; flex-direction:column; line-height:1.2;">
+        <span class="brand-name">화랑 AI</span>
+        <span id="workspaceName" style="font-size:10px; opacity:0.5;"></span>
+      </div>
     </div>
     <div style="display:flex; gap:6px;">
       <button class="topbar-btn" onclick="showHistory()" title="이전 대화 보기">이전 대화</button>
@@ -1300,6 +1457,11 @@ window.addEventListener('message', e => {
       }
       curAI = null;
       curTool = null;
+      break;
+
+    case 'setWorkspace':
+      const $ws = document.getElementById('workspaceName');
+      if ($ws) $ws.textContent = m.name || '';
       break;
 
     case 'restoreMessage':
