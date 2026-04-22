@@ -112,7 +112,11 @@ def main():
         args.model_path,
         quantization_config=bnb_config,
         device_map="auto",
+        max_memory={0: "28GiB", "cpu": "120GiB"},
+        offload_folder="/tmp/offload",
+        low_cpu_mem_usage=True,
         trust_remote_code=True,
+        torch_dtype=torch.bfloat16,
     )
 
     tokenizer = AutoTokenizer.from_pretrained(
