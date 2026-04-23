@@ -19,8 +19,8 @@ export const HALVING_MILESTONES = [
 ];
 
 export const BURN_RATES: Record<string, number> = {
-  ai_usage: 0.30,
-  api_call: 0.30,
+  ai_usage: 0.05,
+  api_call: 0.05,
   subscription: 0.20,
   purchase: 0.05,
   transfer: 0.01,

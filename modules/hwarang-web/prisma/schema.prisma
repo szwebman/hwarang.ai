@@ -102,8 +102,8 @@ model Plan {
   priceYearly   Int      @default(0)        // 연 가격 (원)
 
   // ⭐ 토큰 기반 제한 (모든 모델 공통 토큰 풀)
-  tokensIncluded    Int  @default(10000)    // 플랜에 포함된 월 토큰 수
-  dailyTokenLimit   Int  @default(5000)     // 하루 최대 소진 토큰 (폭주 방지)
+  tokensIncluded    Int  @default(100000)   // 플랜에 포함된 월 토큰 수
+  dailyTokenLimit   Int  @default(50000)    // 하루 최대 소진 토큰 (폭주 방지)
   maxTokensPerReq   Int  @default(8192)     // 요청 1회당 최대 토큰
   concurrentReqs    Int  @default(1)        // 동시 요청 수
   apiKeysAllowed    Int  @default(1)        // API 키 개수
@@ -144,8 +144,8 @@ model AIModel {
   endpoint    String   @default("http://localhost:8000")
 
   // ⭐ 토큰 단가 (화랑 토큰 소비 배수)
-  inputMultiplier   Float @default(1.0)    // 입력 토큰 배수
-  outputMultiplier  Float @default(1.0)    // 출력 토큰 배수 (보통 입력보다 비쌈)
+  inputMultiplier   Float @default(0.1)    // 입력 토큰 배수
+  outputMultiplier  Float @default(0.3)    // 출력 토큰 배수 (보통 입력보다 비쌈)
 
   // 컨텍스트 & 제약
   maxContextLength  Int   @default(32768)
