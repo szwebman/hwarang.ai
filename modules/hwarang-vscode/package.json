@@ -74,6 +74,11 @@
       {
         "command": "hwarang.inlineChat",
         "title": "화랑 AI: 인라인 채팅"
+      },
+      {
+        "command": "hwarang.switchMode",
+        "title": "화랑 AI: 모드 전환 (자동/수동/플랜)",
+        "icon": "$(settings-gear)"
       }
     ],
     "viewsContainers": {
@@ -143,6 +148,11 @@
         "key": "ctrl+shift+n",
         "mac": "cmd+shift+n",
         "when": "hwarang.chatView.visible"
+      },
+      {
+        "command": "hwarang.switchMode",
+        "key": "ctrl+shift+m",
+        "mac": "cmd+shift+m"
       }
     ],
     "configuration": {
@@ -194,7 +204,18 @@
         "hwarang.autoApplyEdits": {
           "type": "boolean",
           "default": false,
-          "description": "파일 수정 시 확인 없이 자동 적용 (주의)"
+          "description": "[레거시] 파일 수정 시 확인 없이 자동 적용 (hwarang.mode로 대체됨)"
+        },
+        "hwarang.mode": {
+          "type": "string",
+          "default": "manual",
+          "enum": ["auto", "manual", "plan"],
+          "enumDescriptions": [
+            "자동 모드: 파일 생성/수정/삭제, 명령 실행을 확인 없이 자동 적용",
+            "수동 모드: 모든 파일 변경과 명령 실행 전 승인 받음 (안전, 기본값)",
+            "플랜 모드: 실제 파일 변경 없이 계획만 출력 (읽기 전용)"
+          ],
+          "description": "화랑 AI 실행 모드"
         }
       }
     }

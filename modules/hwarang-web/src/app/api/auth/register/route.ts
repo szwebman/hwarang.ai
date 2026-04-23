@@ -43,13 +43,13 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    // 토큰 잔액 초기화 (Free 플랜: 10K 토큰)
+    // 토큰 잔액 초기화 (Free 플랜: 10M 토큰)
     await prisma.tokenBalance.create({
       data: {
         userId: user.id,
-        balance: 10000,
-        dailyLimit: 3000,
-        totalCharged: 10000,
+        balance: 10000000,
+        dailyLimit: 1000000,
+        totalCharged: 10000000,
       },
     });
 

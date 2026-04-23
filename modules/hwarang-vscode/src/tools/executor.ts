@@ -18,6 +18,7 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import * as cp from "child_process";
 import { glob } from "./glob-helper";
+import { getMode, isWriteAllowed, isAutoApprove } from "./mode";
 
 export interface ToolResult {
   output: string;
@@ -225,10 +226,21 @@ export class ToolExecutor {
 
   private async writeFile(filePath: string, content: string): Promise<ToolResult> {
     const absPath = this.resolvePath(filePath);
-    const config = vscode.workspace.getConfiguration("hwarang");
-    const autoApply = config.get("autoApplyEdits", false);
+    const mode = getMode();
 
-    if (!autoApply) {
+    // 플랜 모드: 실제 쓰기 안 하고 계획만 반환
+    if (!isWriteAllowed(mode)) {
+      const exists = await fs.access(absPath).then(() => true).catch(() => false);
+      const action = exists ? "덮어쓰기" : "생성";
+      const lines = content.split("\n").length;
+      return {
+        output: `[플랜 모드] 예정 작업: ${action} ${filePath} (${lines}줄, ${content.length}바이트)\n실행하려면 자동/수동 모드로 전환하세요.`,
+        success: true,
+      };
+    }
+
+    // 수동 모드: 승인 요청
+    if (!isAutoApprove(mode)) {
       const exists = await fs.access(absPath).then(() => true).catch(() => false);
       const action = exists ? "overwrite" : "create";
       const confirm = await vscode.window.showInformationMessage(
@@ -273,10 +285,17 @@ export class ToolExecutor {
       };
     }
 
-    const config = vscode.workspace.getConfiguration("hwarang");
-    const autoApply = config.get("autoApplyEdits", false);
+    const mode = getMode();
 
-    if (!autoApply) {
+    // 플랜 모드: 계획만
+    if (!isWriteAllowed(mode)) {
+      return {
+        output: `[플랜 모드] 예정 수정: ${filePath} (${occurrences}개 치환, ${oldString.length}자 → ${newString.length}자)\n실행하려면 자동/수동 모드로 전환하세요.`,
+        success: true,
+      };
+    }
+
+    if (!isAutoApprove(mode)) {
       const confirm = await vscode.window.showInformationMessage(
         `Hwarang wants to edit: ${filePath} (${occurrences} replacement${occurrences > 1 ? "s" : ""})`,
         "Allow",
@@ -317,15 +336,27 @@ export class ToolExecutor {
 
   private async deleteFile(filePath: string): Promise<ToolResult> {
     const absPath = this.resolvePath(filePath);
+    const mode = getMode();
 
-    const confirm = await vscode.window.showWarningMessage(
-      `Hwarang wants to delete: ${filePath}`,
-      { modal: true },
-      "Delete",
-      "Cancel"
-    );
-    if (confirm !== "Delete") {
-      return { output: "User cancelled delete", success: false };
+    // 플랜 모드: 삭제 계획만
+    if (!isWriteAllowed(mode)) {
+      return {
+        output: `[플랜 모드] 예정 삭제: ${filePath}\n실행하려면 자동/수동 모드로 전환하세요.`,
+        success: true,
+      };
+    }
+
+    // 삭제는 자동 모드라도 modal로 한 번 확인 (치명적 작업)
+    if (!isAutoApprove(mode)) {
+      const confirm = await vscode.window.showWarningMessage(
+        `Hwarang wants to delete: ${filePath}`,
+        { modal: true },
+        "Delete",
+        "Cancel"
+      );
+      if (confirm !== "Delete") {
+        return { output: "User cancelled delete", success: false };
+      }
     }
 
     const stat = await fs.stat(absPath);
@@ -407,10 +438,17 @@ export class ToolExecutor {
       return { output: `Blocked dangerous command: ${command}`, success: false };
     }
 
-    const config = vscode.workspace.getConfiguration("hwarang");
-    const autoApply = config.get("autoApplyEdits", false);
+    const mode = getMode();
 
-    if (!autoApply) {
+    // 플랜 모드: 명령 계획만
+    if (!isWriteAllowed(mode)) {
+      return {
+        output: `[플랜 모드] 예정 명령: ${command}\n실행하려면 자동/수동 모드로 전환하세요.`,
+        success: true,
+      };
+    }
+
+    if (!isAutoApprove(mode)) {
       const confirm = await vscode.window.showInformationMessage(
         `Run command: ${command}`,
         "Allow",

@@ -93,9 +93,9 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
             await prisma.tokenBalance.create({
               data: {
                 userId: user.id,
-                balance: 10000,      // Free 플랜: 10K 토큰
-                dailyLimit: 3000,
-                totalCharged: 10000,
+                balance: 10000000,    // Free 플랜: 10M 토큰
+                dailyLimit: 1000000,
+                totalCharged: 10000000,
               },
             });
 
@@ -104,8 +104,8 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
               data: {
                 userId: user.id,
                 type: "PLAN_CREDIT",
-                amount: 10000,
-                balance: 10000,
+                amount: 10000000,
+                balance: 10000000,
                 description: "회원가입 웰컴 토큰 (Free 플랜)",
               },
             });

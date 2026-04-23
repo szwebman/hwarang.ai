@@ -10,10 +10,12 @@ import { InlineChatProvider } from "./providers/inline-chat-provider";
 import { LLMClient } from "./providers/llm-client";
 import { ToolExecutor } from "./tools/executor";
 import { AgentLoop } from "./tools/agent-loop";
+import { getMode, setMode, getModeLabel, getModeDescription, HwarangMode } from "./tools/mode";
 
 let chatViewProvider: ChatViewProvider;
 let authManager: AuthManager;
 let agentLoop: AgentLoop;
+let modeStatusBar: vscode.StatusBarItem;
 
 export async function activate(context: vscode.ExtensionContext) {
   // 1. 인증
@@ -174,13 +176,60 @@ export async function activate(context: vscode.ExtensionContext) {
         await inlineChat.handleInlineChat(editor, input);
         await authManager.refreshTokenBalance();
       }
+    }),
+
+    // === 모드 전환 (자동/수동/플랜) ===
+    vscode.commands.registerCommand("hwarang.switchMode", async () => {
+      const current = getMode();
+      const pick = await vscode.window.showQuickPick(
+        [
+          {
+            label: "🚀 자동 모드",
+            description: "파일 변경과 명령을 확인 없이 실행",
+            detail: current === "auto" ? "(현재 설정)" : "",
+            value: "auto" as HwarangMode,
+          },
+          {
+            label: "✋ 수동 모드",
+            description: "매 변경마다 승인 받음 (기본, 안전)",
+            detail: current === "manual" ? "(현재 설정)" : "",
+            value: "manual" as HwarangMode,
+          },
+          {
+            label: "📋 플랜 모드",
+            description: "실제 변경 없이 계획만 출력",
+            detail: current === "plan" ? "(현재 설정)" : "",
+            value: "plan" as HwarangMode,
+          },
+        ],
+        { placeHolder: `현재: ${getModeLabel(current)} — 모드를 선택하세요` }
+      );
+      if (!pick) return;
+      await setMode(pick.value);
+      updateModeStatusBar();
+      vscode.window.showInformationMessage(
+        `화랑 AI 모드 변경: ${getModeLabel(pick.value)} — ${getModeDescription(pick.value)}`
+      );
+      // 채팅 뷰에 모드 변경 알림
+      chatViewProvider?.notifyModeChange?.(pick.value);
     })
   );
+
+  // === 상태바에 현재 모드 표시 ===
+  modeStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+  modeStatusBar.command = "hwarang.switchMode";
+  modeStatusBar.tooltip = "클릭해서 화랑 AI 모드 전환";
+  context.subscriptions.push(modeStatusBar);
+  updateModeStatusBar();
+  modeStatusBar.show();
 
   // 5. 설정 변경 감시
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration("hwarang")) llmClient.refreshConfig();
+      if (e.affectsConfiguration("hwarang")) {
+        llmClient.refreshConfig();
+        if (e.affectsConfiguration("hwarang.mode")) updateModeStatusBar();
+      }
     })
   );
 
@@ -193,6 +242,13 @@ export async function activate(context: vscode.ExtensionContext) {
     );
     if (r === "로그인") vscode.commands.executeCommand("hwarang.login");
   }
+}
+
+function updateModeStatusBar() {
+  if (!modeStatusBar) return;
+  const mode = getMode();
+  modeStatusBar.text = `$(hubot) ${getModeLabel(mode)}`;
+  modeStatusBar.tooltip = `화랑 AI — ${getModeDescription(mode)}\n클릭해서 모드 전환`;
 }
 
 export function deactivate() {

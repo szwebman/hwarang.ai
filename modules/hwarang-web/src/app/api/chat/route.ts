@@ -318,6 +318,15 @@ export async function POST(request: NextRequest) {
   const startedAt = Date.now();
   let apiResponse: Response;
 
+  // 디버그: vLLM으로 가는 요청 로그
+  console.log(`[chat] → vLLM ${servingEndpoint}`, {
+    model: body.model,
+    msg_count: body.messages?.length,
+    has_tools: !!body.tools?.length,
+    tool_choice: body.tool_choice,
+    stream: body.stream,
+  });
+
   try {
     apiResponse = await fetch(`${servingEndpoint}/v1/chat/completions`, {
       method: "POST",
@@ -390,6 +399,15 @@ export async function POST(request: NextRequest) {
 
   // ─── 7. 일반 응답 + 사후 처리 + 토큰 차감 ──────────
   const data = await apiResponse.json();
+
+  // 디버그: vLLM 응답 로그
+  console.log(`[chat] ← vLLM`, {
+    has_content: !!data.choices?.[0]?.message?.content,
+    has_tool_calls: !!data.choices?.[0]?.message?.tool_calls?.length,
+    tool_call_count: data.choices?.[0]?.message?.tool_calls?.length || 0,
+    finish_reason: data.choices?.[0]?.finish_reason,
+  });
+
   let responseWeight = calculateResponseWeight({ agentId: servedBy, response: "", requestDomain: alignment.domainInfo.domain });
 
   if (data.choices?.[0]?.message?.content) {

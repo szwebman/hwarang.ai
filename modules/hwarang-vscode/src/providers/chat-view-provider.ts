@@ -462,6 +462,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.webviewView?.webview.postMessage({ type: "clearChat" });
   }
 
+  /** 모드 변경을 채팅 뷰에 알림 (상태 표시용) */
+  notifyModeChange(mode: string) {
+    this.webviewView?.webview.postMessage({ type: "modeChanged", mode });
+  }
+
   private async handleUserMessage(text: string) {
     const webview = this.webviewView?.webview;
     if (!webview) return;

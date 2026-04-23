@@ -16,6 +16,7 @@
 import * as vscode from "vscode";
 import { LLMClient, ChatMessage, ToolCall } from "../providers/llm-client";
 import { ToolExecutor, TOOL_DEFINITIONS } from "./executor";
+import { getMode, getSystemPromptAddition } from "./mode";
 
 const MAX_ITERATIONS = 25;
 
@@ -115,8 +116,9 @@ export class AgentLoop {
           return;
         }
 
+        const currentMode = getMode();
         const messages: ChatMessage[] = [
-          { role: "system", content: SYSTEM_PROMPT },
+          { role: "system", content: SYSTEM_PROMPT + getSystemPromptAddition(currentMode) },
           ...this.conversationHistory,
         ];
 
@@ -205,8 +207,9 @@ export class AgentLoop {
 
       this.conversationHistory.push({ role: "user", content: fullMessage });
 
+      const currentMode = getMode();
       const messages: ChatMessage[] = [
-        { role: "system", content: SYSTEM_PROMPT },
+        { role: "system", content: SYSTEM_PROMPT + getSystemPromptAddition(currentMode) },
         ...this.conversationHistory,
       ];
 

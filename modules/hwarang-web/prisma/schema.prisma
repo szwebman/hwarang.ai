@@ -191,7 +191,7 @@ model TokenBalance {
 
   // ⭐ 하루 소진 관리
   dailyUsed       Int  @default(0)           // 오늘 사용한 토큰
-  dailyLimit      Int  @default(5000)        // 오늘 최대 소진 가능 (플랜에서 가져옴)
+  dailyLimit      Int  @default(1000000)     // 오늘 최대 소진 가능 (플랜에서 가져옴)
   dailyResetAt    DateTime?                  // 오늘 리셋 시간 (자정)
 
   // 월간 리셋 (구독 플랜용)
