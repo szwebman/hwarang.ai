@@ -102,9 +102,9 @@ model Plan {
   priceYearly   Int      @default(0)        // 연 가격 (원)
 
   // ⭐ 토큰 기반 제한 (모든 모델 공통 토큰 풀)
-  tokensIncluded    Int  @default(100000)   // 플랜에 포함된 월 토큰 수
-  dailyTokenLimit   Int  @default(50000)    // 하루 최대 소진 토큰 (폭주 방지)
-  maxTokensPerReq   Int  @default(8192)     // 요청 1회당 최대 토큰
+  tokensIncluded    Int  @default(10000000) // 플랜에 포함된 월 토큰 수
+  dailyTokenLimit   Int  @default(1000000)  // 하루 최대 소진 토큰 (폭주 방지)
+  maxTokensPerReq   Int  @default(16384)    // 요청 1회당 최대 토큰
   concurrentReqs    Int  @default(1)        // 동시 요청 수
   apiKeysAllowed    Int  @default(1)        // API 키 개수
 
