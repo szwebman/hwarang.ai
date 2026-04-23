@@ -133,8 +133,12 @@ export class LLMClient {
       temperature: this.config.temperature,
       max_tokens: this.config.maxTokens,
       stream: false,
+      stop: ["<|im_start|>", "<|im_end|>"],
     };
-    if (tools?.length) body.tools = tools;
+    if (tools?.length) {
+      body.tools = tools;
+      body.tool_choice = "auto";
+    }
 
     const url = `${this.config.apiUrl}/api/chat`;
     const resp = await fetch(url, {

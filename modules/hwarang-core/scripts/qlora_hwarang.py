@@ -81,17 +81,23 @@ def main():
 
     logger.info(f"  대화 수: {len(conversations):,}")
 
+    # 토크나이저 먼저 로드 (chat template 적용 위해)
+    from transformers import AutoTokenizer as _Tok
+    _pre_tokenizer = _Tok.from_pretrained(args.model_path, trust_remote_code=True)
+
     def format_conversation(messages):
-        text = ""
-        for msg in messages:
-            role = msg["role"]
-            content = msg["content"]
-            text += f"<|im_start|>{role}\n{content}<|im_end|>\n"
-        return text
+        # ⚠️ 반드시 apply_chat_template 사용
+        # 직접 <|im_start|> 넣으면 일반 텍스트로 토큰화되어 모델이 EOS 학습 못 함
+        return _pre_tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
 
     formatted = [{"text": format_conversation(conv)} for conv in conversations]
     dataset = Dataset.from_list(formatted)
     logger.info(f"  데이터셋 준비 완료: {len(dataset)} 예제")
+    logger.info(f"  샘플 확인:\n{formatted[0]['text'][:500]}...")
 
     # ============================================================
     # 2. 모델 로드 (bitsandbytes INT4 양자화)
