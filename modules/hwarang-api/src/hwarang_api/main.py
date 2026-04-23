@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from hwarang_api.config import Settings
-from hwarang_api.routers import admin, chat, cluster, grid, health, models
+from hwarang_api.routers import admin, chat, cluster, grid, health, knowledge, models
 from hwarang_api.services.model_manager import ModelManager
 
 logger = logging.getLogger(__name__)
@@ -27,6 +27,18 @@ model_manager = ModelManager()
 async def lifespan(app: FastAPI):
     """Application lifespan: startup and shutdown."""
     settings: Settings = app.state.settings
+
+    # HLKM 스케줄러 + Prisma 연결
+    from hwarang_api.db import prisma as hlkm_prisma, connect_db, disconnect_db
+    from hwarang_api.workers.hlkm_scheduler import get_scheduler
+
+    hlkm_scheduler = get_scheduler()
+    try:
+        await connect_db()
+        await hlkm_scheduler.start()
+        logger.info("HLKM scheduler started, Prisma connected")
+    except Exception as e:
+        logger.warning(f"HLKM 초기화 실패(계속 진행): {e}")
 
     if settings.distributed:
         # ===== Distributed mode: connect to Redis, workers handle models =====
@@ -65,6 +77,14 @@ async def lifespan(app: FastAPI):
         logger.info("Shutting down, unloading models...")
         await model_manager.unload_all()
 
+    # HLKM 스케줄러 + Prisma 종료
+    try:
+        await hlkm_scheduler.stop()
+        await disconnect_db()
+        logger.info("HLKM scheduler stopped, Prisma disconnected")
+    except Exception as e:
+        logger.warning(f"HLKM 종료 중 오류: {e}")
+
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Create and configure the FastAPI application."""
@@ -99,5 +119,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(admin.router, prefix="/admin", tags=["Admin"])
     app.include_router(cluster.router, prefix="/admin", tags=["Cluster"])
     app.include_router(grid.router, tags=["Grid/HFL"])
+    app.include_router(knowledge.router, tags=["Knowledge/HLKM"])
 
     return app

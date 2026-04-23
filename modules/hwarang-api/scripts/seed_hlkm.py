@@ -17,9 +17,26 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
+
+# .env 자동 로드 (DATABASE_URL 을 prisma 가 읽게)
+try:
+    from dotenv import load_dotenv
+
+    _here = Path(__file__).resolve().parent.parent  # modules/hwarang-api/
+    for candidate in [_here / ".env", _here.parent / "hwarang-web" / ".env"]:
+        if candidate.exists():
+            load_dotenv(candidate, override=False)
+except ImportError:
+    pass
+
+if not os.getenv("DATABASE_URL"):
+    print("❌ DATABASE_URL 이 설정되지 않았습니다. .env 파일 또는 환경변수로 지정하세요.", file=sys.stderr)
+    sys.exit(1)
 
 from hwarang_api.db import prisma
 from hwarang_api.knowledge import (

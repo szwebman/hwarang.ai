@@ -46,3 +46,24 @@ export function logout() {
   localStorage.removeItem("admin_user");
   window.location.href = "/login";
 }
+
+/**
+ * 관리자 API 공용 fetch 래퍼.
+ * admin_token 자동 첨부. 401/403 시 로그인 페이지로 리다이렉트.
+ */
+export async function adminFetch(input: string, init: RequestInit = {}): Promise<Response> {
+  const token = getAdminToken();
+  const headers = new Headers(init.headers || {});
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  if (!headers.has("Content-Type") && init.body) headers.set("Content-Type", "application/json");
+
+  const resp = await fetch(input, { ...init, headers });
+
+  if (resp.status === 401) {
+    if (typeof window !== "undefined") {
+      localStorage.removeItem("admin_token");
+      window.location.href = "/login";
+    }
+  }
+  return resp;
+}

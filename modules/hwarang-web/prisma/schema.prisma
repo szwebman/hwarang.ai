@@ -2,6 +2,12 @@ generator client {
   provider = "prisma-client-js"
 }
 
+generator pyclient {
+  provider             = "prisma-client-py"
+  interface            = "asyncio"
+  recursive_type_depth = 5
+}
+
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
@@ -440,11 +446,115 @@ model KnowledgeFact {
   contributedBy    String?                           // userId
   rewardPaid       Int       @default(0)             // 지급된 토큰 (HWARANG 코인)
 
+  // ═══ TAL (Truth Arbitration Layer) v3 ═══
+  sourceTier       SourceTier?                       // primary_official/peer_reviewed/general/user_generated
+  sourceAuthority  Float     @default(0.5)           // 도메인별 출처 위계 권위 (0~1)
+  originalFactId   String?                           // 복사본이면 원본 id
+  originalFact     KnowledgeFact?  @relation("FactProvenance", fields: [originalFactId], references: [id])
+  copies           KnowledgeFact[] @relation("FactProvenance")
+  provenanceType   ProvenanceType @default(INDEPENDENT)
+  copySimilarity   Float?                            // 복사본일 때 원본과의 유사도
+
+  stance           FactStance @default(FACTUAL)
+  stanceConfidence Float     @default(1.0)
+
+  falsifiability   Falsifiability @default(FALSIFIABLE)
+
+  retracted        Boolean   @default(false)
+  retractedAt      DateTime?
+  retractionReason String?   @db.Text
+  retractionSource String?                           // 정정 출처
+
+  parentClaimId    String?                           // claim decomposition 부모
+  parentClaim      KnowledgeFact?  @relation("ClaimDecomp", fields: [parentClaimId], references: [id])
+  subClaims        KnowledgeFact[] @relation("ClaimDecomp")
+  isAtomic         Boolean   @default(true)          // 원자적 주장인지
+
+  arbitratedScore  Float?                            // 최종 arbitrated_confidence 캐시
+
+  // ═══ v3.1: Multi-modal, Bias, Cross-lingual ═══
+  mediaType        MediaType @default(TEXT)
+  mediaUrl         String?                            // 이미지/영상 URL
+  mediaHash        String?                            // perceptual hash (pHash/dHash)
+  mediaMetadata    Json?                              // duration, resolution, size, exif 등
+
+  languageOriginal String?                            // "ko", "en", "ja" 원본 언어
+  translatedFromFactId String?                        // 번역 원본 fact id
+  translatedFrom   KnowledgeFact?  @relation("Translation", fields: [translatedFromFactId], references: [id])
+  translations     KnowledgeFact[] @relation("Translation")
+  translationQuality Float?                           // 번역 품질 추정 0~1
+
+  biasScore        Float?                             // 정치 편향 -1 (진보) ~ 0 (중립) ~ +1 (보수)
+  biasLabel        BiasLabel?
+  biasDetections   BiasDetection[]
+
   @@index([domain, validTo])
   @@index([entity, validFrom])
   @@index([status, nextCheckAt])
   @@index([contentHash])
   @@index([ownerUserId, visibility])
+  @@index([sourceTier, domain])
+  @@index([retracted])
+  @@index([originalFactId])
+  @@index([parentClaimId])
+  @@index([mediaType])
+  @@index([languageOriginal])
+  @@index([translatedFromFactId])
+  @@index([biasLabel])
+}
+
+enum SourceTier {
+  PRIMARY_OFFICIAL     // 법령 원문, 정부 공식 고시
+  PEER_REVIEWED        // 논문, 학술지
+  SPECIALIZED_MEDIA    // 법률신문, 의학신문 같은 전문 매체
+  GENERAL_MEDIA        // 종합 신문/방송
+  USER_GENERATED       // 블로그, 커뮤니티, SNS
+  UNKNOWN
+}
+
+enum ProvenanceType {
+  INDEPENDENT          // 독립 보도
+  COPY_OF              // 같은 내용 복사/전재
+  TRANSLATION          // 번역본
+  QUOTATION            // 인용 (일부 발췌)
+  SUMMARY              // 요약본
+  DERIVED              // 파생 (해석/분석)
+}
+
+enum FactStance {
+  FACTUAL              // 검증 가능한 사실 (수치, 날짜, 법령)
+  INTERPRETATION       // 해석 (전문가의 법률 해석)
+  OPINION              // 의견 (좋다/나쁘다)
+  CONTESTED            // 논쟁 중 (양측 입장 존재)
+  PROPAGANDA           // 선전/홍보성
+}
+
+enum Falsifiability {
+  UNFALSIFIABLE        // 수학 정리, 논리적 진리 (반증 불가)
+  FALSIFIABLE          // 관측 가능한 사실 (반증 가능)
+  TIME_DEPENDENT       // 미래 예측 (시간이 지나면 확인됨)
+  VALUE_JUDGMENT       // 가치 판단 (반증 개념이 안 맞음)
+  UNCLEAR              // 분류 불명확
+}
+
+enum MediaType {
+  TEXT
+  IMAGE
+  VIDEO
+  AUDIO
+  DOCUMENT            // PDF, DOCX 등
+  MIXED               // 텍스트 + 이미지 혼합
+}
+
+enum BiasLabel {
+  FAR_LEFT            // -1.0 ~ -0.66
+  PROGRESSIVE         // -0.66 ~ -0.2
+  CENTRIST            // -0.2 ~ +0.2
+  CONSERVATIVE        // +0.2 ~ +0.66
+  FAR_RIGHT           // +0.66 ~ +1.0
+  MIXED               // 양측 요소 섞임 (인용 위주)
+  NON_POLITICAL       // 정치 도메인 아님
+  UNKNOWN
 }
 
 enum KnowledgeStatus {
@@ -544,9 +654,292 @@ model KnowledgeGap {
   failureCount   Int       @default(1)
   firstSeenAt    DateTime  @default(now())
   lastSeenAt     DateTime  @default(now())
-  status         String    @default("open")   // open, searching, filled, abandoned
+  status         String    @default("open")   // open, searching, proposed, filled, abandoned
   filledByFactId String?
+  searchAttempts Int       @default(0)
+  lastSearchAt   DateTime?
 
   @@unique([topic])
   @@index([status, failureCount])
+}
+
+// ============================================================
+// HLKM v2 개량: XAI / Reputation / Community / Hypothesis / Audit / GDPR
+// ============================================================
+
+// 출처 신뢰도 (④ Source Reputation)
+model SourceReputation {
+  id                    String   @id @default(cuid())
+  source                String   @unique
+  sourceType            String   @default("user")    // user/crawl/official/agent/community
+  totalFacts            Int      @default(0)
+  confirmedUnchanged    Int      @default(0)       // 재검증 때 OK
+  invalidated           Int      @default(0)       // 나중에 틀린 것으로 판명
+  updatedCount          Int      @default(0)       // 자가 검증 시 내용 변경됨
+  reputation            Float    @default(0.7)     // 0~1 (초기 0.7 중립)
+  lastUpdated           DateTime @default(now())
+  notes                 String?  @db.Text
+
+  @@index([reputation])
+}
+
+// 지식 커뮤니티 (② Community Detection)
+model KnowledgeCommunity {
+  id            String    @id @default(cuid())
+  name          String                              // 자동 또는 수동 명명
+  algorithm     String    @default("louvain")
+  domain        String?
+  factIds       String[]                            // 구성원 fact ids
+  summary       String?   @db.Text                  // LLM 생성 요약
+  summaryModel  String?                             // 요약 생성 모델 버전
+  size          Int       @default(0)
+  cohesion      Float     @default(0.0)             // 내부 유사도
+  centralFactId String?                             // 대표 사실
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  version       Int       @default(1)
+
+  @@index([domain, size])
+  @@index([centralFactId])
+}
+
+// 자동 생성된 가설 (⑦ Hypothesis Generation)
+model KnowledgeHypothesis {
+  id            String    @id @default(cuid())
+  statement     String    @db.Text                  // "A가 C를 가능하게 한다" 같은 가설 문장
+  relation      KnowledgeRelation
+  fromFactId    String
+  toFactId      String
+  pathFactIds   String[]                            // 추론 경로의 중간 사실들
+  confidence    Float                               // 0~1
+  rationale     String    @db.Text                  // LLM 생성 근거
+  status        String    @default("pending")       // pending, accepted, rejected
+  reviewedBy    String?                             // userId
+  reviewedAt    DateTime?
+  reviewNote    String?
+  createdAt     DateTime  @default(now())
+
+  @@index([status, confidence])
+}
+
+// 답변 근거 체인 (① XAI)
+model AnswerEvidence {
+  id               String   @id @default(cuid())
+  questionHash     String                           // 질문 해시 (재사용)
+  questionText     String   @db.Text
+  answerText       String   @db.Text
+  factIds          String[]                         // 근거로 쓴 사실들
+  confidenceFactors Json                            // {source_reputation, time_decay, cross_source}
+  asOfDate         DateTime?
+  userId           String?
+  createdAt        DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([questionHash])
+}
+
+// 블록체인 앵커링 (⑨ Audit Log)
+model AuditAnchor {
+  id           String   @id @default(cuid())
+  anchorDate   DateTime                               // 하루치 묶음 날짜 (자정 기준)
+  merkleRoot   String                                 // 머클 루트 해시
+  eventCount   Int                                    // 이 날짜의 이벤트 개수
+  chainTxHash  String?                                // HWARANG 체인 트랜잭션 해시 (anchored 후)
+  chainBlockId String?
+  anchoredAt   DateTime?
+  events       AuditEvent[]
+
+  @@unique([anchorDate])
+  @@index([anchoredAt])
+}
+
+model AuditEvent {
+  id          String   @id @default(cuid())
+  anchorId    String?
+  anchor      AuditAnchor? @relation(fields: [anchorId], references: [id])
+  eventType   String                                  // fact.create, fact.update, fact.delete, community.update, ...
+  targetId    String                                  // 대상 엔티티 ID
+  actorId     String?                                 // userId 또는 system
+  beforeHash  String?                                 // 변경 전 상태 해시
+  afterHash   String                                  // 변경 후 상태 해시
+  metadata    Json?
+  occurredAt  DateTime @default(now())
+
+  @@index([eventType, occurredAt])
+  @@index([targetId])
+  @@index([anchorId])
+}
+
+// ═══ TAL (Truth Arbitration Layer) v3 신규 테이블 ═══
+
+// 도메인별 출처 위계 레지스트리 (① Source Hierarchy)
+model SourceHierarchyRule {
+  id         String   @id @default(cuid())
+  domain     String                                // law, medical, politics, general, ...
+  level      Int                                   // 1이 최상위
+  pattern    String                                // 정규식 또는 URL 도메인 매칭
+  tier       SourceTier
+  authority  Float                                 // 0~1
+  note       String?  @db.Text
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([domain, level])
+  @@index([tier])
+}
+
+// 정정/철회 사건 (③ Retraction Tracking)
+model RetractionEvent {
+  id             String   @id @default(cuid())
+  factId         String                               // 영향받은 사실
+  retractedBy    String                               // 정정 발행 출처
+  retractionUrl  String?
+  retractionDate DateTime
+  retractionType String                               // correction/retraction/update
+  reason         String   @db.Text
+  detectedAt     DateTime @default(now())
+  detectedBy     String   @default("auto")           // auto/manual/external
+  verified       Boolean  @default(false)
+  verifiedBy     String?                              // userId
+  verifiedAt     DateTime?
+
+  @@index([factId])
+  @@index([retractionDate])
+  @@index([verified])
+}
+
+// 전파 관계 (② Provenance Chain)
+model ProvenanceEdge {
+  id              String   @id @default(cuid())
+  sourceFactId    String                               // 복사한 쪽
+  targetFactId    String                               // 원본
+  relationType    ProvenanceType
+  similarity      Float                                // Jaccard 또는 embedding 유사도
+  timeGapHours    Float?                               // 원본 발행 후 몇 시간 뒤 복사?
+  evidence        String?  @db.Text                    // 판단 근거
+  detectedAt      DateTime @default(now())
+
+  @@unique([sourceFactId, targetFactId])
+  @@index([targetFactId])
+  @@index([relationType])
+}
+
+// ═══ v3.1: 외부 정정 DB 연동 ═══
+model ExternalRetractionSource {
+  id             String   @id @default(cuid())
+  providerName   String   @unique                     // "retraction_watch", "kpcc" (언론중재위), "snopes"
+  baseUrl        String
+  apiKey         String?                              // 필요 시
+  active         Boolean  @default(true)
+  domain         String                               // medical/news/general
+  lastSyncAt     DateTime?
+  syncIntervalHours Int   @default(24)
+  createdAt      DateTime @default(now())
+}
+
+// ═══ v3.1: 정치 도메인 편향 감지 ═══
+model BiasDetection {
+  id             String   @id @default(cuid())
+  factId         String
+  fact           KnowledgeFact @relation(fields: [factId], references: [id], onDelete: Cascade)
+  method         String                               // 'lexicon', 'source_based', 'llm'
+  biasScore      Float                                // -1 ~ +1
+  biasLabel      BiasLabel
+  confidence     Float    @default(0.7)
+  triggerPhrases String[]                             // 편향 판단 근거 문구
+  detectedAt     DateTime @default(now())
+  verifiedBy     String?                              // admin 검증
+  verifiedAt     DateTime?
+
+  @@index([factId, detectedAt])
+  @@index([biasLabel, confidence])
+}
+
+// ═══ v3.1: 언론사 편향 레지스트리 ═══
+model MediaBiasProfile {
+  id             String   @id @default(cuid())
+  mediaOutlet    String   @unique                     // "chosun", "hani", "ohmynews"
+  displayName    String
+  domain         String?                              // 매칭용 URL 도메인
+  biasScore      Float                                // 전체 편향 점수
+  biasLabel      BiasLabel
+  factualityRating String                             // "high", "mixed", "low"
+  sources        String[]                             // 참조한 외부 분석 (AllSides, MBFC 등)
+  notes          String?  @db.Text
+  updatedAt      DateTime @updatedAt
+}
+
+// ═══ v3.1: 번역 관계 테이블 (세부 추적) ═══
+model TranslationLink {
+  id              String   @id @default(cuid())
+  sourceFactId    String                              // 번역본
+  targetFactId    String                              // 원문
+  sourceLang      String
+  targetLang      String
+  translationMethod String                            // "human", "machine", "ai_llm", "unknown"
+  confidence      Float                               // 번역 원본 추정 신뢰도
+  textSimilarity  Float?                              // 교차언어 임베딩 유사도
+  detectedAt      DateTime @default(now())
+
+  @@unique([sourceFactId, targetFactId])
+  @@index([sourceLang, targetLang])
+}
+
+// ═══ v3.1: 미디어 사실 메타데이터 ═══
+model MediaFact {
+  id              String   @id @default(cuid())
+  factId          String   @unique
+  fact            KnowledgeFact @relation(fields: [factId], references: [id], onDelete: Cascade)
+  mediaType       MediaType
+  fileUrl         String
+  thumbnailUrl    String?
+  perceptualHash  String                              // pHash/dHash
+  simHash         String?                             // 시각 simhash 64bit
+  ocrText         String?  @db.Text                   // 이미지에서 추출한 텍스트
+  transcription   String?  @db.Text                   // 영상/오디오 스크립트
+  detectedObjects String[]                            // 객체 감지 결과 (광고/로고/얼굴 등)
+  deepfakeScore   Float?                              // 딥페이크 의심도 0~1
+  manipulationFlags String[]                          // crop, edit, filter 등
+  originalSize    Int?                                // 바이트
+  duration        Float?                              // 초 (영상/오디오)
+  resolution      String?                             // "1920x1080"
+  exifData        Json?
+  createdAt       DateTime @default(now())
+
+  @@index([perceptualHash])
+  @@index([deepfakeScore])
+}
+
+// 원자 주장 분해 (⑤ Claim Decomposition)
+model DecomposedClaim {
+  id               String   @id @default(cuid())
+  parentFactId     String                               // 원본 뉴스/사실
+  atomicStatement  String   @db.Text                    // 원자적 주장
+  claimType        String                               // numeric/date/attribution/causal/qualitative
+  verifiableValue  String?  @db.Text                    // 검증 가능한 값
+  verificationStatus String  @default("pending")        // pending/verified/refuted/unverifiable
+  verifiedByFactId String?                              // 이 주장을 지지/반박하는 다른 사실
+  confidence       Float    @default(0.5)
+  extractedAt      DateTime @default(now())
+
+  @@index([parentFactId])
+  @@index([verificationStatus])
+}
+
+// GDPR 삭제 요청 (⑩ Right-to-be-Forgotten)
+model ForgetRequest {
+  id            String   @id @default(cuid())
+  userId        String                                  // 삭제 요청자
+  scope         String                                  // "all_private", "specific_facts", "contributions"
+  targetFactIds String[]                                // scope=specific_facts 일 때
+  reason        String?  @db.Text
+  status        String   @default("pending")            // pending, approved, completed, rejected
+  requestedAt   DateTime @default(now())
+  processedAt   DateTime?
+  processedBy   String?
+  reportUrl     String?                                 // 처리 완료 리포트 (감사 목적)
+
+  @@index([userId, requestedAt])
+  @@index([status])
 }
