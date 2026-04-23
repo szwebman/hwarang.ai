@@ -383,3 +383,170 @@ model SystemSetting {
   value     String   @db.Text
   updatedAt DateTime @updatedAt
 }
+
+// ============================================================
+// Living Knowledge Mesh (HLKM)
+// Temporal Causal Knowledge Mesh - 시간/인과/모순 인식 지식 그래프
+// ============================================================
+
+model KnowledgeFact {
+  id               String    @id @default(cuid())
+  content          String    @db.Text
+  contentHash      String                            // 중복 감지용 sha256
+  embeddingHex     String?   @db.Text                // pgvector 확장 연결 전 임시 (hex encoded float32[])
+
+  // 분류
+  domain           String                            // "law", "tech", "medical", "finance", "general"
+  entity           String?                           // 같은 주제(최저시급, 근로기준법) 묶는 키
+  tags             String[]  @default([])
+  language         String    @default("ko")
+
+  // 시간 축 (Temporal)
+  validFrom        DateTime
+  validTo          DateTime?                         // NULL = 현재 유효
+  createdAt        DateTime  @default(now())
+  lastVerifiedAt   DateTime  @default(now())
+  nextCheckAt      DateTime?                         // 반감기 기반 자동 재검증 시점
+
+  // 신뢰도 (Dynamic Confidence)
+  confidenceT0     Float     @default(1.0)           // 초기 신뢰도
+  halfLifeDays     Int?                              // 카테고리별 반감기 (NULL = 영속)
+
+  // 상태 (Predictive)
+  status           KnowledgeStatus @default(CONFIRMED)
+  predictedValidFrom     DateTime?                   // pending일 때 예상 발효일
+  predictionConfidence   Float?                      // 예측 확률 (0~1)
+  expiredReason    String?
+
+  // 출처
+  source           String                            // 출처 이름
+  sourceUrl        String?
+  sourceType       String    @default("user")        // user, crawl, official, agent, community
+
+  // 계층 (Multi-tier privacy)
+  visibility       KnowledgeVisibility @default(PUBLIC)
+  ownerUserId      String?                           // private일 때만
+
+  // 버전/승계 관계
+  supersedesId     String?
+  supersedes       KnowledgeFact?  @relation("FactVersionChain", fields: [supersedesId], references: [id])
+  supersededBy     KnowledgeFact[] @relation("FactVersionChain")
+
+  // 관계 (그래프 엣지)
+  outgoingEdges    KnowledgeEdge[] @relation("FromFact")
+  incomingEdges    KnowledgeEdge[] @relation("ToFact")
+
+  // 기여 / 보상
+  contributedBy    String?                           // userId
+  rewardPaid       Int       @default(0)             // 지급된 토큰 (HWARANG 코인)
+
+  @@index([domain, validTo])
+  @@index([entity, validFrom])
+  @@index([status, nextCheckAt])
+  @@index([contentHash])
+  @@index([ownerUserId, visibility])
+}
+
+enum KnowledgeStatus {
+  CONFIRMED   // 확정된 사실
+  PENDING     // 미확정 (예: 법안 발의만 된 상태)
+  PREDICTED   // AI가 예측한 미래 상태
+  EXPIRED     // 만료됨 (과거)
+  RETRACTED   // 철회/무효 (출처 자체 취소)
+  DISPUTED    // 모순 발생 중 (관리자 검토 대기)
+}
+
+enum KnowledgeVisibility {
+  PUBLIC      // 모든 사용자 공유
+  PRIVATE     // 개인 전용 (암호화)
+  TEAM        // 팀/워크스페이스 공유
+  RESTRICTED  // 특정 권한 있어야 접근
+}
+
+model KnowledgeEdge {
+  id             String    @id @default(cuid())
+  fromFactId     String
+  fromFact       KnowledgeFact @relation("FromFact", fields: [fromFactId], references: [id], onDelete: Cascade)
+  toFactId       String
+  toFact         KnowledgeFact @relation("ToFact", fields: [toFactId], references: [id], onDelete: Cascade)
+
+  relationType   KnowledgeRelation
+  strength       Float     @default(1.0)   // 0.0~1.0
+  evidence       String?   @db.Text        // 판단 근거 텍스트
+  verifiedBy     String    @default("ai")  // ai, human, consensus
+
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([fromFactId, toFactId, relationType])
+  @@index([relationType, strength])
+}
+
+enum KnowledgeRelation {
+  CAUSES           // A → B 야기
+  ENABLES          // A → B 가능케 함
+  CONTRADICTS      // A ⚡ B 모순
+  SUPPORTS         // A → B 보강/증거
+  DERIVED_FROM     // A ← B 파생
+  RELATED_TO       // A ~ B 관련
+  SPECIALIZES      // A ⊂ B 특수화
+  GENERALIZES      // A ⊃ B 일반화
+  TEMPORAL_AFTER   // A > B 시간 후속
+  ALTERNATIVE_TO   // A ≈ B 대안
+}
+
+// 자가 검증 / 재확인 로그
+model KnowledgeVerification {
+  id             String    @id @default(cuid())
+  factId         String
+  verifiedAt     DateTime  @default(now())
+  method         String                    // 'source_refetch', 'llm_check', 'cross_source', 'community'
+  result         String                    // 'unchanged', 'updated', 'invalidated', 'source_gone'
+  confidenceDelta Float    @default(0.0)
+  notes          String?   @db.Text
+
+  @@index([factId, verifiedAt])
+}
+
+// 모순 사건 기록
+model KnowledgeConflict {
+  id             String    @id @default(cuid())
+  factAId        String
+  factBId        String
+  detectedAt     DateTime  @default(now())
+  resolutionState String   @default("open")   // open, resolved_A, resolved_B, coexist, escalated
+  resolutionNote String?   @db.Text
+  resolvedBy     String?                      // userId of admin
+  resolvedAt     DateTime?
+
+  @@index([resolutionState, detectedAt])
+}
+
+// 지식 기여 이력 (코인 지급 근거)
+model KnowledgeContribution {
+  id             String    @id @default(cuid())
+  factId         String
+  contributorId  String
+  acceptedAt     DateTime  @default(now())
+  qualityScore   Float                        // 0~1
+  uniquenessScore Float
+  reward         Int                          // 지급 토큰
+  votesUp        Int       @default(0)
+  votesDown      Int       @default(0)
+
+  @@index([contributorId, acceptedAt])
+}
+
+// 지식 공백 (사용자가 자주 묻지만 답 못한 주제)
+model KnowledgeGap {
+  id             String    @id @default(cuid())
+  topic          String
+  failureCount   Int       @default(1)
+  firstSeenAt    DateTime  @default(now())
+  lastSeenAt     DateTime  @default(now())
+  status         String    @default("open")   // open, searching, filled, abandoned
+  filledByFactId String?
+
+  @@unique([topic])
+  @@index([status, failureCount])
+}
