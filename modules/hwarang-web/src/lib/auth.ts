@@ -90,12 +90,18 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
 
           // 토큰 잔액이 없으면 초기 토큰 지급
           if (existingUser && !existingUser.tokenBalance) {
+            const now = new Date();
+            const nextMonthFirst = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+            const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
             await prisma.tokenBalance.create({
               data: {
                 userId: user.id,
-                balance: 10000000,    // Free 플랜: 10M 토큰
-                dailyLimit: 1000000,
-                totalCharged: 10000000,
+                balance: 50000000,    // Free 플랜: 50M 토큰 (5배 상향)
+                dailyLimit: 5000000,
+                totalCharged: 50000000,
+                dailyResetAt: tomorrow,
+                monthlyResetAt: nextMonthFirst,
+                lastResetAt: now,
               },
             });
 
@@ -104,8 +110,8 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
               data: {
                 userId: user.id,
                 type: "PLAN_CREDIT",
-                amount: 10000000,
-                balance: 10000000,
+                amount: 50000000,
+                balance: 50000000,
                 description: "회원가입 웰컴 토큰 (Free 플랜)",
               },
             });

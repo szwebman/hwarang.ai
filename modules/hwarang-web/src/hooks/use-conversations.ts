@@ -13,12 +13,17 @@ export function useConversations() {
       const response = await fetch("/api/conversations");
       if (response.ok) {
         const data = await response.json();
+        // 서버는 { conversations: [...] } 형식. 구버전 호환을 위해 배열도 허용.
+        const list: Array<Record<string, string>> = Array.isArray(data)
+          ? data
+          : data?.conversations ?? [];
         setConversations(
-          data.map((c: Record<string, string>) => ({
+          list.map((c) => ({
             ...c,
+            messages: [],
             createdAt: new Date(c.createdAt),
             updatedAt: new Date(c.updatedAt),
-          }))
+          })) as unknown as Conversation[]
         );
       }
     } catch (error) {

@@ -55,7 +55,10 @@ export async function POST(request: NextRequest) {
   // ─── 1. 인증 (세션 또는 API 키) ────────────────────────
   const userId = await resolveUserId(request);
   if (!userId) {
-    return Response.json({ error: "로그인이 필요합니다" }, { status: 401 });
+    return Response.json(
+      { error: "로그인이 필요합니다", code: "AUTH_REQUIRED" },
+      { status: 401 }
+    );
   }
   let body = await request.json();
 
@@ -65,7 +68,38 @@ export async function POST(request: NextRequest) {
     include: { plan: true, tokenBalance: true },
   });
 
-  if (!user) return Response.json({ error: "유저 없음" }, { status: 404 });
+  if (!user) {
+    return Response.json(
+      { error: "사용자 정보를 찾을 수 없습니다", code: "USER_NOT_FOUND" },
+      { status: 404 }
+    );
+  }
+
+  // ─── 2.5. Conversation 영속화 (좌측 채팅 리스트 표시용) ──
+  const lastUserMessage = [...(body.messages || [])]
+    .reverse()
+    .find((m: any) => m.role === "user");
+  let conversationId: string | null = body.conversationId ?? null;
+  if (lastUserMessage?.content) {
+    const titleSeed = String(lastUserMessage.content).slice(0, 40).replace(/\s+/g, " ").trim() || "새 대화";
+    if (conversationId) {
+      const existing = await prisma.conversation.findFirst({
+        where: { id: conversationId, userId },
+        select: { id: true },
+      });
+      if (!existing) conversationId = null;
+    }
+    if (!conversationId) {
+      const created = await prisma.conversation.create({
+        data: { userId, title: titleSeed, model: body.model || "auto" },
+        select: { id: true },
+      });
+      conversationId = created.id;
+    }
+    await prisma.message.create({
+      data: { conversationId, role: "user", content: String(lastUserMessage.content) },
+    }).catch(() => {});
+  }
 
   // ─── 3. 자동 모델 선택 (도메인 + 복잡도 + 플랜 기반) ──
   // 유저가 명시적으로 model을 지정하면 그것 사용, 아니면 자동 선택
@@ -117,7 +151,13 @@ export async function POST(request: NextRequest) {
     });
   }
   if (!aiModel) {
-    return Response.json({ error: "사용 가능한 AI 모델이 없습니다" }, { status: 503 });
+    return Response.json(
+      {
+        error: "사용 가능한 AI 모델이 없습니다. 잠시 후 다시 시도해 주세요.",
+        code: "NO_MODEL_AVAILABLE",
+      },
+      { status: 503 }
+    );
   }
 
   // 플랜 제한 체크
@@ -128,10 +168,15 @@ export async function POST(request: NextRequest) {
     const userTier = planTiers[user.plan?.name || "free"] ?? 0;
     const requiredTier = planTiers[aiModel.minPlan] ?? 0;
     if (userTier < requiredTier) {
-      return Response.json({
-        error: `이 모델은 ${aiModel.minPlan} 이상 플랜에서만 사용 가능합니다`,
-        upgradeRequired: aiModel.minPlan,
-      }, { status: 403 });
+      return Response.json(
+        {
+          error: `이 모델은 ${aiModel.minPlan.toUpperCase()} 이상 플랜에서만 사용 가능합니다. 플랜을 업그레이드해 주세요.`,
+          code: "PLAN_UPGRADE_REQUIRED",
+          upgradeRequired: aiModel.minPlan,
+          detail: `userTier=${user.plan?.name || "free"} required=${aiModel.minPlan}`,
+        },
+        { status: 403 }
+      );
     }
   }
 
@@ -140,10 +185,24 @@ export async function POST(request: NextRequest) {
   const dailyLimit = user.tokenBalance?.dailyLimit ?? 0;
 
   if (balance <= 0) {
-    return Response.json({ error: "토큰이 부족합니다" }, { status: 402 });
+    return Response.json(
+      {
+        error: "토큰이 부족합니다. 대시보드에서 충전하거나 플랜을 업그레이드해 주세요.",
+        code: "INSUFFICIENT_TOKENS",
+        detail: `balance=${balance}`,
+      },
+      { status: 402 }
+    );
   }
   if (dailyLimit > 0 && dailyUsed >= dailyLimit) {
-    return Response.json({ error: "일일 사용 한도 초과" }, { status: 429 });
+    return Response.json(
+      {
+        error: "오늘 토큰 한도를 모두 사용했습니다. 자정에 자동 리셋됩니다.",
+        code: "DAILY_LIMIT_EXCEEDED",
+        detail: `dailyUsed=${dailyUsed} dailyLimit=${dailyLimit}`,
+      },
+      { status: 429 }
+    );
   }
 
   // ─── 4. 정렬 프레임워크 적용 ─────────────────────────
@@ -358,7 +417,11 @@ export async function POST(request: NextRequest) {
       servedBy = "server:fallback";
     } catch {
       return Response.json(
-        { error: "AI 서버와 에이전트 모두 응답 없음" },
+        {
+          error: "AI 모델이 잠시 응답하지 못합니다. 다른 모델로 시도해 보세요.",
+          code: "AI_BACKEND_UNAVAILABLE",
+          detail: "서버와 에이전트 모두 응답 없음",
+        },
         { status: 503 }
       );
     }
@@ -378,14 +441,47 @@ export async function POST(request: NextRequest) {
     }
     const errorText = await apiResponse.text();
     return Response.json(
-      { error: `AI 서버 오류 (${apiResponse.status})`, detail: errorText },
+      {
+        error: "AI 서버 응답 오류입니다. 잠시 후 다시 시도해 주세요.",
+        code: "AI_BACKEND_ERROR",
+        detail: `HTTP ${apiResponse.status}: ${errorText.slice(0, 300)}`,
+      },
       { status: apiResponse.status }
     );
   }
 
   // ─── 6. 스트리밍 ───────────────────────────────────
   if (body.stream) {
-    return new Response(apiResponse.body, {
+    let assembled = "";
+    const tap = new TransformStream({
+      transform(chunk, controller) {
+        try {
+          const text = new TextDecoder().decode(chunk);
+          for (const line of text.split("\n")) {
+            const m = line.match(/^data:\s*(.+)$/);
+            if (!m || m[1] === "[DONE]") continue;
+            try {
+              const j = JSON.parse(m[1]);
+              const delta = j.choices?.[0]?.delta?.content;
+              if (delta) assembled += delta;
+            } catch {}
+          }
+        } catch {}
+        controller.enqueue(chunk);
+      },
+      flush() {
+        if (conversationId && assembled) {
+          prisma.message.create({
+            data: { conversationId, role: "assistant", content: assembled },
+          }).catch(() => {});
+          prisma.conversation.update({
+            where: { id: conversationId },
+            data: { updatedAt: new Date() },
+          }).catch(() => {});
+        }
+      },
+    });
+    return new Response(apiResponse.body!.pipeThrough(tap), {
       headers: {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
@@ -393,6 +489,7 @@ export async function POST(request: NextRequest) {
         "X-Model-Name": aiModel.name,
         "X-Domain": alignment.domainInfo.domain,
         "X-Risk-Level": alignment.domainInfo.riskLevel,
+        "X-Conversation-Id": conversationId || "",
       },
     });
   }
@@ -496,10 +593,27 @@ export async function POST(request: NextRequest) {
         },
       },
     }),
+    ...(conversationId && data.choices?.[0]?.message?.content
+      ? [
+          prisma.message.create({
+            data: {
+              conversationId,
+              role: "assistant",
+              content: String(data.choices[0].message.content),
+              tokenCount: completionTokens,
+            },
+          }),
+          prisma.conversation.update({
+            where: { id: conversationId },
+            data: { updatedAt: new Date(), model: aiModel.name },
+          }),
+        ]
+      : []),
   ]).catch((e) => console.error("DB 업데이트 실패:", e));
 
   // 메타데이터
   data._meta = {
+    conversationId,
     model: aiModel.name,
     displayName: aiModel.displayName,
     tier: aiModel.tier,

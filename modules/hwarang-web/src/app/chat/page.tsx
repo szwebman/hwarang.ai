@@ -1,14 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChatArea } from "@/components/chat/chat-area";
 import { Sidebar } from "@/components/sidebar/sidebar";
 import { Header } from "@/components/layout/header";
-import type { Conversation } from "@/types/chat";
+import { useConversations } from "@/hooks/use-conversations";
 
 export default function Home() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const { conversations, refresh } = useConversations();
   const [activeConversationId, setActiveConversationId] = useState<
     string | null
   >(null);
@@ -16,6 +16,18 @@ export default function Home() {
   const handleNewChat = () => {
     setActiveConversationId(null);
   };
+
+  // 채팅 영역에서 새 메시지가 전송되면 좌측 리스트 갱신
+  useEffect(() => {
+    const handler = () => {
+      refresh();
+    };
+    if (typeof window !== "undefined") {
+      window.addEventListener("hwarang:conversation-changed", handler);
+      return () =>
+        window.removeEventListener("hwarang:conversation-changed", handler);
+    }
+  }, [refresh]);
 
   return (
     <div className="flex h-screen overflow-hidden" style={{ background: "var(--background)" }}>

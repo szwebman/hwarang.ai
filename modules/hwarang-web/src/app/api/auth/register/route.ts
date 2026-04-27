@@ -43,13 +43,19 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    // 토큰 잔액 초기화 (Free 플랜: 10M 토큰)
+    // 토큰 잔액 초기화 (Free 플랜: 50M 토큰, 5M/일)
+    const now = new Date();
+    const nextMonthFirst = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
     await prisma.tokenBalance.create({
       data: {
         userId: user.id,
-        balance: 10000000,
-        dailyLimit: 1000000,
-        totalCharged: 10000000,
+        balance: 50000000,
+        dailyLimit: 5000000,
+        totalCharged: 50000000,
+        dailyResetAt: tomorrow,
+        monthlyResetAt: nextMonthFirst,
+        lastResetAt: now,
       },
     });
 
@@ -58,8 +64,8 @@ export async function POST(request: NextRequest) {
       data: {
         userId: user.id,
         type: "PLAN_CREDIT",
-        amount: 10000,
-        balance: 10000,
+        amount: 50000000,
+        balance: 50000000,
         description: "회원가입 웰컴 토큰 (Free 플랜)",
       },
     });

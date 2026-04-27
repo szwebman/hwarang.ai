@@ -46,6 +46,11 @@
         "icon": "$(pulse)"
       },
       {
+        "command": "hwarang.openDashboard",
+        "title": "화랑 AI: 대시보드 열기",
+        "icon": "$(dashboard)"
+      },
+      {
         "command": "hwarang.openChat",
         "title": "화랑 AI: 채팅 열기",
         "icon": "$(comment-discussion)"

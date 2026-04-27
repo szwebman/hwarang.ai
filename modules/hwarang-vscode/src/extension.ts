@@ -84,6 +84,14 @@ export async function activate(context: vscode.ExtensionContext) {
 
     vscode.commands.registerCommand("hwarang.logout", () => authManager.logout()),
 
+    // === 대시보드 열기 (토큰 충전 / 사용 내역) ===
+    vscode.commands.registerCommand("hwarang.openDashboard", () => {
+      const apiUrl =
+        vscode.workspace.getConfiguration("hwarang").get<string>("apiUrl") ||
+        "https://hwarang.ai";
+      vscode.env.openExternal(vscode.Uri.parse(`${apiUrl}/dashboard`));
+    }),
+
     // === 토큰 현황 ===
     vscode.commands.registerCommand("hwarang.showTokenStatus", async () => {
       if (!authManager.isLoggedIn) {

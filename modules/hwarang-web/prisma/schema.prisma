@@ -108,8 +108,8 @@ model Plan {
   priceYearly  Int @default(0) // 연 가격 (원)
 
   // ⭐ 토큰 기반 제한 (모든 모델 공통 토큰 풀)
-  tokensIncluded  Int @default(10000000) // 플랜에 포함된 월 토큰 수
-  dailyTokenLimit Int @default(1000000) // 하루 최대 소진 토큰 (폭주 방지)
+  tokensIncluded  Int @default(50000000) // 플랜에 포함된 월 토큰 수 (5배 상향)
+  dailyTokenLimit Int @default(5000000) // 하루 최대 소진 토큰 (폭주 방지, 5배 상향)
   maxTokensPerReq Int @default(16384) // 요청 1회당 최대 토큰
   concurrentReqs  Int @default(1) // 동시 요청 수
   apiKeysAllowed  Int @default(1) // API 키 개수
@@ -197,13 +197,15 @@ model TokenBalance {
 
   // ⭐ 하루 소진 관리
   dailyUsed    Int       @default(0) // 오늘 사용한 토큰
-  dailyLimit   Int       @default(1000000) // 오늘 최대 소진 가능 (플랜에서 가져옴)
+  dailyLimit   Int       @default(5000000) // 오늘 최대 소진 가능 (플랜에서 가져옴, 5배 상향)
   dailyResetAt DateTime? // 오늘 리셋 시간 (자정)
 
   // 월간 리셋 (구독 플랜용)
-  monthlyReset Boolean   @default(true) // 매월 토큰 리셋 여부
-  lastResetAt  DateTime? // 마지막 리셋 시간
-  nextResetAt  DateTime? // 다음 리셋 시간
+  monthlyReset   Boolean   @default(true) // 매월 토큰 리셋 여부
+  monthlyUsed    Int       @default(0) // 이번 달 사용한 토큰
+  monthlyResetAt DateTime? // 다음 월 리셋 시간 (다음 달 1일)
+  lastResetAt    DateTime? // 마지막 리셋 시간
+  nextResetAt    DateTime? // 다음 리셋 시간
 
   updatedAt DateTime @updatedAt
 }

@@ -425,33 +425,53 @@ export class AuthManager {
     const dailyLimit = tokens.dailyLimit || 0;
     const dailyUsed = tokens.dailyUsed || 0;
     const totalUsed = tokens.totalUsed || 0;
+    const remaining = Math.max(0, dailyLimit - dailyUsed);
+    const percentLeft =
+      dailyLimit > 0 ? (remaining / dailyLimit) * 100 : 100;
 
-    // 잔액에 따른 경고 색상
-    if (balance < 1000 && balance > 0) {
-      this.statusBarItem.text = `$(warning) ${fmt(balance)} 토큰`;
-      this.statusBarItem.backgroundColor = new vscode.ThemeColor(
-        "statusBarItem.warningBackground"
-      );
-    } else if (balance === 0) {
-      this.statusBarItem.text = `$(error) 토큰 소진`;
+    // 일일 잔여량에 따른 아이콘 + 색상 (월 잔액 0이면 우선 처리)
+    let icon: string;
+    if (balance === 0) {
+      icon = "$(error)";
       this.statusBarItem.backgroundColor = new vscode.ThemeColor(
         "statusBarItem.errorBackground"
       );
-    } else {
-      this.statusBarItem.text = `$(pulse) ${fmt(balance)} 토큰`;
+    } else if (percentLeft < 10) {
+      icon = "$(warning)";
+      this.statusBarItem.backgroundColor = new vscode.ThemeColor(
+        "statusBarItem.warningBackground"
+      );
+    } else if (percentLeft < 30) {
+      icon = "$(history)";
       this.statusBarItem.backgroundColor = undefined;
+    } else {
+      icon = "$(pulse)";
+      this.statusBarItem.backgroundColor = undefined;
+    }
+
+    if (balance === 0) {
+      this.statusBarItem.text = `${icon} 토큰 소진`;
+    } else if (dailyLimit > 0) {
+      // 오늘 남은 양 / 일일 한도
+      this.statusBarItem.text = `${icon} ${fmt(remaining)} / ${fmt(dailyLimit)}`;
+    } else {
+      // 일일 한도 미설정 → 월 잔액만 표시
+      this.statusBarItem.text = `${icon} ${fmt(balance)} 토큰`;
     }
 
     const dailyPct =
       dailyLimit > 0 ? Math.round((dailyUsed / dailyLimit) * 100) : 0;
     this.statusBarItem.tooltip = [
-      `화랑 AI - ${this._user.name}`,
+      `화랑 AI — ${this._user.name}`,
       `${this._user.email || ""}`,
       `플랜: ${this._user.plan?.displayName || this._user.plan?.name || "무료"}`,
       ``,
-      `잔여: ${balance.toLocaleString()} 토큰`,
-      `오늘: ${dailyUsed.toLocaleString()} / ${dailyLimit.toLocaleString()} (${dailyPct}%)`,
+      `오늘 남은 양: ${remaining.toLocaleString()} 토큰`,
+      `일일 한도: ${dailyUsed.toLocaleString()} / ${dailyLimit.toLocaleString()} (${dailyPct}% 사용)`,
+      `월 잔액: ${balance.toLocaleString()}`,
       `누적 사용: ${totalUsed.toLocaleString()}`,
+      ``,
+      `클릭하면 토큰 현황 메뉴 열림`,
     ].join("\n");
 
     this.statusBarItem.show();

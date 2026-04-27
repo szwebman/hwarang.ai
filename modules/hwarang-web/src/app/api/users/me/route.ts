@@ -63,19 +63,46 @@ export async function GET(request: NextRequest) {
       return Response.json({ error: "유저를 찾을 수 없습니다" }, { status: 404 });
     }
 
-    // 일일 리셋 체크
+    // 일일 / 월간 lazy 리셋 체크
     if (user.tokenBalance) {
       const now = new Date();
-      const resetAt = user.tokenBalance.dailyResetAt;
-      if (!resetAt || now > resetAt) {
+      const updates: Record<string, unknown> = {};
+
+      // 일일 리셋
+      const dailyResetAt = user.tokenBalance.dailyResetAt;
+      if (!dailyResetAt || now > dailyResetAt) {
+        updates.dailyUsed = 0;
+        updates.dailyResetAt = new Date(
+          now.getFullYear(),
+          now.getMonth(),
+          now.getDate() + 1
+        );
+        user.tokenBalance.dailyUsed = 0;
+      }
+
+      // 월간 리셋 — monthlyResetAt 지났으면 plan.tokensIncluded 로 잔액 리필
+      const monthlyResetAt = (user.tokenBalance as { monthlyResetAt?: Date | null }).monthlyResetAt;
+      if (
+        user.tokenBalance.monthlyReset &&
+        (!monthlyResetAt || now > monthlyResetAt)
+      ) {
+        const planTokens = user.plan?.tokensIncluded ?? 50000000;
+        updates.balance = planTokens;
+        updates.monthlyUsed = 0;
+        updates.monthlyResetAt = new Date(
+          now.getFullYear(),
+          now.getMonth() + 1,
+          1
+        );
+        updates.lastResetAt = now;
+        user.tokenBalance.balance = planTokens;
+      }
+
+      if (Object.keys(updates).length > 0) {
         await prisma.tokenBalance.update({
           where: { userId },
-          data: {
-            dailyUsed: 0,
-            dailyResetAt: new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1),
-          },
+          data: updates,
         });
-        user.tokenBalance.dailyUsed = 0;
       }
     }
 

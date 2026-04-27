@@ -3,6 +3,7 @@
 import { useSession, signOut } from "next-auth/react";
 import { useTheme } from "@/components/providers/theme-provider";
 import Link from "next/link";
+import { TokenBalanceDisplay } from "./token-balance-display";
 
 interface HeaderProps {
   sidebarOpen: boolean;
@@ -61,6 +62,9 @@ export function Header({ sidebarOpen, onToggleSidebar }: HeaderProps) {
             </svg>
           )}
         </button>
+
+        {/* 토큰 잔량 (로그인 시) */}
+        {session && <TokenBalanceDisplay />}
 
         {/* 로그인/유저 */}
         {session ? (

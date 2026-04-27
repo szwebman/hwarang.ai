@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import { useChat } from "@/hooks/use-chat";
@@ -14,12 +15,16 @@ export function ChatArea() {
   const scrollRef = useAutoScroll(messages);
 
   // 로그인 안 되었으면 → 로그인 유도
-  const handleSendWithAuth = (text: string) => {
+  const handleSendWithAuth = async (text: string) => {
     if (!session) {
       router.push("/login");
       return;
     }
-    sendMessage(text);
+    await sendMessage(text);
+    // 좌측 사이드바 대화 리스트 갱신 트리거
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new Event("hwarang:conversation-changed"));
+    }
   };
 
   return (
@@ -90,9 +95,80 @@ export function ChatArea() {
           )}
 
           {error && (
-            <div className="flex items-center gap-2 text-sm px-4 py-3 rounded-xl mt-3 animate-fade-in"
-              style={{ background: "color-mix(in srgb, var(--destructive) 10%, transparent)", color: "var(--destructive)" }}>
-              {error}
+            <div
+              className="flex flex-wrap items-center gap-3 text-sm px-4 py-3 rounded-xl mt-3 animate-fade-in border"
+              style={{
+                background: "color-mix(in srgb, var(--destructive) 8%, transparent)",
+                borderColor: "color-mix(in srgb, var(--destructive) 30%, transparent)",
+                color: "var(--destructive)",
+              }}
+              role="alert"
+            >
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="shrink-0"
+              >
+                <circle cx="12" cy="12" r="10" />
+                <line x1="12" y1="8" x2="12" y2="12" />
+                <line x1="12" y1="16" x2="12.01" y2="16" />
+              </svg>
+              <span className="flex-1 min-w-0">{error.message}</span>
+
+              {/* 401 → 로그인 */}
+              {error.status === 401 && (
+                <Link
+                  href="/login"
+                  className="px-3 py-1.5 rounded-lg text-xs font-medium text-white gradient-bg hover:shadow-md transition-all"
+                >
+                  로그인
+                </Link>
+              )}
+
+              {/* 402 → 토큰 충전 */}
+              {error.status === 402 && (
+                <Link
+                  href="/pricing"
+                  className="px-3 py-1.5 rounded-lg text-xs font-medium text-white gradient-bg hover:shadow-md transition-all"
+                >
+                  토큰 충전
+                </Link>
+              )}
+
+              {/* 403 → 플랜 업그레이드 */}
+              {error.status === 403 && (
+                <Link
+                  href="/pricing"
+                  className="px-3 py-1.5 rounded-lg text-xs font-medium text-white gradient-bg hover:shadow-md transition-all"
+                >
+                  플랜 업그레이드
+                </Link>
+              )}
+
+              {/* 429 → 토큰 추가 구매 + 대시보드 */}
+              {error.status === 429 && (
+                <>
+                  <Link
+                    href="/dashboard"
+                    className="px-3 py-1.5 rounded-lg text-xs font-medium border hover:bg-[var(--muted)] transition-all"
+                    style={{ borderColor: "var(--border)", color: "var(--foreground)" }}
+                  >
+                    사용량 보기
+                  </Link>
+                  <Link
+                    href="/pricing"
+                    className="px-3 py-1.5 rounded-lg text-xs font-medium text-white gradient-bg hover:shadow-md transition-all"
+                  >
+                    추가 구매
+                  </Link>
+                </>
+              )}
             </div>
           )}
         </div>
