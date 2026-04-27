@@ -74,6 +74,59 @@ from modules.offline_agent import OfflineAgentModule
 from modules.p2p_collaboration import P2PCollaborationModule
 from modules.reputation import ReputationModule
 
+# ──────────────────────────────────────────────────────────────────
+# HWARANG Grid 확장 모듈 (도메인 특화 + 라운드 오케스트레이션)
+# 각 모듈은 graceful import — 선택적 의존성 누락 시 스킵.
+# ──────────────────────────────────────────────────────────────────
+try:
+    from modules import domain_specialization
+except Exception as _exc:
+    domain_specialization = None  # type: ignore
+    logger.warning("domain_specialization 임포트 실패: %s", _exc)
+
+try:
+    from modules import round_subscription
+except Exception as _exc:
+    round_subscription = None  # type: ignore
+    logger.warning("round_subscription 임포트 실패: %s", _exc)
+
+try:
+    from modules import participation_control
+except Exception as _exc:
+    participation_control = None  # type: ignore
+    logger.warning("participation_control 임포트 실패: %s", _exc)
+
+try:
+    from modules import contribution_vote
+except Exception as _exc:
+    contribution_vote = None  # type: ignore
+    logger.warning("contribution_vote 임포트 실패: %s", _exc)
+
+try:
+    from modules import earnings_tracker
+except Exception as _exc:
+    earnings_tracker = None  # type: ignore
+    logger.warning("earnings_tracker 임포트 실패: %s", _exc)
+
+try:
+    from modules import safety_guards
+except Exception as _exc:
+    safety_guards = None  # type: ignore
+    logger.warning("safety_guards 임포트 실패: %s", _exc)
+
+# 데몬 모드 plumbing — 모두 graceful import (없어도 정상 동작)
+try:
+    from modules import status_writer  # type: ignore
+except Exception as _exc:
+    status_writer = None  # type: ignore
+    logger.warning("status_writer 임포트 실패: %s", _exc)
+
+try:
+    from modules import pid_manager  # type: ignore
+except Exception as _exc:
+    pid_manager = None  # type: ignore
+    logger.warning("pid_manager 임포트 실패: %s", _exc)
+
 
 class HwarangAgent:
     """화랑 Grid 에이전트.
@@ -95,12 +148,34 @@ class HwarangAgent:
         self.hfl_active = False
         self._http_client = None
 
+        # 데몬 모드 / 상태 추적
+        self._daemon_mode: bool = False
+        self._started_at = None
+        self.last_error: str | None = None
+        self._status_writer_thread: threading.Thread | None = None
+        self._status_stop_event = None  # asyncio.Event (생성 시점 미정)
+
+        # ~/.hwarang/ 자동 생성
+        try:
+            os.makedirs(os.path.expanduser("~/.hwarang"), exist_ok=True)
+            os.makedirs(os.path.expanduser("~/.hwarang/logs"), exist_ok=True)
+        except Exception as _exc:
+            logger.warning("~/.hwarang 디렉토리 생성 실패: %s", _exc)
+
         # 최적화 모듈
         self.watchdog = AgentWatchdog()
         self.deduplicator = DataDeduplicator()
         self.adaptive_transfer = NetworkAdaptiveTransfer()
 
+        # ── HWARANG Grid 확장 상태 ──
+        self.domain_profile = None       # DomainProfile 인스턴스
+        self.safety_config = None        # SafetyConfig 인스턴스
+        self.api_key = getattr(config, "api_key", None) or os.environ.get(
+            "HWARANG_AGENT_KEY", "devkey"
+        )
+
         self._init_modules()
+        self._init_grid_extensions()
 
     def _get_http(self):
         """HTTP 클라이언트 (커넥션 풀 사용)."""
@@ -156,14 +231,126 @@ class HwarangAgent:
 
         logger.info(f"초기화된 모듈: {len(self.modules)}개 - {list(self.modules.keys())}")
 
+    # ────────────────────────────────────────────────────────────
+    # HWARANG Grid 확장 초기화
+    # ────────────────────────────────────────────────────────────
+
+    def _init_grid_extensions(self):
+        """도메인 프로필 + safety config 로드, 마스터 동기화."""
+        # 프로필 로드
+        if domain_specialization is not None:
+            try:
+                self.domain_profile = domain_specialization.load_profile()
+                logger.info(
+                    "도메인 프로필 로드: preset=%s, primary=%s",
+                    self.domain_profile.preset,
+                    self.domain_profile.primary_domains,
+                )
+            except Exception as exc:
+                logger.warning("도메인 프로필 로드 실패: %s", exc)
+
+        # safety config
+        if safety_guards is not None:
+            try:
+                self.safety_config = safety_guards.load_safety_config()
+                logger.info("safety 로드: max_vram=%sGB", getattr(self.safety_config, "max_vram_gb", "?"))
+            except Exception as exc:
+                logger.warning("safety 로드 실패: %s", exc)
+
+    def _sync_profile_with_master(self):
+        """시작 시 프로필을 마스터에 동기화."""
+        if domain_specialization is None or self.domain_profile is None:
+            return
+        try:
+            import asyncio as _asyncio
+            loop = _asyncio.new_event_loop()
+            try:
+                ok = loop.run_until_complete(
+                    domain_specialization.sync_with_master(
+                        master_url=self.master_url,
+                        agent_id=self.agent_id,
+                        profile=self.domain_profile,
+                        api_key=self.api_key,
+                    )
+                )
+                logger.info("프로필 마스터 동기화: %s", "OK" if ok else "FAIL")
+            finally:
+                loop.close()
+        except Exception as exc:
+            logger.warning("프로필 동기화 중 예외: %s", exc)
+
+    def _run_auto_participation_loop(self):
+        """round_subscription.auto_participation_loop 을 백그라운드로 실행.
+
+        round 조건 충족 시 participation_control.join_round 를 호출한다.
+        """
+        if round_subscription is None or self.domain_profile is None:
+            logger.info("자동 참여 루프 스킵 (모듈/프로필 없음)")
+            return
+        try:
+            import asyncio as _asyncio
+
+            async def _on_eligible(round_meta, ev):
+                """라운드 적합 판정 → 참여."""
+                if participation_control is None:
+                    logger.info("participation_control 없음 — 수동 join 필요")
+                    return
+                try:
+                    await participation_control.join_round(
+                        master_url=self.master_url,
+                        agent_id=self.agent_id,
+                        api_key=self.api_key,
+                        round_id=round_meta.round_id,
+                    )
+                    logger.info("라운드 참여 요청 전송: %s", round_meta.round_id)
+                except Exception as exc:
+                    logger.warning("join 실패: %s", exc)
+
+            stop_event = _asyncio.Event()
+
+            async def _shutdown_watcher():
+                while self.running:
+                    await _asyncio.sleep(2)
+                stop_event.set()
+
+            loop = _asyncio.new_event_loop()
+            _asyncio.set_event_loop(loop)
+            try:
+                loop.create_task(_shutdown_watcher())
+                loop.run_until_complete(
+                    round_subscription.auto_participation_loop(
+                        master_url=self.master_url,
+                        agent_id=self.agent_id,
+                        api_key=self.api_key,
+                        profile=self.domain_profile,
+                        on_eligible_round=_on_eligible,
+                        stop_event=stop_event,
+                    )
+                )
+            finally:
+                loop.close()
+        except Exception as exc:
+            logger.error("자동 참여 루프 종료: %s", exc)
+
     def start(self):
         """에이전트 시작."""
+        from datetime import datetime as _dt, timezone as _tz
         self.running = True
+        self._started_at = _dt.now(_tz.utc)
 
         logger.info("\n" + "=" * 60)
         logger.info(" 🏹 화랑 Grid 에이전트 시작")
         logger.info("=" * 60)
         self.config.print_config()
+
+        # PID 파일 (데몬 모드일 때만 — CLI 가 이미 기록한 경우 덮어쓰지 않게 stale 만 정리)
+        if self._daemon_mode and pid_manager is not None:
+            try:
+                pid_manager.cleanup_stale()
+                if not pid_manager.is_running() or pid_manager.read_pid() == os.getpid():
+                    pid_manager.write_pid()
+            except Exception as exc:
+                logger.warning("PID 파일 처리 실패: %s", exc)
 
         # 자동 복구: 이전 크래시 확인 + PID 기록
         self.watchdog.start()
@@ -174,6 +361,9 @@ class HwarangAgent:
 
         # 마스터 등록
         self._register_with_master()
+
+        # 도메인 프로필을 마스터에 동기화 (확장)
+        self._sync_profile_with_master()
 
         # 최신 LoRA 다운로드
         self._pull_latest_lora()
@@ -210,13 +400,39 @@ class HwarangAgent:
         # 수면 학습 감시
         self._start_thread("sleep_watch", self._run_sleep_watch)
 
+        # HWARANG Grid 자동 참여 루프 (라운드 구독)
+        if round_subscription is not None and self.domain_profile is not None:
+            self._start_thread("auto_participation", self._run_auto_participation_loop)
+
+        # status_writer (데몬 모드 + 모듈 로드된 경우 — CLI가 이미 띄웠으면 중복 방지)
+        if (
+            self._daemon_mode
+            and status_writer is not None
+            and self._status_writer_thread is None
+        ):
+            self._start_thread("status_writer", self._run_status_writer_loop)
+
         # 메인 루프 (마스터 통신 + heartbeat)
         self._main_loop()
 
     def stop(self):
-        """에이전트 중지."""
+        """에이전트 중지 (graceful shutdown)."""
         logger.info("에이전트 종료 중...")
         self.running = False
+
+        # status_writer 에 stop 신호
+        if self._status_stop_event is not None:
+            try:
+                self._status_stop_event.set()
+            except Exception:
+                pass
+
+        # 상태 파일에 stopped 기록
+        if status_writer is not None:
+            try:
+                status_writer.write_status_sync({"status": "stopped"})
+            except Exception as exc:
+                logger.debug("status_writer 종료 기록 실패: %s", exc)
 
         # 체크포인트 저장
         self.watchdog.save_checkpoint({
@@ -241,7 +457,56 @@ class HwarangAgent:
             self._http_client.close()
         for t in self.threads:
             t.join(timeout=5)
+
+        # PID 파일 제거 (데몬 모드)
+        if self._daemon_mode and pid_manager is not None:
+            try:
+                pid_manager.remove_pid()
+            except Exception as exc:
+                logger.debug("PID 파일 제거 실패: %s", exc)
+
         logger.info("에이전트 종료 완료")
+
+    # ════════════════════════════════════════════════════════════
+    # status_writer (데몬 모드)
+    # ════════════════════════════════════════════════════════════
+
+    def _run_status_writer_loop(self):
+        """asyncio 루프 안에서 status_writer_loop 를 구동한다."""
+        if status_writer is None:
+            return
+        import asyncio as _asyncio
+
+        try:
+            loop = _asyncio.new_event_loop()
+            _asyncio.set_event_loop(loop)
+            self._status_stop_event = _asyncio.Event()
+
+            async def _get_state():
+                return await status_writer.collect_state(self)
+
+            async def _watch():
+                while self.running and not self._status_stop_event.is_set():
+                    await _asyncio.sleep(2)
+                self._status_stop_event.set()
+
+            try:
+                interval = int(os.environ.get("HWARANG_STATUS_INTERVAL", "30") or 30)
+            except Exception:
+                interval = 30
+            try:
+                loop.run_until_complete(_asyncio.gather(
+                    _watch(),
+                    status_writer.status_writer_loop(
+                        _get_state,
+                        interval_sec=interval,
+                        stop_event=self._status_stop_event,
+                    ),
+                ))
+            finally:
+                loop.close()
+        except Exception as exc:
+            logger.warning("status_writer_loop 종료: %s", exc)
 
     # ════════════════════════════════════════════════════════════
     # 마스터 통신
@@ -321,6 +586,12 @@ class HwarangAgent:
         """메인 루프: heartbeat + 작업 수신 + LoRA 업데이트."""
         while self.running:
             try:
+                # pause flag 체크 (CLI 가 기록)
+                if self._is_paused():
+                    logger.debug("pause 상태 → 대기")
+                    time.sleep(30)
+                    continue
+
                 # 하트비트 전송 + 명령 수신
                 result = self._send_heartbeat()
 
@@ -342,6 +613,30 @@ class HwarangAgent:
             except Exception as e:
                 logger.error(f"메인 루프 오류: {e}")
                 time.sleep(10)
+
+    def _is_paused(self) -> bool:
+        """CLI 의 pause 플래그 확인."""
+        try:
+            if participation_control is not None:
+                return bool(participation_control.is_paused())
+        except Exception:
+            pass
+        # 파일 기반 fallback
+        flag = os.path.expanduser("~/.hwarang/pause.flag")
+        if not os.path.exists(flag):
+            return False
+        try:
+            with open(flag, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            until = data.get("until")
+            if until:
+                from datetime import datetime
+                if datetime.utcnow().isoformat() > until:
+                    os.remove(flag)
+                    return False
+            return True
+        except Exception:
+            return True
 
     def _handle_command(self, command: dict):
         """마스터에서 받은 명령 처리."""
@@ -730,11 +1025,24 @@ def main():
 
     # 에이전트 시작
     agent = HwarangAgent(config)
+    if args.daemon:
+        agent._daemon_mode = True
 
-    # 시그널 핸들러
+    # 시그널 핸들러 — SIGTERM 은 safety_guards.emergency_shutdown 호출
     def signal_handler(sig, frame):
-        agent.stop()
-        sys.exit(0)
+        logger.warning("신호 수신: %s", sig)
+        try:
+            if sig == signal.SIGTERM and safety_guards is not None:
+                import asyncio as _asyncio
+                try:
+                    _asyncio.run(safety_guards.emergency_shutdown(
+                        reason=f"signal_{sig}"
+                    ))
+                except Exception as exc:
+                    logger.warning("emergency_shutdown 실패: %s", exc)
+        finally:
+            agent.stop()
+            sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)

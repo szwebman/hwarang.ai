@@ -1,0 +1,43 @@
+name: tax_specialist
+display_name: "세무 전문 에이전트"
+description: "세무사·회계사·재무 전문가를 위한 에이전트."
+primary_domains:
+  - tax
+  - tax:corporate
+  - tax:personal
+  - tax:vat
+  - tax:inheritance
+  - law:tax  # 세법 자체
+  - finance
+  - finance:accounting
+excluded_domains:
+  - medical
+  - politics
+expertise_level: expert
+languages: [ko]
+min_data_quality_tier: SPECIALIZED_MEDIA
+auto_participate: true
+max_concurrent_rounds: 1
+active_hours: null
+
+required_credentials:
+  suggested: ["finance", "law:tax"]
+
+reward_expectations:
+  min_reward_per_round: 100
+  min_roi: 1.3
+  seasonal_bonus:
+    - months: [5]  # 5월 종합소득세
+      bonus: 1.5
+    - months: [1, 2]  # 연말정산
+      bonus: 1.3
+
+safety:
+  max_vram_gb: 20
+  max_duration_minutes: 90
+  allow_cpu_fallback: false
+
+recommended_gpu: "RTX 4080 or higher"
+notes: |
+  세무는 연중 시즌성 있음 (5월 종소세, 1~2월 연말정산). 해당 시기 라운드 가중치 상승.
+  법령·고시 원문(PRIMARY_OFFICIAL) 및 유권해석 소스 우선.

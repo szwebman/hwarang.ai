@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Hwarang Grid Agent
+Name[ko]=화랑 Grid Agent
+GenericName=GPU Sharing Agent
+GenericName[ko]=GPU 공유 에이전트
+Comment=GPU 공유 네트워크 참여로 HWR 보상 받기
+Comment[en]=Earn HWR rewards by sharing your GPU
+Exec=/usr/local/bin/hwarang-grid
+Icon=hwarang-grid
+Terminal=false
+Categories=Utility;Network;System;
+StartupNotify=true
+StartupWMClass=hwarang-grid
+Keywords=gpu;ai;hwarang;grid;mining;
+X-GNOME-Autostart-enabled=true

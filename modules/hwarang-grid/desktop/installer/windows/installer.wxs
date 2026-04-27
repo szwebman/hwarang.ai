@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  화랑 Grid Agent — WiX Toolset MSI 정의
+  컴파일:
+    candle installer.wxs
+    light  installer.wixobj -ext WixUIExtension -ext WixUtilExtension -o Hwarang-Grid-Agent.msi
+  또는 build_msi.ps1 사용
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+
+  <Product Id="*"
+           Name="Hwarang Grid Agent"
+           Language="1042"
+           Version="0.1.0.0"
+           Manufacturer="Hwarang AI"
+           UpgradeCode="A1B2C3D4-E5F6-7890-ABCD-1234567890AB">
+
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="perUser"
+             Description="화랑 Grid Agent — GPU 공유 네트워크 참여"
+             Comments="Hwarang AI"
+             Manufacturer="Hwarang AI" />
+
+    <MajorUpgrade DowngradeErrorMessage="이미 최신 버전이 설치되어 있습니다." />
+    <Media Id="1" Cabinet="HwarangGrid.cab" EmbedCab="yes" />
+
+    <!-- 아이콘 / 메타 -->
+    <Icon Id="HwarangIcon.ico" SourceFile="..\..\src-tauri\icons\icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="HwarangIcon.ico" />
+    <Property Id="ARPHELPLINK" Value="https://hwarang.ai/support" />
+    <Property Id="ARPURLINFOABOUT" Value="https://hwarang.ai" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+
+    <!-- 디렉토리 구조 -->
+    <Directory Id="TARGETDIR" Name="SourceDir">
+
+      <!-- 1. 설치 폴더: %LOCALAPPDATA%\HwarangGrid -->
+      <Directory Id="LocalAppDataFolder">
+        <Directory Id="INSTALLFOLDER" Name="HwarangGrid">
+
+          <Component Id="MainExecutable" Guid="B1B2B3B4-B5B6-7890-ABCD-1234567890AB">
+            <File Id="HwarangGridExe"
+                  Source="hwarang-grid.exe"
+                  KeyPath="yes" />
+            <RegistryValue Root="HKCU"
+                           Key="Software\HwarangAI\Grid"
+                           Name="InstallPath"
+                           Type="string"
+                           Value="[INSTALLFOLDER]" />
+          </Component>
+
+          <Component Id="UninstallShortcut" Guid="B2B2B3B4-B5B6-7890-ABCD-1234567890AB">
+            <File Id="UninstallPs1" Source="uninstall_windows.ps1" />
+            <RegistryValue Root="HKCU"
+                           Key="Software\HwarangAI\Grid"
+                           Name="UninstallScript"
+                           Type="string"
+                           Value="[INSTALLFOLDER]uninstall_windows.ps1" />
+          </Component>
+
+        </Directory>
+      </Directory>
+
+      <!-- 2. 시작 메뉴 -->
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="Hwarang Grid">
+          <Component Id="StartMenuShortcut" Guid="C1B2B3B4-B5B6-7890-ABCD-1234567890AB">
+            <Shortcut Id="StartMenuLnk"
+                      Name="Hwarang Grid Agent"
+                      Description="GPU 공유 네트워크 참여"
+                      Target="[INSTALLFOLDER]hwarang-grid.exe"
+                      Icon="HwarangIcon.ico"
+                      WorkingDirectory="INSTALLFOLDER" />
+            <RemoveFolder Id="RemoveProgMenuFolder" On="uninstall" />
+            <RegistryValue Root="HKCU"
+                           Key="Software\HwarangAI\Grid"
+                           Name="StartMenu"
+                           Type="integer"
+                           Value="1"
+                           KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+
+      <!-- 3. 데스크탑 바로가기 (옵션) -->
+      <Directory Id="DesktopFolder">
+        <Component Id="DesktopShortcut" Guid="D1B2B3B4-B5B6-7890-ABCD-1234567890AB">
+          <Condition>INSTALLDESKTOPSHORTCUT=1</Condition>
+          <Shortcut Id="DesktopLnk"
+                    Name="Hwarang Grid Agent"
+                    Target="[INSTALLFOLDER]hwarang-grid.exe"
+                    Icon="HwarangIcon.ico"
+                    WorkingDirectory="INSTALLFOLDER" />
+          <RegistryValue Root="HKCU"
+                         Key="Software\HwarangAI\Grid"
+                         Name="Desktop"
+                         Type="integer"
+                         Value="1"
+                         KeyPath="yes" />
+        </Component>
+      </Directory>
+
+    </Directory>
+
+    <!-- 4. 자동 시작 (HKCU\...\Run) — 사용자 선택 -->
+    <Component Id="AutostartRegistry"
+               Guid="E1B2B3B4-B5B6-7890-ABCD-1234567890AB"
+               Directory="INSTALLFOLDER">
+      <Condition>ENABLEAUTOSTART=1</Condition>
+      <RegistryValue Root="HKCU"
+                     Key="Software\Microsoft\Windows\CurrentVersion\Run"
+                     Name="HwarangGrid"
+                     Type="string"
+                     Value="&quot;[INSTALLFOLDER]hwarang-grid.exe&quot; --background"
+                     KeyPath="yes" />
+    </Component>
+
+    <!-- 5. Feature 정의 -->
+    <Feature Id="ProductFeature" Title="Hwarang Grid Agent" Level="1">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="UninstallShortcut" />
+      <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="DesktopShortcut" />
+      <ComponentRef Id="AutostartRegistry" />
+    </Feature>
+
+    <!-- 6. 사용자 옵션 -->
+    <Property Id="INSTALLDESKTOPSHORTCUT" Value="1" />
+    <Property Id="ENABLEAUTOSTART" Value="1" />
+
+    <!-- 7. UI 흐름 -->
+    <UIRef Id="WixUI_InstallDir" />
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <WixVariable Id="WixUILicenseRtf" Value="license.rtf" />
+
+    <!-- 8. 설치 후 실행 (옵션) -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="지금 화랑 Grid Agent 실행" />
+    <Property Id="WixShellExecTarget" Value="[INSTALLFOLDER]hwarang-grid.exe" />
+    <CustomAction Id="LaunchApplication"
+                  BinaryKey="WixCA"
+                  DllEntry="WixShellExec"
+                  Impersonate="yes" />
+
+  </Product>
+</Wix>

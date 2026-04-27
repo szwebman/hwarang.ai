@@ -59,7 +59,10 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "hwarang-agent=agent_main:main",
+            # 신규: 명령어 중심 CLI (init/start/pause/earnings/...)
+            "hwarang-agent=cli:main",
+            # 기존: 직접 실행용 (legacy)
+            "hwarang-agent-daemon=agent_main:main",
         ],
     },
     classifiers=[

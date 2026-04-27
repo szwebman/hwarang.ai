@@ -1,0 +1,21 @@
+{
+  "title": "화랑 Grid Agent",
+  "background": "background.png",
+  "icon": "../../src-tauri/icons/icon.icns",
+  "window": {
+    "width": 600,
+    "height": 400,
+    "position": { "x": 200, "y": 120 }
+  },
+  "icon-size": 128,
+  "format": "UDZO",
+  "filesystem": "APFS",
+  "contents": [
+    { "x": 150, "y": 200, "type": "file", "path": "Hwarang Grid Agent.app" },
+    { "x": 450, "y": 200, "type": "link", "path": "/Applications" }
+  ],
+  "code-sign": {
+    "signing-identity": "${APPLE_SIGNING_IDENTITY}",
+    "entitlements": "../../src-tauri/entitlements.plist"
+  }
+}

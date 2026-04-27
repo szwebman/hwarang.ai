@@ -1,0 +1,37 @@
+name: legal_and_tax
+display_name: "법률+세무 복합 에이전트"
+description: "변호사 겸 세무사, 또는 세무를 병행하는 법률가용. 법률과 세무 도메인 모두 우선 참여."
+primary_domains:
+  - law
+  - law:tax
+  - law:commercial
+  - tax
+  - tax:corporate
+  - tax:personal
+  - finance:accounting
+excluded_domains:
+  - medical
+  - politics
+expertise_level: expert
+languages: [ko]
+min_data_quality_tier: SPECIALIZED_MEDIA
+auto_participate: true
+active_hours: null
+max_concurrent_rounds: 1
+
+required_credentials:
+  suggested: ["law", "finance", "law:tax"]
+
+reward_expectations:
+  min_reward_per_round: 100
+  min_roi: 1.3
+
+safety:
+  max_vram_gb: 24
+  max_duration_minutes: 120
+  allow_cpu_fallback: false
+
+recommended_gpu: "RTX 4090 or higher"
+notes: |
+  법률과 세무 교집합 도메인(법인 M&A·상속·조세법) 라운드에서 프리미엄 가산.
+  두 자격을 모두 보유하면 credential boost 가중 적용.

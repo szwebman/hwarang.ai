@@ -1,0 +1,39 @@
+name: medical_specialist
+display_name: "의료 전문 에이전트"
+description: "의사·약사·간호사·의료 연구자를 위한 에이전트."
+primary_domains:
+  - medical
+  - medical:cardiology
+  - medical:oncology
+  - medical:psychiatry
+  - medical:pediatrics
+  - medical:surgery
+  - medical:radiology
+  - medical:pharmacy
+excluded_domains:
+  - politics
+  - law  # 법률 도메인은 다른 전문가가
+expertise_level: expert
+languages: [ko, en]  # 영문 논문 많음
+min_data_quality_tier: PEER_REVIEWED  # 논문 우선
+auto_participate: true
+max_concurrent_rounds: 1
+active_hours: null
+
+required_credentials:
+  suggested: ["medical"]
+  strongly_recommended: true  # 의료는 전문가 자격 매우 강조
+
+reward_expectations:
+  min_reward_per_round: 150  # 의료가 희소해서 높음
+  min_roi: 1.4
+
+safety:
+  max_vram_gb: 24
+  max_duration_minutes: 120
+  allow_cpu_fallback: false
+
+recommended_gpu: "RTX 4090 or A100"
+notes: |
+  의료는 인명 관련. 절대 부정확한 기여 금지. PEER_REVIEWED 소스 우선.
+  근거 기반 의학(EBM) 원칙 준수. 진단·처방 의도의 과신 금지.

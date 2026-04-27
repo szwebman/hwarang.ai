@@ -1,0 +1,28 @@
+name: night_only
+display_name: "야간 전용 에이전트"
+description: "야간(22:00~07:00) 전기요금 할인 시간대에만 활성화. 전기요금 ROI 극대화."
+primary_domains: []
+excluded_domains: []
+expertise_level: general
+languages: [ko]
+min_data_quality_tier: GENERAL_MEDIA
+auto_participate: true
+active_hours: "22:00-07:00"  # 자정 통과
+max_concurrent_rounds: 1
+
+required_credentials:
+  suggested: []
+
+reward_expectations:
+  min_reward_per_round: 30
+  min_roi: 1.5  # 전기요금 고려
+
+safety:
+  max_vram_gb: 20
+  max_duration_minutes: 180  # 밤 사이 긴 배치 가능
+  allow_cpu_fallback: false
+
+recommended_gpu: "RTX 3060 or higher"
+notes: |
+  야간 전용. 주간에는 라운드를 거절하고 수면학습 모드로 전환.
+  한국 전력 경부하 시간대 기준. 지역별 요금제 확인 권장.

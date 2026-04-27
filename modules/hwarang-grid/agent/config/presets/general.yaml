@@ -1,0 +1,27 @@
+name: general
+display_name: "범용 에이전트"
+description: "모든 도메인 라운드를 받는 기본 프로필. 특정 전문가가 아닌 일반 사용자용."
+primary_domains: []   # 빈 = 전체
+excluded_domains: []
+expertise_level: general
+languages: [ko]
+min_data_quality_tier: GENERAL_MEDIA
+auto_participate: true
+active_hours: null
+max_concurrent_rounds: 1
+
+required_credentials:
+  suggested: []
+
+reward_expectations:
+  min_reward_per_round: 20
+  min_roi: 1.1
+
+safety:
+  max_vram_gb: 16
+  max_duration_minutes: 90
+  allow_cpu_fallback: true
+
+recommended_gpu: "RTX 3060 or higher"
+notes: |
+  범용 에이전트. 전기요금·GPU 마모 고려하여 저부하 라운드 선별.

@@ -1,0 +1,38 @@
+name: law_specialist
+display_name: "법률 전문 에이전트"
+description: "변호사·법무사·법학자를 위한 전문 에이전트. 법률 도메인 라운드 우선 참여."
+primary_domains:
+  - law
+  - law:criminal
+  - law:civil
+  - law:commercial
+  - law:labor
+  - law:family
+  - law:ip
+excluded_domains:
+  - medical
+  - politics
+expertise_level: expert
+languages: [ko]
+min_data_quality_tier: SPECIALIZED_MEDIA  # 법률 전문매체 이상
+auto_participate: true
+active_hours: null  # 24h
+max_concurrent_rounds: 1
+
+required_credentials:
+  suggested: ["law"]  # ExpertCredential field 제안
+  strongly_recommended: false
+
+reward_expectations:
+  min_reward_per_round: 100
+  min_roi: 1.3
+
+safety:
+  max_vram_gb: 24
+  max_duration_minutes: 120
+  allow_cpu_fallback: false
+
+recommended_gpu: "RTX 4090 or higher"
+notes: |
+  법률 도메인은 정확성이 생명. 동료 변호사들의 peer review 참여도 활발히 권장.
+  판례·법령 원문(PRIMARY_OFFICIAL) 소스 우선.
