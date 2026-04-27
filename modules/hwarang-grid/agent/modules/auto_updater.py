@@ -18,9 +18,12 @@ class AutoUpdaterModule:
 
     def check_update(self, master_url: str) -> dict:
         """마스터에서 최신 버전 확인."""
-        import urllib.request
         try:
-            resp = urllib.request.urlopen(f"{master_url}/api/grid/agent/version", timeout=10)
+            try:
+                from ._http_util import make_request  # type: ignore
+            except Exception:
+                from modules._http_util import make_request  # type: ignore
+            resp = make_request(f"{master_url}/api/grid/agent/version", timeout=10)
             data = json.loads(resp.read())
             latest = data.get("version", CURRENT_VERSION)
             channel = data.get("channel", "stable")
@@ -42,13 +45,22 @@ class AutoUpdaterModule:
 
     def apply_update(self, download_url: str) -> dict:
         """업데이트 다운로드 + 적용."""
-        import urllib.request
         try:
+            try:
+                from ._http_util import make_request  # type: ignore
+            except Exception:
+                from modules._http_util import make_request  # type: ignore
             update_dir = os.path.expanduser("~/.hwarang/updates")
             os.makedirs(update_dir, exist_ok=True)
 
             filepath = os.path.join(update_dir, "agent_update.tar.gz")
-            urllib.request.urlretrieve(download_url, filepath)
+            resp = make_request(download_url, timeout=120)
+            with open(filepath, "wb") as fh:
+                while True:
+                    chunk = resp.read(64 * 1024)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
 
             file_hash = hashlib.sha256(open(filepath, "rb").read()).hexdigest()
             logger.info(f"업데이트 다운로드: {filepath} (hash: {file_hash[:16]})")

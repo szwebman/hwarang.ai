@@ -291,14 +291,18 @@ class NetworkAdaptiveTransfer:
     def measure_bandwidth(self, master_url: str) -> float:
         """마스터 서버로 대역폭 측정."""
         try:
-            from urllib.request import urlopen, Request
+            try:
+                from ._http_util import make_request  # type: ignore
+            except Exception:
+                from modules._http_util import make_request  # type: ignore
 
             # 작은 데이터로 RTT 측정
             test_url = f"{master_url}/api/grid/lora/version"
 
             start = time.time()
-            with urlopen(Request(test_url), timeout=10) as resp:
-                data = resp.read()
+            resp = make_request(test_url, timeout=10)
+            data = resp.read()
+            resp.close()
             elapsed = max(time.time() - start, 0.001)
 
             # 바이트/초 → Mbps
@@ -310,14 +314,15 @@ class NetworkAdaptiveTransfer:
             test_data = os.urandom(test_size)
 
             start = time.time()
-            req = Request(
-                f"{master_url}/api/grid/bandwidth-test",
-                data=test_data,
-                method="POST",
-            )
             try:
-                with urlopen(req, timeout=30) as resp:
-                    resp.read()
+                resp = make_request(
+                    f"{master_url}/api/grid/bandwidth-test",
+                    method="POST",
+                    data=test_data,
+                    timeout=30,
+                )
+                resp.read()
+                resp.close()
                 elapsed = max(time.time() - start, 0.001)
                 mbps = (test_size * 8) / elapsed / 1_000_000
             except Exception:

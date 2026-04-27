@@ -19,16 +19,62 @@
 
 from __future__ import annotations
 
+import io
 import logging
+import re
 import shutil
 import subprocess
 from datetime import datetime, timezone
+from typing import Optional
+
+import httpx
 
 from hwarang_api.db import prisma
 
 from .types import KnowledgeFact  # noqa: F401 (spec 요구)
 
 logger = logging.getLogger(__name__)
+
+
+# OCR 의존: 없으면 graceful fallback (관리자 수동 검토)
+try:
+    import pytesseract  # type: ignore
+    from PIL import Image  # type: ignore
+    OCR_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    pytesseract = None  # type: ignore
+    Image = None  # type: ignore
+    OCR_AVAILABLE = False
+
+
+# 자격증 도메인별 자격번호 정규식
+_CREDENTIAL_PATTERNS: dict[str, str] = {
+    "lawyer": r"제?\s*(\d{4,6})\s*호",            # 변호사 등록 제 12345호
+    "doctor": r"의사면허\s*제?\s*(\d{5,6})\s*호",  # 의사 면허 제 123456 호
+    "cpa": r"공인회계사\s*제?\s*(\d{4,6})\s*호",
+    "tax": r"세무사\s*제?\s*(\d{4,6})\s*호",
+    "default": r"제?\s*(\d{4,6})\s*호",
+}
+
+
+async def extract_credential_number(image_bytes: bytes, doc_type: str) -> Optional[str]:
+    """자격증 이미지에서 자격번호를 추출.
+
+    doc_type: 'lawyer' (변호사), 'doctor' (의사), 'cpa' (회계사), 'tax' (세무사) 등
+    pytesseract / Pillow 미설치 시 None 반환 (관리자 수동 검토 fallback).
+    """
+    if not OCR_AVAILABLE or not image_bytes:
+        return None
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        text = pytesseract.image_to_string(img, lang="kor+eng")
+    except Exception as e:
+        logger.warning("extract_credential_number: OCR failed: %s", e)
+        return None
+
+    pattern = _CREDENTIAL_PATTERNS.get(doc_type, _CREDENTIAL_PATTERNS["default"])
+    m = re.search(pattern, text)
+    return m.group(1) if m else None
 
 
 # ─────────────────────────────────────────────
@@ -379,20 +425,30 @@ async def stats_by_field() -> dict:
 # ─────────────────────────────────────────────
 # 외부 검증 (Placeholder)
 # ─────────────────────────────────────────────
-async def ocr_license_number(document_url: str) -> str | None:
+async def ocr_license_number(
+    document_url: str, doc_type: str = "default"
+) -> str | None:
     """자격증 이미지에서 OCR 로 자격번호를 추출한다.
 
-    실제 운영에서는 tesseract 또는 클라우드 OCR(Google Vision/Clova) 사용.
-    placeholder: tesseract CLI 있으면 시도, 없으면 None 반환.
+    파이프라인:
+      1) document_url 다운로드 (http/https)
+      2) pytesseract (kor+eng) 로 OCR
+      3) 도메인별 정규식으로 번호 매칭
+
+    pytesseract / Pillow 미설치 또는 시스템 tesseract 미설치 시 None.
+    실패 시 None → 호출 측은 관리자 수동 검토로 fallback.
     """
     if not document_url:
         return None
-    if shutil.which("tesseract") is None:
-        logger.warning("ocr_license_number: tesseract not installed")
+    if not OCR_AVAILABLE:
+        logger.warning("ocr_license_number: pytesseract/PIL not installed")
         return None
-    # TODO: 다운로드 → OCR 실행 → 정규식으로 번호 추출
+    if shutil.which("tesseract") is None:
+        logger.warning("ocr_license_number: tesseract binary not installed")
+        return None
+
+    # tesseract 정상 동작 여부 한 번만 확인 (debug 로그 only)
     try:
-        # placeholder subprocess call (실제 구현 시 교체)
         _ = subprocess.run(  # noqa: S603
             ["tesseract", "--version"],
             capture_output=True, text=True, timeout=5, check=False,
@@ -400,8 +456,35 @@ async def ocr_license_number(document_url: str) -> str | None:
     except Exception as e:  # pragma: no cover
         logger.warning("tesseract probe failed: %s", e)
         return None
-    logger.info("ocr_license_number: placeholder (url=%s)", document_url)
-    return None
+
+    # 1) 이미지 다운로드
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(document_url)
+            if resp.status_code != 200:
+                logger.warning(
+                    "ocr_license_number: download failed status=%s url=%s",
+                    resp.status_code, document_url,
+                )
+                return None
+            image_bytes = resp.content
+    except httpx.HTTPError as e:
+        logger.warning("ocr_license_number: download error: %s", e)
+        return None
+
+    # 2)+3) OCR + 번호 추출
+    number = await extract_credential_number(image_bytes, doc_type)
+    if number:
+        logger.info(
+            "ocr_license_number: extracted doc_type=%s number=%s",
+            doc_type, number,
+        )
+    else:
+        logger.info(
+            "ocr_license_number: no match (url=%s doc_type=%s)",
+            document_url, doc_type,
+        )
+    return number
 
 
 async def external_license_lookup(field: str, license_number: str) -> dict | None:
@@ -437,6 +520,8 @@ __all__ = [
     "revoke_credential",
     "list_experts_by_field",
     "ocr_license_number",
+    "extract_credential_number",
     "external_license_lookup",
     "stats_by_field",
+    "OCR_AVAILABLE",
 ]

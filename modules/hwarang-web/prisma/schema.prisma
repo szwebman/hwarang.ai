@@ -492,7 +492,7 @@ model KnowledgeFact {
   confidenceInterval    Json? // {"lower": 0.78, "upper": 0.92, "method": "bootstrap"}
   uncertaintyMethod     String? // 'bayesian', 'bootstrap', 'monte_carlo', 'ensemble'
   credibleIntervalWidth Float? // upper - lower, 작을수록 확실
-  mediaFact             MediaFact?
+  mediaFact             MediaFact? @relation("KnowledgeFactMedia")
 
   @@index([domain, validTo])
   @@index([entity, validFrom])
@@ -898,7 +898,7 @@ model TranslationLink {
 model MediaFact {
   id                String        @id @default(cuid())
   factId            String        @unique
-  fact              KnowledgeFact @relation(fields: [factId], references: [id], onDelete: Cascade)
+  fact              KnowledgeFact @relation("KnowledgeFactMedia", fields: [factId], references: [id], onDelete: Cascade)
   mediaType         MediaType
   fileUrl           String
   thumbnailUrl      String?

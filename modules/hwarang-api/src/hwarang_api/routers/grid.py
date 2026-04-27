@@ -969,34 +969,48 @@ async def download_peer_lora(
 async def get_eval_shard(
     round_id: str,
     agent_id: str = Query(...),
+    inline: bool = Query(False, description="True면 메타+samples 를 함께 반환"),
     api_key: str | None = Depends(verify_api_key),
 ):
     """peer 평가용 validation shard 메타데이터 (10~20%).
 
-    DataShardingService 가 있으면 그쪽으로 위임.
+    DataShardingService 가 있으면 그쪽으로 위임. ``inline=true`` 면 디스크에
+    저장된 ``eval.jsonl`` 의 실제 샘플도 함께 반환한다.
     """
+    meta: dict[str, Any] | None = None
     if DataShardingService is not None:
         try:
             svc = DataShardingService()
             result = svc.get_validation_shard(round_id, agent_id)  # type: ignore[attr-defined]
             if asyncio.iscoroutine(result):
                 result = await result
-            return result
+            meta = result
         except Exception as e:
             logger.warning(f"DataShardingService.get_validation_shard 실패: {e}")
 
-    # 폴백: 인메모리 라운드 → 더미 메타데이터
-    if not _current_round or _current_round.get("round_id") != round_id:
-        raise HTTPException(404, "라운드 없음")
+    if meta is None:
+        # 폴백: 인메모리 라운드 → 더미 메타데이터
+        if not _current_round or _current_round.get("round_id") != round_id:
+            raise HTTPException(404, "라운드 없음")
+        meta = {
+            "round_id": round_id,
+            "agent_id": agent_id,
+            "shard_kind": "validation",
+            "validation_fraction": 0.15,
+            "data_url": f"/api/grid/rounds/{round_id}/data?kind=validation",
+            "sample_count": 0,
+        }
 
-    return {
-        "round_id": round_id,
-        "agent_id": agent_id,
-        "shard_kind": "validation",
-        "validation_fraction": 0.15,
-        "data_url": f"/api/grid/rounds/{round_id}/data?kind=validation",
-        "sample_count": 0,
-    }
+    if inline and DataShardingService is not None:
+        try:
+            samples = DataShardingService.read_eval_shard(round_id)
+            meta["samples"] = samples
+            if not meta.get("sample_count"):
+                meta["sample_count"] = len(samples)
+        except Exception as e:
+            logger.warning(f"read_eval_shard 실패: {e}")
+
+    return meta
 
 
 @router.post("/rounds/{round_id}/peer-vote")

@@ -202,16 +202,35 @@ class AgentConfig:
 
     @classmethod
     def load(cls, path: str = CONFIG_PATH) -> "AgentConfig":
-        """설정 로드. 없으면 기본값."""
+        """설정 로드. 없으면 기본값.
+
+        환경변수가 있으면 JSON 값을 덮어쓴다 (CLI/daemon 양쪽에서 동작):
+          - HWARANG_MASTER_URL  → network.master_url
+          - HWARANG_AGENT_ID    → agent_id
+          - HWARANG_REGION      → region
+        """
         if not os.path.exists(path):
             config = cls()
             config.save(path)
-            return config
+        else:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            config = cls._from_dict(data)
 
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
+        # 환경변수 오버라이드 (CLI/daemon 양쪽에서 동작)
+        env_master = os.getenv("HWARANG_MASTER_URL")
+        if env_master:
+            config.network.master_url = env_master.rstrip("/")
 
-        return cls._from_dict(data)
+        env_agent_id = os.getenv("HWARANG_AGENT_ID")
+        if env_agent_id:
+            config.agent_id = env_agent_id
+
+        env_region = os.getenv("HWARANG_REGION")
+        if env_region:
+            config.region = env_region
+
+        return config
 
     @classmethod
     def _from_dict(cls, data: dict) -> "AgentConfig":

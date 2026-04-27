@@ -4,20 +4,26 @@
 시빌 방어의 최후 관문.
 
 지원 method:
-  - `ipin`            — 한국 I-PIN / 휴대폰 본인확인 (PASS 연동 placeholder)
+  - `ipin`            — 한국 I-PIN / 휴대폰 본인확인 (PASS/NICE)
   - `worldid`         — Worldcoin World ID (orb verification)
   - `brightid`        — BrightID social graph
   - `proofofhumanity` — Proof of Humanity (on-chain)
   - `manual`          — 관리자 수동 승인
 
 환경 변수 (실제 연동 시 설정):
-  HWARANG_POP_IPIN_API_KEY
-  HWARANG_POP_WORLDID_APP_ID
-  HWARANG_POP_BRIGHTID_CONTEXT
-  HWARANG_POP_POH_RPC
+  HWARANG_POP_PASS_API_KEY        — PASS/NICE API key (ipin)
+  HWARANG_POP_PASS_CLIENT_ID      — PASS/NICE client id (ipin)
+  HWARANG_POP_PASS_ENDPOINT       — PASS/NICE endpoint (default nice.checkplus.co.kr)
+  HWARANG_POP_WORLDID_APP_ID      — World ID Cloud Verification app_id
+  HWARANG_POP_WORLDID_API_KEY     — World ID API key (optional Bearer)
+  HWARANG_POP_WORLDID_ACTION      — action label (default: hwarang-pop)
+  HWARANG_POP_BRIGHTID_CONTEXT    — BrightID context name (e.g. "Hwarang")
+  HWARANG_POP_POH_RPC_URL         — Ethereum RPC URL (PoH 컨트랙트 조회)
+  HWARANG_POP_POH_CONTRACT_ADDR   — PoH 컨트랙트 주소 (default mainnet 공식)
 
 의존:
   - `hwarang_api.db.prisma`
+  - `httpx` (HTTP), `web3` (PoH; optional)
 """
 
 from __future__ import annotations
@@ -30,11 +36,34 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import httpx
+
 from hwarang_api.db import prisma
 
 from .types import KnowledgeFact  # noqa: F401 (공개 API 타입 안정화)
 
 logger = logging.getLogger(__name__)
+
+
+# web3 는 선택 의존: 없으면 PoH stub fallback
+try:
+    from web3 import Web3  # type: ignore
+    _WEB3_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    Web3 = None  # type: ignore
+    _WEB3_AVAILABLE = False
+
+
+_POH_DEFAULT_CONTRACT = "0xC5E9dDebb09Cd64DfaCab4011A0D5cEDaf7c9BDb"  # PoH v1 mainnet
+_POH_ABI_IS_REGISTERED = [
+    {
+        "inputs": [{"internalType": "address", "name": "_submissionID", "type": "address"}],
+        "name": "isRegistered",
+        "outputs": [{"internalType": "bool", "name": "", "type": "bool"}],
+        "stateMutability": "view",
+        "type": "function",
+    }
+]
 
 
 # ─────────────────────────────────────────────
@@ -87,27 +116,74 @@ async def check_uniqueness(method: str, provider_id: str) -> bool:
 # 외부 제공자 검증 (실제 API 는 placeholder)
 # ─────────────────────────────────────────────
 async def _verify_ipin(proof: str) -> tuple[bool, str | None]:
-    """I-PIN / 휴대폰 본인확인 검증.
+    """I-PIN / 휴대폰 본인확인 검증 (PASS / NICE).
 
-    실제 환경에서는 NICE / KCB / PASS API 호출.
-    proof 포맷: "token|ci_hash" — ci(연계정보) 해시 반환.
+    proof 포맷: "request_id:ci" — request_id 와 CI(연계정보) 콜론 구분.
+    실제 PASS/NICE API 는 비공개 spec 이라 일반 form-based 호출로 작성.
+    환경변수:
+      HWARANG_POP_PASS_API_KEY     (Bearer)
+      HWARANG_POP_PASS_CLIENT_ID
+      HWARANG_POP_PASS_ENDPOINT    (default https://nice.checkplus.co.kr/api/verify)
     """
-    api_key = os.getenv("HWARANG_POP_IPIN_API_KEY")
-    if not api_key:
+    api_key = os.getenv("HWARANG_POP_PASS_API_KEY")
+    client_id = os.getenv("HWARANG_POP_PASS_CLIENT_ID")
+    endpoint = os.getenv(
+        "HWARANG_POP_PASS_ENDPOINT", "https://nice.checkplus.co.kr/api/verify"
+    )
+    if not (api_key and client_id):
         logger.info("ipin provider disabled (no API key) — stub verify")
         if not proof or ":" not in proof:
             return (False, None)
         _, ci = proof.split(":", 1)
         return (True, ci[:64])
-    # TODO: 실제 PASS/NICE API 호출
-    return (True, proof.split(":", 1)[-1][:64])
+
+    if not proof or ":" not in proof:
+        return (False, None)
+    request_id, user_ci = proof.split(":", 1)
+
+    # NOTE: 실제 PASS/NICE 운영 spec 은 NDA 기반. 아래는 일반 form-based 패턴.
+    # TODO(prod): 운영 계약 후 정확한 endpoint / signature 알고리즘으로 교체.
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                endpoint,
+                data={
+                    "client_id": client_id,
+                    "ci": user_ci,
+                    "request_id": request_id,
+                },
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+    except httpx.HTTPError as e:
+        logger.warning("ipin http error: %s", e)
+        return (False, None)
+
+    if resp.status_code != 200:
+        logger.info("ipin reject: status=%s", resp.status_code)
+        return (False, None)
+    try:
+        result = resp.json()
+    except ValueError:
+        return (False, None)
+    verified = result.get("status") in ("ok", "success", "verified")
+    ci_value = result.get("ci") or user_ci
+    if not verified or not ci_value:
+        return (False, None)
+    return (True, str(ci_value)[:64])
 
 
 async def _verify_worldid(proof: str) -> tuple[bool, str | None]:
-    """World ID Cloud Verification API 호출 (placeholder).
+    """World ID Cloud Verification API 호출.
 
-    proof 포맷: Semaphore zk-proof JSON 문자열.
+    proof 포맷: JSON 문자열 — {"nullifier_hash", "merkle_root", "proof", "verification_level"?}.
+    엔드포인트: POST https://developer.worldcoin.org/api/v2/verify/{app_id}
+    환경변수:
+      HWARANG_POP_WORLDID_APP_ID    (required)
+      HWARANG_POP_WORLDID_API_KEY   (optional Bearer; 일부 액션은 필요)
+      HWARANG_POP_WORLDID_ACTION    (default: hwarang-pop)
     """
+    import json as _json
+
     app_id = os.getenv("HWARANG_POP_WORLDID_APP_ID")
     if not app_id:
         logger.info("worldid disabled — stub verify")
@@ -115,39 +191,148 @@ async def _verify_worldid(proof: str) -> tuple[bool, str | None]:
             return (False, None)
         nullifier = hashlib.sha256(proof.encode()).hexdigest()[:40]
         return (True, nullifier)
-    # TODO: POST https://developer.worldcoin.org/api/v2/verify/{app_id}
-    nullifier = hashlib.sha256(proof.encode()).hexdigest()[:40]
-    return (True, nullifier)
+
+    try:
+        payload = _json.loads(proof) if proof.lstrip().startswith("{") else None
+    except ValueError:
+        payload = None
+    if not isinstance(payload, dict):
+        logger.info("worldid: invalid proof payload (not JSON object)")
+        return (False, None)
+
+    nullifier_hash = payload.get("nullifier_hash")
+    merkle_root = payload.get("merkle_root")
+    zk_proof = payload.get("proof")
+    if not (nullifier_hash and merkle_root and zk_proof):
+        return (False, None)
+
+    action = os.getenv("HWARANG_POP_WORLDID_ACTION", "hwarang-pop")
+    api_key = os.getenv("HWARANG_POP_WORLDID_API_KEY")
+    body = {
+        "nullifier_hash": nullifier_hash,
+        "merkle_root": merkle_root,
+        "proof": zk_proof,
+        "action": action,
+    }
+    if "verification_level" in payload:
+        body["verification_level"] = payload["verification_level"]
+    if "signal_hash" in payload:
+        body["signal_hash"] = payload["signal_hash"]
+
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    url = f"https://developer.worldcoin.org/api/v2/verify/{app_id}"
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(url, json=body, headers=headers)
+    except httpx.HTTPError as e:
+        logger.warning("worldid http error: %s", e)
+        return (False, None)
+
+    if resp.status_code != 200:
+        logger.info(
+            "worldid reject: status=%s body=%s",
+            resp.status_code, resp.text[:200],
+        )
+        return (False, None)
+    # 성공 시 유일성 식별자는 nullifier_hash (action 별 고유)
+    return (True, str(nullifier_hash)[:64])
 
 
 async def _verify_brightid(proof: str) -> tuple[bool, str | None]:
-    """BrightID context 검증 (placeholder).
+    """BrightID 노드 verification 조회.
 
-    proof 포맷: "contextId|signature".
+    proof 포맷: "contextId" 또는 "contextId|signature" (signature 는 클라이언트 사전 서명).
+    엔드포인트: GET https://app.brightid.org/node/v6/verifications/{context}/{contextId}
+    응답: {"data": {"unique": bool, "verifications": [...] }}  (노드 v6)
+    환경변수:
+      HWARANG_POP_BRIGHTID_CONTEXT  (e.g. "Hwarang")
+      HWARANG_POP_BRIGHTID_NODE     (default https://app.brightid.org/node)
     """
     context = os.getenv("HWARANG_POP_BRIGHTID_CONTEXT")
     if not context:
         logger.info("brightid disabled — stub verify")
-        if "|" not in proof:
+        if "|" not in proof and not proof:
             return (False, None)
-        ctx_id, _sig = proof.split("|", 1)
+        ctx_id = proof.split("|", 1)[0]
+        if not ctx_id:
+            return (False, None)
         return (True, ctx_id[:64])
-    # TODO: GET https://app.brightid.org/node/v6/verifications/{context}/{contextId}
-    return (True, proof.split("|", 1)[0][:64])
+
+    if not proof:
+        return (False, None)
+    ctx_id = proof.split("|", 1)[0].strip()
+    if not ctx_id:
+        return (False, None)
+
+    node = os.getenv("HWARANG_POP_BRIGHTID_NODE", "https://app.brightid.org/node")
+    url = f"{node.rstrip('/')}/v6/verifications/{context}/{ctx_id}"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url)
+    except httpx.HTTPError as e:
+        logger.warning("brightid http error: %s", e)
+        return (False, None)
+
+    if resp.status_code != 200:
+        logger.info(
+            "brightid reject: status=%s body=%s",
+            resp.status_code, resp.text[:200],
+        )
+        return (False, None)
+    try:
+        data = resp.json()
+    except ValueError:
+        return (False, None)
+    inner = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(inner, dict):
+        return (False, None)
+    verifications = inner.get("verifications") or []
+    unique = inner.get("unique", True)
+    if not verifications or not unique:
+        return (False, None)
+    return (True, ctx_id[:64])
 
 
 async def _verify_proofofhumanity(proof: str) -> tuple[bool, str | None]:
-    """Proof of Humanity on-chain 조회 (placeholder).
+    """Proof of Humanity on-chain 조회.
 
     proof 포맷: Ethereum address (0x...).
+    환경변수:
+      HWARANG_POP_POH_RPC_URL         (required)
+      HWARANG_POP_POH_CONTRACT_ADDR   (default PoH v1 mainnet)
+    web3.py 가 없으면 stub 동작.
     """
-    rpc = os.getenv("HWARANG_POP_POH_RPC")
     if not proof.startswith("0x") or len(proof) != 42:
         return (False, None)
+
+    rpc = os.getenv("HWARANG_POP_POH_RPC_URL") or os.getenv("HWARANG_POP_POH_RPC")
     if not rpc:
-        logger.info("poh disabled — stub verify")
+        logger.info("poh disabled (no RPC URL) — stub verify")
         return (True, proof.lower())
-    # TODO: PoH contract isRegistered(address) 호출
+
+    if not _WEB3_AVAILABLE:
+        logger.warning("poh: web3.py not installed — stub verify")
+        return (True, proof.lower())
+
+    contract_addr = os.getenv("HWARANG_POP_POH_CONTRACT_ADDR", _POH_DEFAULT_CONTRACT)
+    try:
+        w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 10}))
+        if not w3.is_connected():
+            logger.warning("poh: web3 RPC connect failed")
+            return (False, None)
+        addr = Web3.to_checksum_address(proof)
+        contract_addr_cs = Web3.to_checksum_address(contract_addr)
+        contract = w3.eth.contract(address=contract_addr_cs, abi=_POH_ABI_IS_REGISTERED)
+        registered = bool(contract.functions.isRegistered(addr).call())
+    except Exception as e:  # pragma: no cover (네트워크 의존)
+        logger.warning("poh on-chain call failed: %s", e)
+        return (False, None)
+
+    if not registered:
+        return (False, None)
     return (True, proof.lower())
 
 

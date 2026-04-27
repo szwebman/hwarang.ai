@@ -9,13 +9,96 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import os
 from typing import Any
 
-_EMBED_DIM = 1024
-_EMBED_URL = os.getenv("EMBEDDING_SERVER_URL", "http://localhost:8080/embed")
-_EMBED_TIMEOUT = float(os.getenv("EMBEDDING_TIMEOUT", "5.0"))
+logger = logging.getLogger(__name__)
+
+# 환경변수
+#   EMBEDDING_SERVER_URL  — 빈 문자열이면 fallback 강제
+#   EMBEDDING_DIM         — 기본 1024 (bge-m3 차원)
+#   EMBEDDING_TIMEOUT     — 단건 호출 타임아웃 (초)
+#   EMBEDDING_API_KEY     — bge-m3/TEI/OpenAI 서버에 Bearer 인증
+#   EMBEDDING_MODEL       — 서버에 모델명 강제 지정 (옵션)
+_EMBED_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
+_EMBED_URL = os.getenv("EMBEDDING_SERVER_URL", "")
+_EMBED_TIMEOUT = float(os.getenv("EMBEDDING_TIMEOUT", "10"))
+_EMBED_API_KEY = os.getenv("EMBEDDING_API_KEY", "")
+_EMBED_MODEL_OVERRIDE = os.getenv("EMBEDDING_MODEL", "")
+
+
+def _auth_headers() -> dict[str, str]:
+    """공통 헤더 — Bearer 토큰이 있으면 Authorization 추가."""
+    headers = {"Content-Type": "application/json"}
+    if _EMBED_API_KEY:
+        headers["Authorization"] = f"Bearer {_EMBED_API_KEY}"
+    return headers
+
+
+def _normalize_url(base: str, suffix: str = "") -> str:
+    """EMBEDDING_SERVER_URL 이 /embed 로 끝나든 root 든 모두 허용."""
+    base = base.rstrip("/")
+    if suffix and not base.endswith(suffix):
+        return base + suffix
+    return base
+
+
+def _extract_single_vector(payload: Any) -> list[float] | None:
+    """다양한 응답 포맷에서 단일 임베딩 추출.
+
+    지원 포맷:
+      - TEI:        [[float, ...]]              (배열 1개)
+      - TEI single: [float, ...]
+      - OpenAI:     {"data":[{"embedding":[...]}]}
+      - 자체:       {"embedding":[...]} | {"vector":[...]}
+    """
+    if isinstance(payload, list) and payload:
+        first = payload[0]
+        if isinstance(first, list):
+            return [float(x) for x in first]
+        if isinstance(first, (int, float)):
+            return [float(x) for x in payload]
+    if isinstance(payload, dict):
+        if "data" in payload and isinstance(payload["data"], list) and payload["data"]:
+            row = payload["data"][0]
+            if isinstance(row, dict) and "embedding" in row:
+                return [float(x) for x in row["embedding"]]
+        for key in ("embedding", "vector"):
+            v = payload.get(key)
+            if isinstance(v, list) and v and isinstance(v[0], (int, float)):
+                return [float(x) for x in v]
+    return None
+
+
+def _extract_batch_vectors(payload: Any, n: int) -> list[list[float]] | None:
+    """배치 응답에서 임베딩 리스트 추출."""
+    if isinstance(payload, list) and len(payload) == n:
+        # TEI: [[...], [...]]
+        if all(isinstance(row, list) for row in payload):
+            return [[float(x) for x in row] for row in payload]
+    if isinstance(payload, dict):
+        if "data" in payload and isinstance(payload["data"], list) and len(payload["data"]) == n:
+            out: list[list[float]] = []
+            for row in payload["data"]:
+                if isinstance(row, dict) and "embedding" in row:
+                    out.append([float(x) for x in row["embedding"]])
+                else:
+                    return None
+            return out
+        for key in ("embeddings", "vectors"):
+            v = payload.get(key)
+            if isinstance(v, list) and len(v) == n:
+                return [[float(x) for x in row] for row in v]
+    return None
+
+
+def _fit_dim(vec: list[float], dim: int = _EMBED_DIM) -> list[float]:
+    """차원 보정 — 길면 자르고, 짧으면 0-패딩."""
+    if len(vec) >= dim:
+        return vec[:dim]
+    return vec + [0.0] * (dim - len(vec))
 
 
 def _hash_embed(text: str, dim: int = _EMBED_DIM) -> list[float]:
@@ -50,56 +133,72 @@ def _hash_embed(text: str, dim: int = _EMBED_DIM) -> list[float]:
 async def embed_text(text: str, model: str = "bge-m3") -> list[float]:
     """단일 문장을 임베딩한다.
 
-    우선 HTTP 임베딩 서버를 호출하고, 실패 시 해싱 fallback.
-    반환 차원은 `_EMBED_DIM` (1024). 서버가 다른 차원을 주면 잘라내거나 0-패딩.
-    """
-    try:
-        import httpx
+    1. EMBEDDING_SERVER_URL 설정되어 있으면 bge-m3/TEI/OpenAI-호환 서버 호출
+       - TEI 표준:   POST /embed   {"inputs": "...", "normalize": true}
+       - 자체 형식:  POST /embed   {"text": "...", "model": "bge-m3"}
+       - OpenAI:    POST /v1/embeddings {"input": "...", "model": "..."}
+    2. 실패/미설정 시 SHA-256 해싱 결정적 fallback (의미 검색 불가, 동작만 보장)
 
-        async with httpx.AsyncClient(timeout=_EMBED_TIMEOUT) as client:
-            r = await client.post(_EMBED_URL, json={"text": text, "model": model})
-            if r.status_code == 200:
-                payload: Any = r.json()
-                vec = payload.get("embedding") or payload.get("vector") or payload.get("data")
-                if isinstance(vec, list) and vec and isinstance(vec[0], (int, float)):
-                    vec_f = [float(x) for x in vec]
-                    if len(vec_f) >= _EMBED_DIM:
-                        return vec_f[:_EMBED_DIM]
-                    return vec_f + [0.0] * (_EMBED_DIM - len(vec_f))
-    except Exception:
-        # HTTP 실패/미구현 → fallback.
-        pass
+    반환 차원은 `_EMBED_DIM` (기본 1024). 서버가 다른 차원이면 잘라내거나 0-패딩.
+    """
+    if _EMBED_URL:
+        try:
+            import httpx
+
+            url = _normalize_url(_EMBED_URL, "/embed") if "/embed" not in _EMBED_URL else _EMBED_URL.rstrip("/")
+            payload_model = _EMBED_MODEL_OVERRIDE or model
+            # TEI 형식 우선 (BAAI/bge-m3 가 TEI 로 가장 흔히 서빙됨)
+            body = {"inputs": text, "normalize": True, "model": payload_model, "text": text}
+            async with httpx.AsyncClient(timeout=_EMBED_TIMEOUT) as client:
+                r = await client.post(url, json=body, headers=_auth_headers())
+                if r.status_code == 200:
+                    vec = _extract_single_vector(r.json())
+                    if vec is not None:
+                        return _fit_dim(vec)
+                else:
+                    logger.warning(
+                        "embedding server %s status=%s body=%s",
+                        url, r.status_code, r.text[:200],
+                    )
+        except Exception as exc:
+            logger.warning("bge-m3 embedding 실패, fallback 사용: %s", exc)
     return _hash_embed(text)
 
 
 async def embed_batch(texts: list[str], model: str = "bge-m3") -> list[list[float]]:
     """배치 임베딩.
 
-    서버가 batch 엔드포인트를 지원하면 한 번에, 아니면 각각 호출 후 수집.
+    서버가 batch 엔드포인트를 지원하면 한 번에 처리, 아니면 fallback 으로 개별 호출.
     """
     if not texts:
         return []
-    try:
-        import httpx
+    if _EMBED_URL:
+        try:
+            import httpx
 
-        async with httpx.AsyncClient(timeout=_EMBED_TIMEOUT) as client:
-            r = await client.post(
-                _EMBED_URL, json={"texts": texts, "model": model, "batch": True}
-            )
-            if r.status_code == 200:
-                payload: Any = r.json()
-                vecs = payload.get("embeddings") or payload.get("data")
-                if isinstance(vecs, list) and len(vecs) == len(texts):
-                    out: list[list[float]] = []
-                    for vec in vecs:
-                        vec_f = [float(x) for x in vec]
-                        if len(vec_f) >= _EMBED_DIM:
-                            out.append(vec_f[:_EMBED_DIM])
-                        else:
-                            out.append(vec_f + [0.0] * (_EMBED_DIM - len(vec_f)))
-                    return out
-    except Exception:
-        pass
+            url = _normalize_url(_EMBED_URL, "/embed") if "/embed" not in _EMBED_URL else _EMBED_URL.rstrip("/")
+            payload_model = _EMBED_MODEL_OVERRIDE or model
+            # TEI 는 inputs 가 list 면 자동 배치
+            body = {
+                "inputs": texts,
+                "normalize": True,
+                "model": payload_model,
+                "texts": texts,
+                "batch": True,
+            }
+            async with httpx.AsyncClient(timeout=_EMBED_TIMEOUT * 2) as client:
+                r = await client.post(url, json=body, headers=_auth_headers())
+                if r.status_code == 200:
+                    vecs = _extract_batch_vectors(r.json(), len(texts))
+                    if vecs is not None:
+                        return [_fit_dim(v) for v in vecs]
+                else:
+                    logger.warning(
+                        "embedding batch %s status=%s body=%s",
+                        url, r.status_code, r.text[:200],
+                    )
+        except Exception as exc:
+            logger.warning("bge-m3 batch embedding 실패, fallback 사용: %s", exc)
     # fallback: 개별 호출
     out2: list[list[float]] = []
     for t in texts:

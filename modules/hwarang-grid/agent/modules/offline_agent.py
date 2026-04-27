@@ -64,17 +64,23 @@ class OfflineAgentModule:
         logger.info(f"동기화 시작: {len(self.offline_queue)}건 대기")
 
         synced = 0
+        try:
+            from ._http_util import make_request  # type: ignore
+        except Exception:
+            from modules._http_util import make_request  # type: ignore
         for entry in self.offline_queue:
             try:
-                import urllib.request
-                req = urllib.request.Request(
+                resp = make_request(
                     f"{master_url}/api/grid/sync",
-                    data=json.dumps(entry).encode(),
+                    method="POST",
+                    data=json.dumps(entry).encode("utf-8"),
                     headers={"Content-Type": "application/json"},
+                    timeout=30,
                 )
-                urllib.request.urlopen(req, timeout=30)
+                resp.close()
                 synced += 1
-            except Exception:
+            except Exception as exc:
+                logger.warning("sync_on_reconnect 중단 (%d/%d): %s", synced, len(self.offline_queue), exc)
                 break
 
         if synced == len(self.offline_queue):

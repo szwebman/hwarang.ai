@@ -29,6 +29,7 @@ from hwarang_api.knowledge.llm import (  # type: ignore
     llm_check_semantic_equivalence,
     llm_summarize_changes,
 )
+from hwarang_api.knowledge.notifier import notify_admin
 from hwarang_api.knowledge.web import fetch_source, web_search  # type: ignore
 
 logger = logging.getLogger(__name__)
@@ -216,11 +217,38 @@ async def detect_aging_facts(confidence_threshold: float = 0.5) -> list[str]:
 # 관리자 알림
 # ─────────────────────────────────────────────
 async def notify_admin_of_changes(changes: list[dict]) -> None:
-    """중요한 상태 변경을 관리자에게 알림 (logging + TODO: Slack/email)."""
+    """중요한 상태 변경을 관리자에게 알림 (logger + Slack/Discord/email).
+
+    severity 매핑:
+      - invalidated      → error
+      - source_gone      → warn
+      - updated          → info
+      - 그 외             → info
+    """
     if not changes:
         return
+
+    severity_map = {
+        "invalidated": "error",
+        "source_gone": "warn",
+        "updated": "info",
+    }
     for c in changes:
-        logger.warning("[HLKM admin] fact=%s result=%s notes=%s", c.get("fact_id"), c.get("result"), c.get("notes"))
+        result = str(c.get("result") or "unknown")
+        fact_id = c.get("fact_id")
+        notes = c.get("notes")
+        logger.warning(
+            "[HLKM admin] fact=%s result=%s notes=%s", fact_id, result, notes,
+        )
+        severity = severity_map.get(result, "info")
+        try:
+            await notify_admin(
+                f"HLKM self-verify: fact=`{fact_id}` result=*{result}*\nnotes: {notes}",
+                severity=severity,
+                subject=f"[HLKM self-verify] {result}: {fact_id}",
+            )
+        except Exception as e:
+            logger.warning("notify_admin_of_changes: notify failed fact=%s err=%s", fact_id, e)
 
 
 # ─────────────────────────────────────────────

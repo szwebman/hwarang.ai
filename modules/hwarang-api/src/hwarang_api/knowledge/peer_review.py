@@ -28,6 +28,7 @@ from hwarang_api.db import prisma
 
 from . import contributor_tier
 from .contribution_gate import WriteAction, require_contribution_permission
+from .notifier import notify_admin
 from .staking import (  # type: ignore  # Group 1
     place_stake,
     required_stake,
@@ -217,6 +218,21 @@ async def finalize_reviews(
         "finalize_reviews: fact=%s decision=%s A=%d R=%d Ab=%d",
         fact_id, decision, accept_count, reject_count, abstain_count,
     )
+
+    # 관리자 알림 (Slack + email) — accepted/rejected 모두 통보
+    severity = "info" if decision == _DECISION_ACCEPTED else "warn"
+    try:
+        await notify_admin(
+            (
+                f"Peer review for fact `{fact_id}`: *{decision}* "
+                f"(accept={accept_count} reject={reject_count} abstain={abstain_count})"
+            ),
+            severity=severity,
+            subject=f"[HLKM peer-review] {decision}: {fact_id}",
+        )
+    except Exception as e:  # 알림 실패가 본 로직을 막으면 안 됨
+        logger.warning("finalize_reviews: notify_admin failed: %s", e)
+
     return {
         "decision": decision,
         "accept_count": accept_count,
@@ -437,13 +453,24 @@ async def _dedupe_by_ip_cluster(user_ids: list[str]) -> list[str]:
 
 
 async def notify_reviewers(fact_id: str, reviewer_ids: list[str]) -> int:
-    """배정된 리뷰어에게 알림을 전송한다 (placeholder).
+    """배정된 리뷰어에게 알림을 전송한다.
 
-    실제로는 in-app 알림 + 이메일/푸시 큐에 enqueue.
+    채널:
+      - logger.info (감사용)
+      - Slack 채널 (HWARANG_SLACK_WEBHOOK_URL 설정 시) — 단체 통지
+      - 향후 in-app 알림은 별도 모듈에서 enqueue
     """
-    # TODO: notification 모듈 연결
     for uid in reviewer_ids:
         logger.info("notify_reviewer: fact=%s reviewer=%s", fact_id, uid)
+    if reviewer_ids:
+        try:
+            await notify_admin(
+                f"New peer review assignment: fact=`{fact_id}` reviewers={len(reviewer_ids)}",
+                severity="info",
+                subject=f"[HLKM review-assigned] {fact_id}",
+            )
+        except Exception as e:
+            logger.warning("notify_reviewers: notify_admin failed: %s", e)
     return len(reviewer_ids)
 
 

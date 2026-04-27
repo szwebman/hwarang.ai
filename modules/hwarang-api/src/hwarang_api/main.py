@@ -12,8 +12,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from hwarang_api.config import Settings
+from hwarang_api.grid.sharder import SHARD_DIR
 from hwarang_api.routers import admin, chat, cluster, grid, health, knowledge, models
 from hwarang_api.services.model_manager import ModelManager
 
@@ -111,6 +113,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # 정적 파일: 라운드 샤드 파일 서빙 (/static/shards/{round_id}/shard_*.jsonl)
+    try:
+        SHARD_DIR.mkdir(parents=True, exist_ok=True)
+        app.mount(
+            "/static/shards",
+            StaticFiles(directory=str(SHARD_DIR)),
+            name="shards",
+        )
+    except Exception as e:
+        logger.warning(f"샤드 정적 파일 마운트 실패(계속): {e}")
 
     # Routers
     app.include_router(health.router, tags=["Health"])

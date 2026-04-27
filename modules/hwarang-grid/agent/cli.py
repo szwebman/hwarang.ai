@@ -537,6 +537,12 @@ def cmd_daemon(args: argparse.Namespace) -> int:
       3. agent_main.HwarangAgent 시작
       4. status_writer 백그라운드 태스크 시작 (30초 갱신)
       5. SIGTERM/SIGINT → graceful shutdown
+
+    주의:
+      - macOS/Linux 만 지원. 이 함수는 fork 하지 않고 foreground 로 실행되며
+        Tauri 사이드카 또는 systemd/launchd 가 백그라운드화를 담당한다.
+      - Windows 는 `pythonw.exe -m agent daemon` 또는 NSSM 서비스 래퍼로 처리.
+        SIGTERM 미지원이므로 stop 은 taskkill /PID 로 강제 종료된다.
     """
     HOME_DIR.mkdir(parents=True, exist_ok=True)
 
