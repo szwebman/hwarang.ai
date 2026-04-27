@@ -285,7 +285,7 @@ export async function POST(request: NextRequest) {
 
   // 고급/혁신 기법의 request body transform 적용
   body = advanced.requestBodyTransform(body);
-  body = innovation.requestBodyTransform(body);
+  body = await innovation.requestBodyTransform(body);
 
   // ─── 4.5 최적화 프레임워크 적용 (HPC + HAT) ─────────
   const optimization = await applyOptimization(body.messages, {
@@ -440,6 +440,21 @@ export async function POST(request: NextRequest) {
       hybridServing.recordFailure(servingTarget.agent.id, `HTTP ${apiResponse.status}`);
     }
     const errorText = await apiResponse.text();
+
+    // 404 + model 에러 → 모델 미로드 상태. 관리자에게 명확한 메시지.
+    if (apiResponse.status === 404 && /model.*not.*exist|does not exist/i.test(errorText)) {
+      const m = errorText.match(/`([^`]+)`/);
+      const missing = m?.[1] || body.model || "(unknown)";
+      return Response.json(
+        {
+          error: "선택된 AI 모델이 서버에 로드되어 있지 않습니다. 관리자에게 문의해 주세요.",
+          code: "MODEL_NOT_LOADED",
+          detail: `vLLM 에 모델/LoRA "${missing}" 미존재. AIModel.backendId 또는 LoRA 로딩 확인 필요.`,
+        },
+        { status: 503 }
+      );
+    }
+
     return Response.json(
       {
         error: "AI 서버 응답 오류입니다. 잠시 후 다시 시도해 주세요.",

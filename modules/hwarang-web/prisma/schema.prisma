@@ -146,8 +146,9 @@ model AIModel {
   description String?
 
   // 실제 모델 연결
-  backendId String // vLLM 모델 ID
-  endpoint  String @default("http://localhost:8000")
+  backendId String // vLLM 모델 ID (베이스 모델 — 항상 채워짐)
+  loraName  String? // vLLM 의 LoRA 이름 (있으면 LoRA 라우팅, 없으면 베이스만)
+  endpoint  String  @default("http://localhost:8000")
 
   // ⭐ 토큰 단가 (화랑 토큰 소비 배수)
   inputMultiplier  Float @default(0.1) // 입력 토큰 배수
@@ -157,10 +158,13 @@ model AIModel {
   maxContextLength Int @default(32768)
   maxOutputTokens  Int @default(4096)
 
-  // 카테고리 & 태그
-  category String   @default("general") // "general", "coding", "legal", "tax", "reasoning"
+  // 카테고리 & 태그 (도메인 라우팅 키)
+  category String   @default("general") // "general", "coding", "legal", "tax", "medical", "reasoning"
   tier     String   @default("standard") // "basic", "standard", "premium", "flagship"
   tags     String[]
+
+  // 도메인 기본 라우트 표시 — 같은 category 안에서 isDomainDefault 가 true 인 게 우선 사용됨
+  isDomainDefault Boolean @default(false)
 
   // 접근 제어
   minPlan   String? // 최소 플랜 이름 (null이면 전체)

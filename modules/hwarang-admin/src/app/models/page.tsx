@@ -8,6 +8,7 @@ interface AIModel {
   displayName: string;
   description: string | null;
   backendId: string;
+  loraName: string | null;
   endpoint: string;
   inputMultiplier: number;
   outputMultiplier: number;
@@ -19,9 +20,25 @@ interface AIModel {
   minPlan: string | null;
   isPublic: boolean;
   isDefault: boolean;
+  isDomainDefault: boolean;
   isActive: boolean;
   status: string;
   sortOrder: number;
+}
+
+interface RoutingEntry {
+  domain: string;
+  selected: {
+    id: string;
+    name: string;
+    displayName: string;
+    backendId: string;
+    loraName: string | null;
+    isDomainDefault: boolean;
+    status: string;
+  } | null;
+  candidateCount: number;
+  usedFallback: boolean;
 }
 
 interface VLLMModel {
@@ -32,12 +49,22 @@ interface VLLMModel {
 }
 
 const CATEGORY_OPTIONS = [
-  { value: "general", label: "일반" },
-  { value: "coding", label: "코딩" },
-  { value: "legal", label: "법률" },
-  { value: "tax", label: "세무" },
-  { value: "reasoning", label: "추론" },
+  { value: "general", label: "일반", icon: "💬" },
+  { value: "coding", label: "코딩", icon: "💻" },
+  { value: "legal", label: "법률", icon: "⚖️" },
+  { value: "tax", label: "세무", icon: "💰" },
+  { value: "medical", label: "의료", icon: "🏥" },
+  { value: "reasoning", label: "추론", icon: "🧠" },
 ];
+
+const DOMAIN_LABELS: Record<string, { label: string; icon: string; description: string }> = {
+  general: { label: "일반 대화", icon: "💬", description: "도메인 매칭 안 되는 모든 질문" },
+  coding: { label: "코딩", icon: "💻", description: "프로그래밍 / 코드 작성 질문" },
+  legal: { label: "법률", icon: "⚖️", description: "법률 자문, 판례, 민/형사" },
+  tax: { label: "세무", icon: "💰", description: "세금, 신고, 회계" },
+  medical: { label: "의료", icon: "🏥", description: "의학, 증상, 진단 (참고용)" },
+  reasoning: { label: "추론", icon: "🧠", description: "복잡한 논리 문제" },
+};
 
 const TIER_OPTIONS = [
   { value: "basic", label: "Basic", color: "#6b7280" },
@@ -65,24 +92,48 @@ function authHeaders(): Record<string, string> {
 export default function ModelsPage() {
   const [models, setModels] = useState<AIModel[]>([]);
   const [vllmModels, setVllmModels] = useState<VLLMModel[]>([]);
+  const [endpoints, setEndpoints] = useState<string[]>([]);
+  const [routingTable, setRoutingTable] = useState<RoutingEntry[]>([]);
+  const [globalDefault, setGlobalDefault] = useState<{ name: string; displayName: string; backendId: string } | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [editing, setEditing] = useState<AIModel | null>(null);
   const [showAdd, setShowAdd] = useState(false);
+  const [fetchError, setFetchError] = useState<string | null>(null);
 
   useEffect(() => {
     fetchModels();
   }, []);
 
   const fetchModels = async () => {
+    setFetchError(null);
     try {
-      const resp = await fetch("/api/models", { headers: authHeaders() });
-      if (resp.ok) {
-        const data = await resp.json();
+      const [modelsResp, routingResp] = await Promise.all([
+        fetch("/api/models", { headers: authHeaders() }),
+        fetch("/api/models/routing", { headers: authHeaders() }),
+      ]);
+      const data = await modelsResp.json().catch(() => ({}));
+      if (!modelsResp.ok) {
+        const msg =
+          modelsResp.status === 401
+            ? "인증 만료 — 다시 로그인해 주세요."
+            : modelsResp.status === 403
+            ? "관리자 권한이 필요합니다."
+            : data.error || `요청 실패 (${modelsResp.status})`;
+        setFetchError(msg);
+      } else {
         setModels(data.models || []);
         setVllmModels(data.vllmModels || []);
+        setEndpoints(data.endpoints || []);
       }
-    } catch {}
+      if (routingResp.ok) {
+        const r = await routingResp.json();
+        setRoutingTable(r.routingTable || []);
+        setGlobalDefault(r.globalDefault || null);
+      }
+    } catch (e: any) {
+      setFetchError(`네트워크 오류: ${e?.message || e}`);
+    }
     setLoading(false);
   };
 
@@ -188,6 +239,89 @@ export default function ModelsPage() {
         </div>
       </div>
 
+      {/* 도메인 라우팅 테이블 (이게 핵심) */}
+      {!loading && routingTable.length > 0 && (
+        <div className="rounded-xl p-5 mb-6 border" style={{ borderColor: "var(--border)", background: "var(--background)" }}>
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <h2 className="font-semibold text-base">🚦 도메인 라우팅</h2>
+              <p className="text-xs mt-0.5" style={{ color: "var(--muted-foreground)" }}>
+                질문이 어떤 도메인으로 분류되면 어떤 모델/LoRA 가 사용되는지. <strong>category</strong> 필드 + <strong>도메인 기본</strong> 체크박스로 결정됨.
+              </p>
+            </div>
+            {globalDefault && (
+              <div className="text-right">
+                <div className="text-[10px]" style={{ color: "var(--muted-foreground)" }}>전역 기본</div>
+                <code className="text-xs font-bold">{globalDefault.displayName}</code>
+              </div>
+            )}
+          </div>
+          <div className="grid grid-cols-2 lg:grid-cols-3 gap-2">
+            {routingTable.map((entry) => {
+              const meta = DOMAIN_LABELS[entry.domain] || { label: entry.domain, icon: "📦", description: "" };
+              const isFallback = entry.usedFallback;
+              const noModel = !entry.selected;
+              return (
+                <div
+                  key={entry.domain}
+                  className="rounded-lg p-3 border"
+                  style={{
+                    borderColor: noModel ? "#dc2626" : isFallback ? "#fbbf24" : "var(--border)",
+                    background: noModel ? "#fee2e2" : isFallback ? "#fef3c7" : "var(--muted)",
+                  }}
+                >
+                  <div className="flex items-start gap-2">
+                    <span className="text-lg leading-none">{meta.icon}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-semibold flex items-center gap-1">
+                        {meta.label}
+                        {isFallback && (
+                          <span className="text-[9px] px-1.5 py-0.5 rounded text-white" style={{ background: "#f59e0b" }}>
+                            폴백
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[10px]" style={{ color: "var(--muted-foreground)" }}>{meta.description}</div>
+                      {entry.selected ? (
+                        <div className="mt-2 space-y-0.5">
+                          <div className="text-xs">
+                            <span style={{ color: "var(--muted-foreground)" }}>모델: </span>
+                            <strong>{entry.selected.displayName}</strong>
+                          </div>
+                          <div className="text-[10px] font-mono" style={{ color: "var(--muted-foreground)" }}>
+                            backend: <code>{entry.selected.backendId}</code>
+                          </div>
+                          {entry.selected.loraName && (
+                            <div className="text-[10px] font-mono" style={{ color: "#7c3aed" }}>
+                              LoRA: <code>{entry.selected.loraName}</code>
+                            </div>
+                          )}
+                          <div className="text-[10px]" style={{ color: entry.selected.status === "ready" ? "#10b981" : "#ef4444" }}>
+                            {entry.selected.status === "ready" ? "🟢 서빙중" : "🔴 " + entry.selected.status}
+                          </div>
+                          {isFallback && (
+                            <div className="text-[10px] mt-1" style={{ color: "#92400e" }}>
+                              {meta.label} 전용 모델 없음 → 전역 기본으로 동작 중
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="mt-2 text-xs" style={{ color: "#991b1b" }}>
+                          ⚠ 모델 없음 + 전역 기본도 없음 — 등록 + 기본 체크 필요
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div className="text-[10px] mt-3 pt-3 border-t" style={{ color: "var(--muted-foreground)", borderColor: "var(--border)" }}>
+            💡 카테고리 별로 활성 모델 중 <strong>도메인 기본 → 전역 기본 → 정렬순서</strong> 순으로 1개 자동 선택. 변경 후 60초 내 반영.
+          </div>
+        </div>
+      )}
+
       {/* 모델 편집/추가 모달 */}
       {(editing || showAdd) && (
         <ModelEditor
@@ -199,13 +333,49 @@ export default function ModelsPage() {
         />
       )}
 
+      {/* 에러 배너 */}
+      {fetchError && (
+        <div className="rounded-xl p-4 mb-4 border-2" style={{ borderColor: "#dc2626", background: "#fee2e2" }}>
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="font-medium text-sm" style={{ color: "#991b1b" }}>모델 목록 로드 실패</div>
+              <div className="text-xs mt-1" style={{ color: "#7f1d1d" }}>{fetchError}</div>
+            </div>
+            <button
+              onClick={fetchModels}
+              className="text-xs px-3 py-1.5 rounded-lg text-white font-medium"
+              style={{ background: "#dc2626" }}
+            >
+              재시도
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 진단 정보 (vLLM 감지 0개일 때) */}
+      {!loading && !fetchError && vllmModels.length === 0 && endpoints.length > 0 && (
+        <div className="rounded-xl p-3 mb-4 border" style={{ borderColor: "#f59e0b", background: "#fef3c7" }}>
+          <div className="text-sm font-medium" style={{ color: "#92400e" }}>
+            ⚠ vLLM 서버에서 모델이 감지되지 않습니다
+          </div>
+          <div className="text-xs mt-1" style={{ color: "#78350f" }}>
+            확인된 endpoint: {endpoints.map((e) => <code key={e} className="mx-1 px-1.5 py-0.5 rounded" style={{ background: "rgba(0,0,0,0.05)" }}>{e}</code>)}
+            <br />
+            vLLM 이 실제로 실행 중인지, <code>HWARANG_API_URL</code> 환경변수가 올바른지 확인하세요. 모델의 endpoint 필드가 비어있으면 기본 endpoint 가 사용됩니다.
+          </div>
+        </div>
+      )}
+
       {/* 모델 카드 목록 */}
       {loading ? (
         <div className="text-center py-12 text-sm" style={{ color: "var(--muted-foreground)" }}>로딩 중...</div>
       ) : models.length === 0 ? (
         <div className="rounded-xl p-12 text-center border" style={{ background: "var(--background)", borderColor: "var(--border)" }}>
           <p className="text-lg mb-2">등록된 AI 모델이 없습니다</p>
-          <p className="text-sm" style={{ color: "var(--muted-foreground)" }}>상단 "모델 추가" 버튼으로 등록하세요</p>
+          <p className="text-sm mb-4" style={{ color: "var(--muted-foreground)" }}>상단 "모델 추가" 버튼으로 등록하거나 시드 스크립트를 실행하세요</p>
+          <code className="text-xs px-3 py-2 rounded inline-block" style={{ background: "var(--muted)" }}>
+            cd modules/hwarang-admin && pnpm seed:models
+          </code>
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-3">
@@ -224,7 +394,17 @@ export default function ModelsPage() {
                       <h3 className="font-semibold text-lg">{model.displayName}</h3>
                       {model.isDefault && (
                         <span className="text-[10px] px-2 py-0.5 rounded-full text-white font-medium" style={{ background: "var(--primary)" }}>
-                          기본
+                          ⭐⭐ 전역 기본
+                        </span>
+                      )}
+                      {model.isDomainDefault && (
+                        <span className="text-[10px] px-2 py-0.5 rounded-full text-white font-medium" style={{ background: "#7c3aed" }}>
+                          ⭐ {CATEGORY_OPTIONS.find(c => c.value === model.category)?.label || model.category} 기본
+                        </span>
+                      )}
+                      {model.loraName && (
+                        <span className="text-[10px] px-2 py-0.5 rounded-full font-mono font-medium" style={{ background: "#ddd6fe", color: "#5b21b6" }}>
+                          🔌 {model.loraName}
                         </span>
                       )}
                       <span className="text-[10px] px-2 py-0.5 rounded-full font-medium" style={{ background: `${tier.color}15`, color: tier.color }}>
@@ -356,7 +536,8 @@ function ModelEditor({
       displayName: "",
       description: "",
       backendId: "",
-      endpoint: "http://localhost:8000",
+      loraName: null,
+      endpoint: "http://localhost:8001",
       inputMultiplier: 1.0,
       outputMultiplier: 1.0,
       maxContextLength: 32768,
@@ -367,6 +548,7 @@ function ModelEditor({
       minPlan: null,
       isPublic: true,
       isDefault: false,
+      isDomainDefault: false,
       isActive: true,
       sortOrder: 0,
     }
@@ -402,15 +584,47 @@ function ModelEditor({
           </div>
 
           <div>
-            <label className="text-xs font-medium">백엔드 모델 ID * (vLLM 경로)</label>
+            <label className="text-xs font-medium">백엔드 모델 ID * (vLLM 베이스 모델)</label>
             <input type="text" value={form.backendId || ""} onChange={(e) => setForm({ ...form, backendId: e.target.value })}
               className="w-full mt-1 px-3 py-2 rounded-lg border text-sm font-mono" style={{ borderColor: "var(--border)" }}
-              placeholder="/mnt/nvme2/hwarang/models/deepseek-v3" list="vllm-models" />
+              placeholder="hwarang-v5-awq" list="vllm-models" />
             <datalist id="vllm-models">
               {vllmModels.map((m) => <option key={m.id} value={m.id} />)}
             </datalist>
             <p className="text-[10px] mt-1" style={{ color: "var(--muted-foreground)" }}>
-              vLLM 서빙 경로. 감지된 모델: {vllmModels.length}개
+              vLLM 의 `--served-model-name` 값. 감지된 모델: {vllmModels.length}개
+            </p>
+          </div>
+
+          <div>
+            <label className="text-xs font-medium flex items-center gap-1">
+              LoRA 이름 <span style={{ color: "var(--muted-foreground)" }}>(선택 — 도메인 특화 시)</span>
+            </label>
+            <input
+              type="text"
+              value={form.loraName || ""}
+              onChange={(e) => setForm({ ...form, loraName: e.target.value || null })}
+              className="w-full mt-1 px-3 py-2 rounded-lg border text-sm font-mono"
+              style={{ borderColor: "var(--border)" }}
+              placeholder="hwarang-code-lora (vLLM --lora-modules 의 별칭)"
+            />
+            <p className="text-[10px] mt-1" style={{ color: "var(--muted-foreground)" }}>
+              vLLM 시작 시 등록한 LoRA 이름. 비워두면 베이스 모델만 사용. 예: <code>hwarang-code-lora=/path/to/adapter</code> 등록했다면 여기에 <code>hwarang-code-lora</code>
+            </p>
+          </div>
+
+          <div>
+            <label className="text-xs font-medium">vLLM 엔드포인트</label>
+            <input
+              type="text"
+              value={form.endpoint || ""}
+              onChange={(e) => setForm({ ...form, endpoint: e.target.value })}
+              className="w-full mt-1 px-3 py-2 rounded-lg border text-sm font-mono"
+              style={{ borderColor: "var(--border)" }}
+              placeholder="http://localhost:8001"
+            />
+            <p className="text-[10px] mt-1" style={{ color: "var(--muted-foreground)" }}>
+              모델이 서빙되는 vLLM 서버 주소. 모델별로 다를 수 있음.
             </p>
           </div>
 
@@ -476,19 +690,38 @@ function ModelEditor({
             </div>
           </div>
 
-          <div className="flex items-center gap-4 pt-2">
-            <label className="flex items-center gap-2 text-sm cursor-pointer">
-              <input type="checkbox" checked={form.isActive} onChange={(e) => setForm({ ...form, isActive: e.target.checked })} />
-              활성 (서빙 가능)
-            </label>
-            <label className="flex items-center gap-2 text-sm cursor-pointer">
-              <input type="checkbox" checked={form.isPublic} onChange={(e) => setForm({ ...form, isPublic: e.target.checked })} />
-              공개 (유저에게 표시)
-            </label>
-            <label className="flex items-center gap-2 text-sm cursor-pointer">
-              <input type="checkbox" checked={form.isDefault} onChange={(e) => setForm({ ...form, isDefault: e.target.checked })} />
-              기본 모델
-            </label>
+          <div className="rounded-lg p-3 border" style={{ borderColor: "var(--border)", background: "var(--muted)" }}>
+            <div className="text-xs font-bold mb-2">🚦 라우팅 설정</div>
+            <div className="space-y-2">
+              <label className="flex items-start gap-2 text-sm cursor-pointer">
+                <input type="checkbox" checked={form.isActive} onChange={(e) => setForm({ ...form, isActive: e.target.checked })} className="mt-1" />
+                <div>
+                  <div className="font-medium">활성 (서빙 가능)</div>
+                  <div className="text-[10px]" style={{ color: "var(--muted-foreground)" }}>비활성이면 라우팅 대상에서 제외됨</div>
+                </div>
+              </label>
+              <label className="flex items-start gap-2 text-sm cursor-pointer">
+                <input type="checkbox" checked={form.isPublic} onChange={(e) => setForm({ ...form, isPublic: e.target.checked })} className="mt-1" />
+                <div>
+                  <div className="font-medium">공개 (유저에게 표시)</div>
+                  <div className="text-[10px]" style={{ color: "var(--muted-foreground)" }}>유저 모델 선택 메뉴에 노출 여부</div>
+                </div>
+              </label>
+              <label className="flex items-start gap-2 text-sm cursor-pointer">
+                <input type="checkbox" checked={form.isDomainDefault} onChange={(e) => setForm({ ...form, isDomainDefault: e.target.checked })} className="mt-1" />
+                <div>
+                  <div className="font-medium">⭐ {CATEGORY_OPTIONS.find(c => c.value === form.category)?.label || "도메인"} 기본</div>
+                  <div className="text-[10px]" style={{ color: "var(--muted-foreground)" }}>같은 카테고리에 여러 모델이 있을 때 이 모델 우선 사용</div>
+                </div>
+              </label>
+              <label className="flex items-start gap-2 text-sm cursor-pointer">
+                <input type="checkbox" checked={form.isDefault} onChange={(e) => setForm({ ...form, isDefault: e.target.checked })} className="mt-1" />
+                <div>
+                  <div className="font-medium">⭐⭐ 전역 기본 (가장 중요)</div>
+                  <div className="text-[10px]" style={{ color: "var(--muted-foreground)" }}>도메인 매칭 안 될 때 폴백 — 전체에서 1개만 체크. 도메인 모델 없어도 이게 있으면 항상 동작.</div>
+                </div>
+              </label>
+            </div>
           </div>
         </div>
 

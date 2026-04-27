@@ -4,10 +4,14 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "prisma generate --generator client && next build",
     "start": "next start",
     "lint": "next lint",
-    "test": "vitest"
+    "test": "vitest",
+    "postinstall": "prisma generate --generator client",
+    "db:generate": "prisma generate --generator client",
+    "db:migrate": "prisma migrate deploy",
+    "db:push": "prisma db push"
   },
   "dependencies": {
     "next": "^15.0",

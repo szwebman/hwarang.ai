@@ -12,65 +12,130 @@
  *   - 확장성 ↑ (LoRA만 추가하면 새 도메인)
  */
 
+import { prisma } from "@/lib/db";
+
 export interface NeuralPath {
   domain: string;
-  loraName: string;          // vLLM이 로드할 LoRA 이름
-  adapter: string;            // 어댑터 경로
+  loraName: string;          // vLLM이 로드할 LoRA 이름 ("" 면 베이스만)
+  backendId: string;          // 베이스 모델 vLLM ID
+  modelName: string;          // AIModel.name (DB 키)
   description: string;
-  priority: number;
 }
 
-// 도메인별 전용 경로
-export const NEURAL_PATHS: Record<string, NeuralPath> = {
-  legal: {
-    domain: "legal",
-    loraName: "hwarang-legal-lora",
-    adapter: "/mnt/nvme2/hwarang/lora_adapters/legal-v1",
-    description: "한국 법률 전문 뉴런 경로",
-    priority: 10,
-  },
-  tax: {
-    domain: "tax",
-    loraName: "hwarang-tax-lora",
-    adapter: "/mnt/nvme2/hwarang/lora_adapters/tax-v1",
-    description: "한국 세무 전문 뉴런 경로",
-    priority: 10,
-  },
-  coding: {
-    domain: "coding",
-    loraName: "hwarang-code-lora",
-    adapter: "/mnt/nvme2/hwarang/lora_adapters/code-v1",
-    description: "코딩 전문 뉴런 경로",
-    priority: 8,
-  },
-  medical: {
-    domain: "medical",
-    loraName: "hwarang-medical-lora",
-    adapter: "/mnt/nvme2/hwarang/lora_adapters/medical-v1",
-    description: "한국 의료 전문 뉴런 경로",
-    priority: 10,
-  },
-  finance: {
-    domain: "finance",
-    loraName: "hwarang-finance-lora",
-    adapter: "/mnt/nvme2/hwarang/lora_adapters/finance-v1",
-    description: "한국 금융 전문 뉴런 경로",
-    priority: 9,
-  },
-  general: {
-    domain: "general",
-    loraName: "",  // 베이스 모델만 사용
-    adapter: "",
-    description: "일반 대화 (베이스 모델)",
-    priority: 1,
-  },
+// 도메인 ↔ category 매핑 (TACS 도메인 명을 AIModel.category 로 변환)
+const DOMAIN_TO_CATEGORY: Record<string, string> = {
+  legal: "legal",
+  tax: "tax",
+  coding: "coding",
+  code: "coding",
+  medical: "medical",
+  finance: "tax",   // 금융 도메인은 세무 라우트로 폴백 (없으면 별도 학습)
+  general: "general",
 };
 
+// DB 조회 캐시 (60초)
+let _routeCache: {
+  map: Record<string, NeuralPath>;
+  fallback: NeuralPath | null;
+  expiresAt: number;
+} | null = null;
+
+async function loadRoutesFromDB(): Promise<{
+  map: Record<string, NeuralPath>;
+  fallback: NeuralPath | null;
+}> {
+  const now = Date.now();
+  if (_routeCache && _routeCache.expiresAt > now) {
+    return { map: _routeCache.map, fallback: _routeCache.fallback };
+  }
+
+  const map: Record<string, NeuralPath> = {};
+  let fallback: NeuralPath | null = null;
+
+  try {
+    const models = await prisma.aIModel.findMany({
+      where: { isActive: true },
+      orderBy: [
+        { isDomainDefault: "desc" },
+        { isDefault: "desc" },
+        { sortOrder: "asc" },
+      ],
+    });
+
+    // 카테고리별로 첫 번째(우선순위 높은) 모델만 라우팅에 사용
+    for (const m of models) {
+      if (!map[m.category]) {
+        map[m.category] = {
+          domain: m.category,
+          loraName: m.loraName || "",
+          backendId: m.backendId,
+          modelName: m.name,
+          description: m.description || `${m.category} 도메인`,
+        };
+      }
+    }
+
+    // 전역 폴백: isDefault=true 모델 (없으면 첫 번째 활성 모델)
+    const defaultModel = models.find((m) => m.isDefault) || models[0];
+    if (defaultModel) {
+      fallback = {
+        domain: "fallback",
+        loraName: "",  // 폴백은 항상 베이스 (LoRA 안 씀)
+        backendId: defaultModel.backendId,
+        modelName: defaultModel.name,
+        description: `전역 기본 (${defaultModel.displayName})`,
+      };
+    }
+  } catch (e) {
+    console.warn("[HNTL] DB 조회 실패:", e);
+  }
+
+  _routeCache = { map, fallback, expiresAt: now + 60_000 };
+  return { map, fallback };
+}
+
+export function clearRouteCache() {
+  _routeCache = null;
+}
+
+// 폴백 체인: domain → category 매칭 → 전역 기본 (isDefault) → 빈 path
+function _resolve(map: Record<string, NeuralPath>, fallback: NeuralPath | null, domain: string): NeuralPath {
+  const category = DOMAIN_TO_CATEGORY[domain] || "general";
+  return (
+    map[category] ||
+    fallback || {
+      domain: "general",
+      loraName: "",
+      backendId: "",
+      modelName: "",
+      description: "라우팅 미설정 (관리자에서 모델 등록 + isDefault 체크 필요)",
+    }
+  );
+}
+
 /**
- * 도메인에 따라 적절한 뉴런 경로 선택.
+ * 도메인에 따라 적절한 뉴런 경로 선택 (DB 기반, 동기).
+ * 캐시 데이터 사용 — 첫 호출 시엔 빈 결과 가능, 그 후엔 정확.
  */
 export function selectNeuralPath(domain: string): NeuralPath {
-  return NEURAL_PATHS[domain] || NEURAL_PATHS.general;
+  return _resolve(_routeCache?.map || {}, _routeCache?.fallback || null, domain);
+}
+
+/**
+ * 도메인에 따라 적절한 뉴런 경로 선택 (비동기, DB 우선).
+ * 캐시 미스 시 DB 조회.
+ */
+export async function selectNeuralPathAsync(domain: string): Promise<NeuralPath> {
+  const { map, fallback } = await loadRoutesFromDB();
+  return _resolve(map, fallback, domain);
+}
+
+// 라우팅 정보 디버그용 (관리자 UI 가 호출)
+export async function getRoutingTable(): Promise<{
+  map: Record<string, NeuralPath>;
+  fallback: NeuralPath | null;
+}> {
+  return loadRoutesFromDB();
 }
 
 /**
@@ -327,6 +392,14 @@ export interface ModelSelection {
   reason: string;
 }
 
+/**
+ * DB 라우팅 테이블 기반으로 도메인별 모델 선택.
+ * 동기 호환을 위해 캐시된 _routeCache 사용. 캐시 비어있으면 isDefault → general → 폴백 체인.
+ *
+ * 폴백 정책 (사용자 결정):
+ *   1. 도메인에 매칭되는 활성 모델 있으면 그걸 사용
+ *   2. 없으면 isDefault=true 인 전역 기본 모델 사용 (계속 그것만)
+ */
 export function selectModel(
   domain: string,
   userMessage: string,
@@ -336,59 +409,96 @@ export function selectModel(
     previousMessages?: string[];
   }
 ): ModelSelection {
-  const isPaidPlan = userPlan && ["starter", "pro", "business", "enterprise"].includes(userPlan);
+  const path = selectNeuralPath(domain);
 
-  // 법률/세무 도메인
-  if (domain === "legal" || domain === "tax") {
-    return {
-      model: isPaidPlan ? "hwarang-legal" : "hwarang-coder",
-      reason: isPaidPlan ? "법률/세무 도메인 (유료 플랜)" : "법률/세무 도메인 (Free 폴백)",
-    };
-  }
-
-  // 코딩 도메인: 하이브리드 복잡도 분석
+  // 코딩은 복잡도 정보를 제공 (UI 표시용 메타데이터)
   if (domain === "coding") {
     const complexity = detectCodingComplexity(userMessage, {
       conversationTurns: conversationContext?.conversationTurns,
       previousMessages: conversationContext?.previousMessages,
       userPlan,
     });
-
-    // 복잡한 코딩 + 유료 플랜 → DeepSeek V3
-    if (complexity.level === "complex" && isPaidPlan) {
-      return {
-        model: "hwarang-pro",
-        complexity,
-        reason: `복잡 코딩 (점수 ${complexity.score}/100) → DeepSeek V3`,
-      };
-    }
-
-    // 간단한 코딩 또는 Free 플랜 → Qwen3-Coder
     return {
-      model: "hwarang-coder",
+      model: path.modelName || "fallback",
       complexity,
-      reason: complexity.level === "simple"
-        ? `간단 코딩 (점수 ${complexity.score}/100) → Qwen3-Coder`
-        : `복잡 코딩이지만 Free 플랜 → Qwen3-Coder`,
+      reason: path.modelName
+        ? `코딩 도메인 (점수 ${complexity.score}/100) → ${path.description}`
+        : "코딩 모델 미등록 → 전역 기본",
     };
   }
 
-  // 일반 대화
+  // 그 외 도메인 — DB 매칭 결과 그대로
   return {
-    model: "hwarang-general",
-    reason: "일반 대화",
+    model: path.modelName || "fallback",
+    reason: path.modelName
+      ? `${domain} 도메인 → ${path.description}`
+      : `${domain} 모델 미등록 → 전역 기본 폴백`,
   };
 }
 
 /**
  * vLLM 요청에 LoRA 지정 주입.
  * vLLM은 --enable-lora 옵션으로 실행되어야 함.
+ *
+ * ⚠ 안전장치: 실제로 vLLM 에 로드된 모델/LoRA 만 사용.
+ * 미로드 LoRA 가 지정되면 베이스 모델로 폴백.
  */
-export function applyHNTL(requestBody: any, domain: string): any {
-  const path = selectNeuralPath(domain);
+
+// vLLM 가용 모델 캐시 (60초)
+let _modelsCache: { ids: Set<string>; expiresAt: number } | null = null;
+
+async function getAvailableModels(endpoint: string): Promise<Set<string>> {
+  const now = Date.now();
+  if (_modelsCache && _modelsCache.expiresAt > now) {
+    return _modelsCache.ids;
+  }
+  try {
+    const url = endpoint.replace(/\/v1\/?$/, "") + "/v1/models";
+    const res = await fetch(url, { signal: AbortSignal.timeout(3000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data: any = await res.json();
+    const ids = new Set<string>(
+      (data.data || []).map((m: any) => String(m.id))
+    );
+    _modelsCache = { ids, expiresAt: now + 60_000 };
+    return ids;
+  } catch {
+    // 실패 시 빈 집합 — applyHNTL 이 폴백
+    _modelsCache = { ids: new Set(), expiresAt: now + 10_000 };
+    return _modelsCache.ids;
+  }
+}
+
+export function clearModelsCache() {
+  _modelsCache = null;
+}
+
+export async function applyHNTL(
+  requestBody: any,
+  domain: string,
+  endpoint?: string
+): Promise<any> {
+  const path = await selectNeuralPathAsync(domain);
 
   if (!path.loraName) {
-    return requestBody;  // 일반 도메인은 베이스만 사용
+    return requestBody;  // 일반 도메인 또는 LoRA 미설정 — 베이스만 사용
+  }
+
+  // vLLM 에 LoRA 가 실제로 로드돼 있는지 확인
+  if (endpoint) {
+    const available = await getAvailableModels(endpoint);
+    if (available.size > 0 && !available.has(path.loraName)) {
+      // LoRA 미로드 → 베이스 모델 유지 + 메타 기록
+      return {
+        ...requestBody,
+        _hwarang_path: {
+          domain: path.domain,
+          lora: path.loraName,
+          fallback: "base_model",
+          reason: "lora_not_loaded",
+        },
+      };
+    }
   }
 
   return {
@@ -397,7 +507,7 @@ export function applyHNTL(requestBody: any, domain: string): any {
     _hwarang_path: {
       domain: path.domain,
       lora: path.loraName,
-      adapter: path.adapter,
+      modelName: path.modelName,
     },
   };
 }

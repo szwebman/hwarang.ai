@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useEffect } from "react";
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import { useChat } from "@/hooks/use-chat";
@@ -8,20 +9,35 @@ import { useAutoScroll } from "@/hooks/use-scroll";
 import { MessageBubble } from "./message-bubble";
 import { MessageInput } from "./message-input";
 
-export function ChatArea() {
-  const { data: session, status } = useSession();
+interface ChatAreaProps {
+  conversationId?: string | null;
+  onConversationIdChange?: (id: string) => void;
+}
+
+export function ChatArea({ conversationId, onConversationIdChange }: ChatAreaProps = {}) {
+  const { data: session } = useSession();
   const router = useRouter();
-  const { messages, sendMessage, isStreaming, error } = useChat();
+  const { messages, sendMessage, isStreaming, error, clearMessages, loadConversation } = useChat({
+    conversationId,
+    onConversationIdChange,
+  });
   const scrollRef = useAutoScroll(messages);
 
-  // 로그인 안 되었으면 → 로그인 유도
+  // 사이드바에서 다른 대화 클릭 시 메시지 로드, null 이면 빈 상태
+  useEffect(() => {
+    if (conversationId) {
+      loadConversation(conversationId);
+    } else {
+      clearMessages();
+    }
+  }, [conversationId, loadConversation, clearMessages]);
+
   const handleSendWithAuth = async (text: string) => {
     if (!session) {
       router.push("/login");
       return;
     }
     await sendMessage(text);
-    // 좌측 사이드바 대화 리스트 갱신 트리거
     if (typeof window !== "undefined") {
       window.dispatchEvent(new Event("hwarang:conversation-changed"));
     }

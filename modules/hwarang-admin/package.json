@@ -4,8 +4,9 @@
   "private": true,
   "scripts": {
     "dev": "next dev --port 3001",
-    "build": "next build",
+    "build": "prisma generate --generator client --schema=../hwarang-web/prisma/schema.prisma && next build",
     "start": "next start --port 3001",
+    "postinstall": "prisma generate --generator client --schema=../hwarang-web/prisma/schema.prisma || true",
     "seed:admin": "npx tsx scripts/seed-admin.ts",
     "seed:models": "npx tsx scripts/seed-models.ts"
   },

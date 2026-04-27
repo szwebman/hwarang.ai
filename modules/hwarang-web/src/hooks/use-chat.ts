@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { parseSSEStream } from "@/lib/stream-parser";
 import { generateId } from "@/lib/utils";
 import type { Message } from "@/types/chat";
@@ -8,6 +8,8 @@ import type { Message } from "@/types/chat";
 interface UseChatOptions {
   model?: string;
   apiUrl?: string;
+  conversationId?: string | null;
+  onConversationIdChange?: (id: string) => void;
 }
 
 export interface ChatError {
@@ -17,10 +19,40 @@ export interface ChatError {
 }
 
 export function useChat(options: UseChatOptions = {}) {
-  const { model = "", apiUrl = "/api/chat" } = options;
+  const { model = "", apiUrl = "/api/chat", conversationId: externalCid, onConversationIdChange } = options;
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<ChatError | null>(null);
+  const conversationIdRef = useRef<string | null>(externalCid ?? null);
+
+  // 외부 conversationId 가 바뀌면 ref 동기화 (사이드바에서 다른 대화 클릭 등)
+  useEffect(() => {
+    conversationIdRef.current = externalCid ?? null;
+  }, [externalCid]);
+
+  const setConversationId = useCallback((id: string) => {
+    if (conversationIdRef.current === id) return;
+    conversationIdRef.current = id;
+    onConversationIdChange?.(id);
+  }, [onConversationIdChange]);
+
+  const loadConversation = useCallback(async (id: string) => {
+    try {
+      const res = await fetch(`/api/conversations/${id}`);
+      if (!res.ok) return;
+      const { conversation } = await res.json();
+      conversationIdRef.current = id;
+      setMessages(
+        (conversation?.messages || []).map((m: any) => ({
+          id: m.id,
+          role: m.role,
+          content: m.content,
+          createdAt: new Date(m.createdAt),
+        }))
+      );
+      setError(null);
+    } catch {}
+  }, []);
 
   const sendMessage = useCallback(
     async (content: string) => {
@@ -52,6 +84,7 @@ export function useChat(options: UseChatOptions = {}) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             model,
+            conversationId: conversationIdRef.current,
             messages: allMessages.map((m) => ({
               role: m.role,
               content: m.content,
@@ -59,6 +92,10 @@ export function useChat(options: UseChatOptions = {}) {
             stream: true,
           }),
         });
+
+        // 응답 헤더에서 conversationId 회수 (스트리밍 우선)
+        const cidHeader = response.headers.get("X-Conversation-Id");
+        if (cidHeader) setConversationId(cidHeader);
 
         if (!response.ok) {
           // 백엔드 응답 본문에서 사용자용 메시지 추출
@@ -121,13 +158,14 @@ export function useChat(options: UseChatOptions = {}) {
         setIsStreaming(false);
       }
     },
-    [messages, model, apiUrl]
+    [messages, model, apiUrl, setConversationId]
   );
 
   const clearMessages = useCallback(() => {
     setMessages([]);
     setError(null);
+    conversationIdRef.current = null;
   }, []);
 
-  return { messages, sendMessage, isStreaming, error, clearMessages };
+  return { messages, sendMessage, isStreaming, error, clearMessages, loadConversation };
 }

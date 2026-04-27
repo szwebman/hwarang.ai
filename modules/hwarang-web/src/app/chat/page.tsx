@@ -51,7 +51,13 @@ export default function Home() {
           sidebarOpen={sidebarOpen}
           onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
         />
-        <ChatArea />
+        <ChatArea
+          conversationId={activeConversationId}
+          onConversationIdChange={(id) => {
+            setActiveConversationId(id);
+            refresh();
+          }}
+        />
       </div>
     </div>
   );

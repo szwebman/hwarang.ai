@@ -38,14 +38,14 @@ export interface InnovationContext {
 
 export interface InnovationResult {
   systemPrompt: string;
-  requestBodyTransform: (body: any) => any;
+  requestBodyTransform: (body: any) => Promise<any>;
   postProcess: (response: string) => Promise<string>;
   metadata: any;
 }
 
 export async function applyInnovation(ctx: InnovationContext): Promise<InnovationResult> {
   const parts: string[] = [];
-  const transformers: Array<(body: any) => any> = [];
+  const transformers: Array<(body: any) => Promise<any>> = [];
   const postProcessors: Array<(r: string) => Promise<string>> = [];
   const metadata: any = {};
 
@@ -68,9 +68,9 @@ export async function applyInnovation(ctx: InnovationContext): Promise<Innovatio
     } catch {}
   }
 
-  // HNTL: 도메인별 LoRA 라우팅
+  // HNTL: 도메인별 LoRA 라우팅 (LoRA 미로드 시 자동 폴백)
   if (ctx.enableHNTL !== false) {
-    transformers.push((body) => applyHNTL(body, ctx.domain));
+    transformers.push(async (body) => applyHNTL(body, ctx.domain, ctx.vllmEndpoint));
     metadata.hntl = { domain: ctx.domain };
   }
 
@@ -79,7 +79,7 @@ export async function applyInnovation(ctx: InnovationContext): Promise<Innovatio
     const state = determineQuantumState({ domain: ctx.domain });
     // HNTL과 충돌할 수 있으므로 도메인 특화가 없을 때만
     if (ctx.domain === "general") {
-      transformers.push((body) => applyHQL(body, state));
+      transformers.push(async (body) => applyHQL(body, state));
     }
     metadata.hql = { preset: state.preset };
   }
@@ -101,8 +101,13 @@ export async function applyInnovation(ctx: InnovationContext): Promise<Innovatio
     });
   }
 
-  const requestBodyTransform = (body: any) =>
-    transformers.reduce((b, t) => t(b), body);
+  const requestBodyTransform = async (body: any) => {
+    let result = body;
+    for (const t of transformers) {
+      result = await t(result);
+    }
+    return result;
+  };
 
   const postProcess = async (response: string) => {
     let result = response;
