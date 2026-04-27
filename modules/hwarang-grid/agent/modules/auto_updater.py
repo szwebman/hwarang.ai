@@ -20,7 +20,7 @@ class AutoUpdaterModule:
         """마스터에서 최신 버전 확인."""
         import urllib.request
         try:
-            resp = urllib.request.urlopen(f"{master_url}/api/agent/version", timeout=10)
+            resp = urllib.request.urlopen(f"{master_url}/api/grid/agent/version", timeout=10)
             data = json.loads(resp.read())
             latest = data.get("version", CURRENT_VERSION)
             channel = data.get("channel", "stable")

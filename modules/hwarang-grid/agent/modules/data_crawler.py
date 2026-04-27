@@ -453,7 +453,7 @@ class DataCrawlerModule:
                 try:
                     with open(filepath, "rb") as f:
                         response = client.post(
-                            f"{master_url}/grid/data/upload",
+                            f"{master_url}/api/grid/data/upload",
                             data={
                                 "agent_id": agent_id,
                                 "source": filename.split("_")[0],

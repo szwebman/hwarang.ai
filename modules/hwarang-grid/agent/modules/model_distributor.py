@@ -66,7 +66,7 @@ class ModelDistributorModule:
             from urllib.request import urlopen, Request
 
             # 버전 확인
-            version_url = f"{master_url}/grid/hfl/lora/version"
+            version_url = f"{master_url}/api/grid/lora/version"
             with urlopen(Request(version_url), timeout=10) as resp:
                 info = json.loads(resp.read())
                 server_version = info.get("version", 0)
@@ -77,7 +77,7 @@ class ModelDistributorModule:
             logger.info(f"LoRA 다운로드: v{current} → v{server_version}")
 
             # 다운로드
-            download_url = f"{master_url}/grid/hfl/lora/latest"
+            download_url = f"{master_url}/api/grid/lora/latest"
             req = Request(download_url, headers={"Accept-Encoding": "gzip"})
 
             with urlopen(req, timeout=120) as resp:
@@ -147,7 +147,7 @@ class ModelDistributorModule:
             from urllib.request import urlopen, Request
 
             # 모델 파일 목록 가져오기
-            manifest_url = f"{master_url}/grid/models/{model_name}/manifest"
+            manifest_url = f"{master_url}/api/grid/models/{model_name}/manifest"
             with urlopen(Request(manifest_url), timeout=10) as resp:
                 manifest = json.loads(resp.read())
 
@@ -156,7 +156,7 @@ class ModelDistributorModule:
 
             for file_info in manifest.get("files", []):
                 filename = file_info["name"]
-                file_url = f"{master_url}/grid/models/{model_name}/{filename}"
+                file_url = f"{master_url}/api/grid/models/{model_name}/{filename}"
                 file_path = os.path.join(model_path, filename)
 
                 # 이미 다운로드된 파일 스킵 (체크섬 확인)

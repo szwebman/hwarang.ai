@@ -119,8 +119,15 @@ hwarang-agent version
 
 환경변수:
 
-- `HWARANG_MASTER_URL` — 마스터 서버 URL (기본 `http://localhost:8000`)
+- `HWARANG_MASTER_URL` — 마스터 서버 URL (기본 `https://grid.hwarang.ai`,
+  로컬 개발 시 `http://localhost:8000`).
+  **`/api` 또는 `/api/grid` 같은 prefix 는 붙이지 마세요.** 에이전트가
+  자동으로 `/api/grid/*` 경로를 부착합니다.
 - `HWARANG_AGENT_ID`, `HWARANG_AGENT_KEY` — 계정 없이 쓸 때
+- `HWARANG_PREFER_WEBSOCKET` — `true`(기본) / `false`. WS 연결 실패 시
+  자동으로 HTTP 폴링으로 fallback 됩니다.
+- `HWARANG_POLL_INTERVAL` — HTTP 폴링 간격(초, 기본 60). WS 모드에서는
+  사용되지 않습니다.
 
 ---
 

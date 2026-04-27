@@ -432,9 +432,13 @@ async def submit_peer_vote(
     score: float,
     api_key: str,
     rationale: str | None = None,
+    max_retries: int = 3,
 ) -> dict:
     """POST /api/grid/rounds/{round_id}/peer-vote
-    {peer_agent_id, score, rationale}"""
+    {peer_agent_id, score, rationale}
+
+    네트워크 일시 장애 대응: 3회까지 exponential backoff 재시도 (1s, 2s, 4s).
+    """
     if httpx is None:
         return {"ok": False, "error": "httpx_unavailable"}
 
@@ -448,13 +452,27 @@ async def submit_peer_vote(
     }
     headers = {"Authorization": f"Bearer {api_key}"}
 
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(url, json=payload, headers=headers)
-            return {"ok": resp.status_code < 300, "status": resp.status_code,
-                    "body": resp.text[:500]}
-    except Exception as exc:
-        return {"ok": False, "error": str(exc)}
+    last_err: str | None = None
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(url, json=payload, headers=headers)
+                if resp.status_code < 500:
+                    # 4xx 는 재시도해도 무의미 — 즉시 반환
+                    return {
+                        "ok": resp.status_code < 300,
+                        "status": resp.status_code,
+                        "body": resp.text[:500],
+                        "attempts": attempt + 1,
+                    }
+                last_err = f"http_{resp.status_code}"
+        except Exception as exc:
+            last_err = str(exc)
+
+        if attempt < max_retries - 1:
+            await asyncio.sleep(2**attempt)  # 1s, 2s, 4s
+
+    return {"ok": False, "error": last_err, "attempts": max_retries}
 
 
 # -----------------------------------------------------------------------------

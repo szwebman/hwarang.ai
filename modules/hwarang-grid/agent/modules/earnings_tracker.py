@@ -173,8 +173,13 @@ async def fetch_earnings(
     agent_id: str,
     api_key: str,
     since: datetime | None = None,
+    max_retries: int = 3,
 ) -> list[EarningsRecord]:
-    """GET /api/grid/agents/{agent_id}/earnings?since=..."""
+    """GET /api/grid/agents/{agent_id}/earnings?since=...
+
+    네트워크 일시 장애 대응: 5xx/네트워크 오류 시 최대 3회 재시도
+    (1s, 2s, 4s exponential backoff). 4xx 는 즉시 빈 결과.
+    """
     if httpx is None:
         logger.warning("httpx 미설치 — 수익 조회 불가")
         return []
@@ -185,16 +190,25 @@ async def fetch_earnings(
         params["since"] = since.isoformat()
     headers = {"Authorization": f"Bearer {api_key}"}
 
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(url, params=params, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-            items = data if isinstance(data, list) else data.get("records", [])
-            return [_record_from_raw(r) for r in items]
-    except Exception as exc:
-        logger.error("수익 조회 실패: %s", exc)
-        return []
+    last_exc: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(url, params=params, headers=headers)
+                if 400 <= resp.status_code < 500:
+                    logger.error("수익 조회 클라이언트 오류 %d", resp.status_code)
+                    return []
+                resp.raise_for_status()
+                data = resp.json()
+                items = data if isinstance(data, list) else data.get("records", [])
+                return [_record_from_raw(r) for r in items]
+        except Exception as exc:
+            last_exc = exc
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2**attempt)
+
+    logger.error("수익 조회 실패 (재시도 %d회): %s", max_retries, last_exc)
+    return []
 
 
 async def earnings_summary(

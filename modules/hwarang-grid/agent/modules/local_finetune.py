@@ -323,7 +323,11 @@ class LocalFinetuneModule:
             }
 
             # 마스터에 LoRA 파일 업로드
-            submit_url = f"{master_url}/hfl/submit/{round_id}" if round_id else f"{master_url}/hfl/submit/manual"
+            submit_url = (
+                f"{master_url}/api/grid/rounds/{round_id}/submit"
+                if round_id
+                else f"{master_url}/api/grid/submit/manual"
+            )
 
             with open(adapter_file, "rb") as f:
                 response = httpx.post(
@@ -368,7 +372,7 @@ class LocalFinetuneModule:
             import httpx
 
             # 버전 확인
-            version_resp = httpx.get(f"{master_url}/hfl/lora/version", timeout=10)
+            version_resp = httpx.get(f"{master_url}/api/grid/lora/version", timeout=10)
             version_info = version_resp.json()
             server_version = version_info.get("version", 0)
 
@@ -382,7 +386,7 @@ class LocalFinetuneModule:
 
             # 새 LoRA 다운로드
             logger.info(f"새 LoRA 다운로드: v{local_version} → v{server_version}")
-            lora_resp = httpx.get(f"{master_url}/hfl/lora/latest", timeout=120)
+            lora_resp = httpx.get(f"{master_url}/api/grid/lora/latest", timeout=120)
 
             if lora_resp.status_code != 200:
                 return {"error": f"다운로드 실패: HTTP {lora_resp.status_code}"}

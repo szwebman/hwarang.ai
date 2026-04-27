@@ -18,32 +18,32 @@ datasource db {
 // ============================================================
 
 model User {
-  id             String         @id @default(cuid())
-  email          String         @unique
+  id             String   @id @default(cuid())
+  email          String   @unique
   name           String?
   hashedPassword String?
   image          String?
-  role           UserRole       @default(USER)
+  role           UserRole @default(USER)
 
   // 소셜 로그인 (NextAuth)
-  accounts       Account[]
-  sessions       Session[]
+  accounts Account[]
+  sessions Session[]
 
   // 관계
-  plan           Plan?          @relation(fields: [planId], references: [id])
-  planId         String?
-  tokenBalance   TokenBalance?
-  apiKeys        ApiKey[]
-  conversations  Conversation[]
-  usageRecords   UsageRecord[]
-  payments       Payment[]
+  plan          Plan?          @relation(fields: [planId], references: [id])
+  planId        String?
+  tokenBalance  TokenBalance?
+  apiKeys       ApiKey[]
+  conversations Conversation[]
+  usageRecords  UsageRecord[]
+  payments      Payment[]
 
   // 상태
-  isActive       Boolean        @default(true)
-  emailVerified  DateTime?
+  isActive      Boolean   @default(true)
+  emailVerified DateTime?
 
-  createdAt      DateTime       @default(now())
-  updatedAt      DateTime       @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([email])
   @@index([planId])
@@ -98,41 +98,41 @@ enum UserRole {
 // ============================================================
 
 model Plan {
-  id          String     @id @default(cuid())
-  name        String     @unique            // "free", "starter", "pro", "business", "enterprise"
-  displayName String                        // "Free", "Starter", "Pro", "Business", "Enterprise"
+  id          String  @id @default(cuid())
+  name        String  @unique // "free", "starter", "pro", "business", "enterprise"
+  displayName String // "Free", "Starter", "Pro", "Business", "Enterprise"
   description String?
 
   // 가격
-  priceMonthly  Int      @default(0)        // 월 가격 (원)
-  priceYearly   Int      @default(0)        // 연 가격 (원)
+  priceMonthly Int @default(0) // 월 가격 (원)
+  priceYearly  Int @default(0) // 연 가격 (원)
 
   // ⭐ 토큰 기반 제한 (모든 모델 공통 토큰 풀)
-  tokensIncluded    Int  @default(10000000) // 플랜에 포함된 월 토큰 수
-  dailyTokenLimit   Int  @default(1000000)  // 하루 최대 소진 토큰 (폭주 방지)
-  maxTokensPerReq   Int  @default(16384)    // 요청 1회당 최대 토큰
-  concurrentReqs    Int  @default(1)        // 동시 요청 수
-  apiKeysAllowed    Int  @default(1)        // API 키 개수
+  tokensIncluded  Int @default(10000000) // 플랜에 포함된 월 토큰 수
+  dailyTokenLimit Int @default(1000000) // 하루 최대 소진 토큰 (폭주 방지)
+  maxTokensPerReq Int @default(16384) // 요청 1회당 최대 토큰
+  concurrentReqs  Int @default(1) // 동시 요청 수
+  apiKeysAllowed  Int @default(1) // API 키 개수
 
   // 초과 토큰 구매 가능 여부
-  allowOverage      Boolean @default(false) // 토큰 소진 후 추가 구매 가능?
-  overagePrice7b    Int     @default(0)    // 초과 토큰 가격 (7B 모델, 원/1K토큰)
-  overagePrice30b   Int     @default(0)    // 초과 토큰 가격 (30B 모델, 원/1K토큰)
+  allowOverage    Boolean @default(false) // 토큰 소진 후 추가 구매 가능?
+  overagePrice7b  Int     @default(0) // 초과 토큰 가격 (7B 모델, 원/1K토큰)
+  overagePrice30b Int     @default(0) // 초과 토큰 가격 (30B 모델, 원/1K토큰)
 
   // 사용 가능 모델
-  models            String[]               // ["hwarang-7b", "hwarang-30b"]
+  models String[] // ["hwarang-7b", "hwarang-30b"]
 
   // 기능 접근 (플랜으로 제한)
-  features          String[]               // ["chat", "api", "code", "legal", "tax", "priority_queue"]
-  supportLevel      String @default("community") // "community", "email", "priority", "dedicated"
+  features     String[] // ["chat", "api", "code", "legal", "tax", "priority_queue"]
+  supportLevel String   @default("community") // "community", "email", "priority", "dedicated"
 
   // 상태
-  isActive          Boolean @default(true)
-  isPublic          Boolean @default(true)
+  isActive Boolean @default(true)
+  isPublic Boolean @default(true)
 
-  users             User[]
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  users     User[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 // ============================================================
@@ -140,42 +140,42 @@ model Plan {
 // ============================================================
 
 model AIModel {
-  id          String   @id @default(cuid())
-  name        String   @unique            // "hwarang-v3", "hwarang-coder", "hwarang-general"
-  displayName String                       // "Hwarang V3 (최강)", "Hwarang Coder", "Hwarang General"
+  id          String  @id @default(cuid())
+  name        String  @unique // "hwarang-v3", "hwarang-coder", "hwarang-general"
+  displayName String // "Hwarang V3 (최강)", "Hwarang Coder", "Hwarang General"
   description String?
 
   // 실제 모델 연결
-  backendId   String                       // vLLM 모델 ID
-  endpoint    String   @default("http://localhost:8000")
+  backendId String // vLLM 모델 ID
+  endpoint  String @default("http://localhost:8000")
 
   // ⭐ 토큰 단가 (화랑 토큰 소비 배수)
-  inputMultiplier   Float @default(0.1)    // 입력 토큰 배수
-  outputMultiplier  Float @default(0.3)    // 출력 토큰 배수 (보통 입력보다 비쌈)
+  inputMultiplier  Float @default(0.1) // 입력 토큰 배수
+  outputMultiplier Float @default(0.3) // 출력 토큰 배수 (보통 입력보다 비쌈)
 
   // 컨텍스트 & 제약
-  maxContextLength  Int   @default(32768)
-  maxOutputTokens   Int   @default(4096)
+  maxContextLength Int @default(32768)
+  maxOutputTokens  Int @default(4096)
 
   // 카테고리 & 태그
-  category    String    @default("general") // "general", "coding", "legal", "tax", "reasoning"
-  tier        String    @default("standard") // "basic", "standard", "premium", "flagship"
-  tags        String[]
+  category String   @default("general") // "general", "coding", "legal", "tax", "reasoning"
+  tier     String   @default("standard") // "basic", "standard", "premium", "flagship"
+  tags     String[]
 
   // 접근 제어
-  minPlan     String?                        // 최소 플랜 이름 (null이면 전체)
-  isPublic    Boolean   @default(true)
-  isDefault   Boolean   @default(false)
-  isActive    Boolean   @default(true)
+  minPlan   String? // 최소 플랜 이름 (null이면 전체)
+  isPublic  Boolean @default(true)
+  isDefault Boolean @default(false)
+  isActive  Boolean @default(true)
 
   // 서빙 상태
   status      String    @default("ready")
   lastCheckAt DateTime?
 
-  sortOrder   Int       @default(0)
+  sortOrder Int @default(0)
 
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([category, tier])
   @@index([isActive, isPublic])
@@ -186,26 +186,26 @@ model AIModel {
 // ============================================================
 
 model TokenBalance {
-  id          String   @id @default(cuid())
-  userId      String   @unique
-  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   // 잔액
-  balance     Int      @default(0)           // 현재 남은 토큰 수
-  totalUsed   Int      @default(0)           // 누적 사용 토큰
-  totalCharged Int     @default(0)           // 누적 충전 토큰
+  balance      Int @default(0) // 현재 남은 토큰 수
+  totalUsed    Int @default(0) // 누적 사용 토큰
+  totalCharged Int @default(0) // 누적 충전 토큰
 
   // ⭐ 하루 소진 관리
-  dailyUsed       Int  @default(0)           // 오늘 사용한 토큰
-  dailyLimit      Int  @default(1000000)     // 오늘 최대 소진 가능 (플랜에서 가져옴)
-  dailyResetAt    DateTime?                  // 오늘 리셋 시간 (자정)
+  dailyUsed    Int       @default(0) // 오늘 사용한 토큰
+  dailyLimit   Int       @default(1000000) // 오늘 최대 소진 가능 (플랜에서 가져옴)
+  dailyResetAt DateTime? // 오늘 리셋 시간 (자정)
 
   // 월간 리셋 (구독 플랜용)
-  monthlyReset    Boolean @default(true)     // 매월 토큰 리셋 여부
-  lastResetAt     DateTime?                  // 마지막 리셋 시간
-  nextResetAt     DateTime?                  // 다음 리셋 시간
+  monthlyReset Boolean   @default(true) // 매월 토큰 리셋 여부
+  lastResetAt  DateTime? // 마지막 리셋 시간
+  nextResetAt  DateTime? // 다음 리셋 시간
 
-  updatedAt   DateTime @updatedAt
+  updatedAt DateTime @updatedAt
 }
 
 // ============================================================
@@ -213,28 +213,28 @@ model TokenBalance {
 // ============================================================
 
 model TokenTransaction {
-  id          String           @id @default(cuid())
+  id          String               @id @default(cuid())
   userId      String
   type        TokenTransactionType
-  amount      Int                           // 토큰 수 (양수: 충전, 음수: 사용)
-  balance     Int                           // 거래 후 잔액
-  description String                        // "월간 플랜 충전", "API 호출 (30B)", "토큰 구매"
-  metadata    Json?                         // 추가 정보 (모델명, 요청ID 등)
-  createdAt   DateTime         @default(now())
+  amount      Int // 토큰 수 (양수: 충전, 음수: 사용)
+  balance     Int // 거래 후 잔액
+  description String // "월간 플랜 충전", "API 호출 (30B)", "토큰 구매"
+  metadata    Json? // 추가 정보 (모델명, 요청ID 등)
+  createdAt   DateTime             @default(now())
 
   @@index([userId, createdAt(sort: Desc)])
 }
 
 enum TokenTransactionType {
-  PLAN_CREDIT      // 플랜 구독으로 토큰 충전 (매월)
-  PURCHASE         // 토큰 직접 구매
-  USAGE            // API 호출로 토큰 사용
-  REFUND           // 환불
-  BONUS            // 프로모션/이벤트 보너스
-  ADMIN_ADJUST     // 관리자 수동 조정
-  GRID_REWARD      // ⭐ GPU 기여 보상 (Hwarang Grid)
-  GRID_STREAK      // Grid 연속 참여 보너스
-  REFERRAL         // 친구 초대 보상
+  PLAN_CREDIT // 플랜 구독으로 토큰 충전 (매월)
+  PURCHASE // 토큰 직접 구매
+  USAGE // API 호출로 토큰 사용
+  REFUND // 환불
+  BONUS // 프로모션/이벤트 보너스
+  ADMIN_ADJUST // 관리자 수동 조정
+  GRID_REWARD // ⭐ GPU 기여 보상 (Hwarang Grid)
+  GRID_STREAK // Grid 연속 참여 보너스
+  REFERRAL // 친구 초대 보상
 }
 
 // ============================================================
@@ -242,27 +242,27 @@ enum TokenTransactionType {
 // ============================================================
 
 model ApiKey {
-  id          String     @id @default(cuid())
-  userId      String
-  user        User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  name        String                        // "Production", "Development" 등
-  keyHash     String     @unique            // SHA-256 해시 (실제 키는 저장 안 함)
-  keyPrefix   String                        // "hk-a1b2c3..." (앞 8자, 식별용)
+  name      String // "Production", "Development" 등
+  keyHash   String @unique // SHA-256 해시 (실제 키는 저장 안 함)
+  keyPrefix String // "hk-a1b2c3..." (앞 8자, 식별용)
 
   // 권한
-  permissions String[]   @default(["chat"]) // ["chat", "api", "code", "legal", "tax"]
-  rateLimit   Int        @default(60)       // 분당 요청 수
+  permissions String[] @default(["chat"]) // ["chat", "api", "code", "legal", "tax"]
+  rateLimit   Int      @default(60) // 분당 요청 수
 
   // 상태
-  isActive    Boolean    @default(true)
-  lastUsedAt  DateTime?
-  expiresAt   DateTime?
+  isActive   Boolean   @default(true)
+  lastUsedAt DateTime?
+  expiresAt  DateTime?
 
   // 사용 기록
   usageRecords UsageRecord[]
 
-  createdAt   DateTime   @default(now())
+  createdAt DateTime @default(now())
 
   @@index([userId])
   @@index([keyHash])
@@ -273,28 +273,28 @@ model ApiKey {
 // ============================================================
 
 model UsageRecord {
-  id              String   @id @default(cuid())
-  userId          String
-  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  apiKeyId        String?
-  apiKey          ApiKey?  @relation(fields: [apiKeyId], references: [id])
+  id       String  @id @default(cuid())
+  userId   String
+  user     User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  apiKeyId String?
+  apiKey   ApiKey? @relation(fields: [apiKeyId], references: [id])
 
   // 요청 정보
-  model           String                   // "hwarang-code-7b", "hwarang-code-30b"
-  endpoint        String                   // "/v1/chat/completions"
-  promptTokens    Int
+  model            String // "hwarang-code-7b", "hwarang-code-30b"
+  endpoint         String // "/v1/chat/completions"
+  promptTokens     Int
   completionTokens Int
-  totalTokens     Int
-  chargedTokens   Int        @default(0)   // 과금 토큰 (모델별 배수 적용)
-  inputMultiplier Float      @default(1.0) // 입력 토큰 배수
-  outputMultiplier Float     @default(1.0) // 출력 토큰 배수
-  latencyMs       Int
-  statusCode      Int        @default(200)
+  totalTokens      Int
+  chargedTokens    Int    @default(0) // 과금 토큰 (모델별 배수 적용)
+  inputMultiplier  Float  @default(1.0) // 입력 토큰 배수
+  outputMultiplier Float  @default(1.0) // 출력 토큰 배수
+  latencyMs        Int
+  statusCode       Int    @default(200)
 
   // 도메인
-  domain          String?                  // "code", "legal", "tax"
+  domain String? // "code", "legal", "tax"
 
-  createdAt       DateTime @default(now())
+  createdAt DateTime @default(now())
 
   @@index([userId, createdAt(sort: Desc)])
   @@index([apiKeyId, createdAt(sort: Desc)])
@@ -306,36 +306,36 @@ model UsageRecord {
 // ============================================================
 
 model Payment {
-  id          String        @id @default(cuid())
-  userId      String
-  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   // 결제 정보
-  amount      Int                           // 결제 금액 (원)
-  currency    String        @default("KRW")
-  status      PaymentStatus @default(PENDING)
-  method      String?                       // "card", "transfer", "kakao"
+  amount   Int // 결제 금액 (원)
+  currency String        @default("KRW")
+  status   PaymentStatus @default(PENDING)
+  method   String? // "card", "transfer", "kakao"
 
   // PG사 연동
-  pgProvider  String?                       // "tosspayments", "kakaopay"
-  pgOrderId   String?       @unique         // PG사 주문번호
-  pgPaymentId String?                       // PG사 결제번호
+  pgProvider  String? // "tosspayments", "kakaopay"
+  pgOrderId   String? @unique // PG사 주문번호
+  pgPaymentId String? // PG사 결제번호
 
   // 상품 정보
-  planId      String?                       // 어떤 플랜 결제인지
+  planId      String? // 어떤 플랜 결제인지
   planName    String?
-  billingType String        @default("monthly") // "monthly", "yearly", "one-time"
+  billingType String  @default("monthly") // "monthly", "yearly", "one-time"
 
   // 기간
-  periodStart DateTime?                     // 구독 시작일
-  periodEnd   DateTime?                     // 구독 종료일
+  periodStart DateTime? // 구독 시작일
+  periodEnd   DateTime? // 구독 종료일
 
   description String?
 
-  paidAt      DateTime?
-  canceledAt  DateTime?
-  createdAt   DateTime      @default(now())
-  updatedAt   DateTime      @updatedAt
+  paidAt     DateTime?
+  canceledAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
 
   @@index([userId, createdAt(sort: Desc)])
   @@index([pgOrderId])
@@ -360,7 +360,7 @@ model Conversation {
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   messages  Message[]
   model     String    @default("hwarang-code-7b")
-  domain    String?                        // "code", "legal", "tax"
+  domain    String? // "code", "legal", "tax"
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
 
@@ -369,7 +369,7 @@ model Conversation {
 
 model Message {
   id             String       @id @default(cuid())
-  role           String       // "user" | "assistant" | "system" | "tool"
+  role           String // "user" | "assistant" | "system" | "tool"
   content        String       @db.Text
   conversationId String
   conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
@@ -385,7 +385,7 @@ model Message {
 
 model SystemSetting {
   id        String   @id @default(cuid())
-  key       String   @unique              // "maintenance_mode", "max_concurrent_users" 등
+  key       String   @unique // "maintenance_mode", "max_concurrent_users" 등
   value     String   @db.Text
   updatedAt DateTime @updatedAt
 }
@@ -396,97 +396,103 @@ model SystemSetting {
 // ============================================================
 
 model KnowledgeFact {
-  id               String    @id @default(cuid())
-  content          String    @db.Text
-  contentHash      String                            // 중복 감지용 sha256
-  embeddingHex     String?   @db.Text                // pgvector 확장 연결 전 임시 (hex encoded float32[])
+  id           String  @id @default(cuid())
+  content      String  @db.Text
+  contentHash  String // 중복 감지용 sha256
+  embeddingHex String? @db.Text // pgvector 확장 연결 전 임시 (hex encoded float32[])
 
   // 분류
-  domain           String                            // "law", "tech", "medical", "finance", "general"
-  entity           String?                           // 같은 주제(최저시급, 근로기준법) 묶는 키
-  tags             String[]  @default([])
-  language         String    @default("ko")
+  domain   String // "law", "tech", "medical", "finance", "general"
+  entity   String? // 같은 주제(최저시급, 근로기준법) 묶는 키
+  tags     String[] @default([])
+  language String   @default("ko")
 
   // 시간 축 (Temporal)
-  validFrom        DateTime
-  validTo          DateTime?                         // NULL = 현재 유효
-  createdAt        DateTime  @default(now())
-  lastVerifiedAt   DateTime  @default(now())
-  nextCheckAt      DateTime?                         // 반감기 기반 자동 재검증 시점
+  validFrom      DateTime
+  validTo        DateTime? // NULL = 현재 유효
+  createdAt      DateTime  @default(now())
+  lastVerifiedAt DateTime  @default(now())
+  nextCheckAt    DateTime? // 반감기 기반 자동 재검증 시점
 
   // 신뢰도 (Dynamic Confidence)
-  confidenceT0     Float     @default(1.0)           // 초기 신뢰도
-  halfLifeDays     Int?                              // 카테고리별 반감기 (NULL = 영속)
+  confidenceT0 Float @default(1.0) // 초기 신뢰도
+  halfLifeDays Int? // 카테고리별 반감기 (NULL = 영속)
 
   // 상태 (Predictive)
-  status           KnowledgeStatus @default(CONFIRMED)
-  predictedValidFrom     DateTime?                   // pending일 때 예상 발효일
-  predictionConfidence   Float?                      // 예측 확률 (0~1)
-  expiredReason    String?
+  status               KnowledgeStatus @default(CONFIRMED)
+  predictedValidFrom   DateTime? // pending일 때 예상 발효일
+  predictionConfidence Float? // 예측 확률 (0~1)
+  expiredReason        String?
 
   // 출처
-  source           String                            // 출처 이름
-  sourceUrl        String?
-  sourceType       String    @default("user")        // user, crawl, official, agent, community
+  source     String // 출처 이름
+  sourceUrl  String?
+  sourceType String  @default("user") // user, crawl, official, agent, community
 
   // 계층 (Multi-tier privacy)
-  visibility       KnowledgeVisibility @default(PUBLIC)
-  ownerUserId      String?                           // private일 때만
+  visibility  KnowledgeVisibility @default(PUBLIC)
+  ownerUserId String? // private일 때만
 
   // 버전/승계 관계
-  supersedesId     String?
-  supersedes       KnowledgeFact?  @relation("FactVersionChain", fields: [supersedesId], references: [id])
-  supersededBy     KnowledgeFact[] @relation("FactVersionChain")
+  supersedesId String?
+  supersedes   KnowledgeFact?  @relation("FactVersionChain", fields: [supersedesId], references: [id])
+  supersededBy KnowledgeFact[] @relation("FactVersionChain")
 
   // 관계 (그래프 엣지)
-  outgoingEdges    KnowledgeEdge[] @relation("FromFact")
-  incomingEdges    KnowledgeEdge[] @relation("ToFact")
+  outgoingEdges KnowledgeEdge[] @relation("FromFact")
+  incomingEdges KnowledgeEdge[] @relation("ToFact")
 
   // 기여 / 보상
-  contributedBy    String?                           // userId
-  rewardPaid       Int       @default(0)             // 지급된 토큰 (HWARANG 코인)
+  contributedBy String? // userId
+  rewardPaid    Int     @default(0) // 지급된 토큰 (HWARANG 코인)
 
   // ═══ TAL (Truth Arbitration Layer) v3 ═══
-  sourceTier       SourceTier?                       // primary_official/peer_reviewed/general/user_generated
-  sourceAuthority  Float     @default(0.5)           // 도메인별 출처 위계 권위 (0~1)
-  originalFactId   String?                           // 복사본이면 원본 id
-  originalFact     KnowledgeFact?  @relation("FactProvenance", fields: [originalFactId], references: [id])
-  copies           KnowledgeFact[] @relation("FactProvenance")
-  provenanceType   ProvenanceType @default(INDEPENDENT)
-  copySimilarity   Float?                            // 복사본일 때 원본과의 유사도
+  sourceTier      SourceTier? // primary_official/peer_reviewed/general/user_generated
+  sourceAuthority Float           @default(0.5) // 도메인별 출처 위계 권위 (0~1)
+  originalFactId  String? // 복사본이면 원본 id
+  originalFact    KnowledgeFact?  @relation("FactProvenance", fields: [originalFactId], references: [id])
+  copies          KnowledgeFact[] @relation("FactProvenance")
+  provenanceType  ProvenanceType  @default(INDEPENDENT)
+  copySimilarity  Float? // 복사본일 때 원본과의 유사도
 
   stance           FactStance @default(FACTUAL)
-  stanceConfidence Float     @default(1.0)
+  stanceConfidence Float      @default(1.0)
 
-  falsifiability   Falsifiability @default(FALSIFIABLE)
+  falsifiability Falsifiability @default(FALSIFIABLE)
 
   retracted        Boolean   @default(false)
   retractedAt      DateTime?
   retractionReason String?   @db.Text
-  retractionSource String?                           // 정정 출처
+  retractionSource String? // 정정 출처
 
-  parentClaimId    String?                           // claim decomposition 부모
-  parentClaim      KnowledgeFact?  @relation("ClaimDecomp", fields: [parentClaimId], references: [id])
-  subClaims        KnowledgeFact[] @relation("ClaimDecomp")
-  isAtomic         Boolean   @default(true)          // 원자적 주장인지
+  parentClaimId String? // claim decomposition 부모
+  parentClaim   KnowledgeFact?  @relation("ClaimDecomp", fields: [parentClaimId], references: [id])
+  subClaims     KnowledgeFact[] @relation("ClaimDecomp")
+  isAtomic      Boolean         @default(true) // 원자적 주장인지
 
-  arbitratedScore  Float?                            // 최종 arbitrated_confidence 캐시
+  arbitratedScore Float? // 최종 arbitrated_confidence 캐시
 
   // ═══ v3.1: Multi-modal, Bias, Cross-lingual ═══
-  mediaType        MediaType @default(TEXT)
-  mediaUrl         String?                            // 이미지/영상 URL
-  mediaHash        String?                            // perceptual hash (pHash/dHash)
-  mediaMetadata    Json?                              // duration, resolution, size, exif 등
+  mediaType     MediaType @default(TEXT)
+  mediaUrl      String? // 이미지/영상 URL
+  mediaHash     String? // perceptual hash (pHash/dHash)
+  mediaMetadata Json? // duration, resolution, size, exif 등
 
-  languageOriginal String?                            // "ko", "en", "ja" 원본 언어
-  translatedFromFactId String?                        // 번역 원본 fact id
-  translatedFrom   KnowledgeFact?  @relation("Translation", fields: [translatedFromFactId], references: [id])
-  translations     KnowledgeFact[] @relation("Translation")
-  translationQuality Float?                           // 번역 품질 추정 0~1
+  languageOriginal     String? // "ko", "en", "ja" 원본 언어
+  translatedFromFactId String? // 번역 원본 fact id
+  translatedFrom       KnowledgeFact?  @relation("Translation", fields: [translatedFromFactId], references: [id])
+  translations         KnowledgeFact[] @relation("Translation")
+  translationQuality   Float? // 번역 품질 추정 0~1
 
-  biasScore        Float?                             // 정치 편향 -1 (진보) ~ 0 (중립) ~ +1 (보수)
-  biasLabel        BiasLabel?
-  biasDetections   BiasDetection[]
+  biasScore      Float? // 정치 편향 -1 (진보) ~ 0 (중립) ~ +1 (보수)
+  biasLabel      BiasLabel?
+  biasDetections BiasDetection[]
+
+  // v3.2: Uncertainty quantification
+  confidenceInterval    Json? // {"lower": 0.78, "upper": 0.92, "method": "bootstrap"}
+  uncertaintyMethod     String? // 'bayesian', 'bootstrap', 'monte_carlo', 'ensemble'
+  credibleIntervalWidth Float? // upper - lower, 작을수록 확실
+  mediaFact             MediaFact?
 
   @@index([domain, validTo])
   @@index([entity, validFrom])
@@ -504,37 +510,37 @@ model KnowledgeFact {
 }
 
 enum SourceTier {
-  PRIMARY_OFFICIAL     // 법령 원문, 정부 공식 고시
-  PEER_REVIEWED        // 논문, 학술지
-  SPECIALIZED_MEDIA    // 법률신문, 의학신문 같은 전문 매체
-  GENERAL_MEDIA        // 종합 신문/방송
-  USER_GENERATED       // 블로그, 커뮤니티, SNS
+  PRIMARY_OFFICIAL // 법령 원문, 정부 공식 고시
+  PEER_REVIEWED // 논문, 학술지
+  SPECIALIZED_MEDIA // 법률신문, 의학신문 같은 전문 매체
+  GENERAL_MEDIA // 종합 신문/방송
+  USER_GENERATED // 블로그, 커뮤니티, SNS
   UNKNOWN
 }
 
 enum ProvenanceType {
-  INDEPENDENT          // 독립 보도
-  COPY_OF              // 같은 내용 복사/전재
-  TRANSLATION          // 번역본
-  QUOTATION            // 인용 (일부 발췌)
-  SUMMARY              // 요약본
-  DERIVED              // 파생 (해석/분석)
+  INDEPENDENT // 독립 보도
+  COPY_OF // 같은 내용 복사/전재
+  TRANSLATION // 번역본
+  QUOTATION // 인용 (일부 발췌)
+  SUMMARY // 요약본
+  DERIVED // 파생 (해석/분석)
 }
 
 enum FactStance {
-  FACTUAL              // 검증 가능한 사실 (수치, 날짜, 법령)
-  INTERPRETATION       // 해석 (전문가의 법률 해석)
-  OPINION              // 의견 (좋다/나쁘다)
-  CONTESTED            // 논쟁 중 (양측 입장 존재)
-  PROPAGANDA           // 선전/홍보성
+  FACTUAL // 검증 가능한 사실 (수치, 날짜, 법령)
+  INTERPRETATION // 해석 (전문가의 법률 해석)
+  OPINION // 의견 (좋다/나쁘다)
+  CONTESTED // 논쟁 중 (양측 입장 존재)
+  PROPAGANDA // 선전/홍보성
 }
 
 enum Falsifiability {
-  UNFALSIFIABLE        // 수학 정리, 논리적 진리 (반증 불가)
-  FALSIFIABLE          // 관측 가능한 사실 (반증 가능)
-  TIME_DEPENDENT       // 미래 예측 (시간이 지나면 확인됨)
-  VALUE_JUDGMENT       // 가치 판단 (반증 개념이 안 맞음)
-  UNCLEAR              // 분류 불명확
+  UNFALSIFIABLE // 수학 정리, 논리적 진리 (반증 불가)
+  FALSIFIABLE // 관측 가능한 사실 (반증 가능)
+  TIME_DEPENDENT // 미래 예측 (시간이 지나면 확인됨)
+  VALUE_JUDGMENT // 가치 판단 (반증 개념이 안 맞음)
+  UNCLEAR // 분류 불명확
 }
 
 enum MediaType {
@@ -542,107 +548,107 @@ enum MediaType {
   IMAGE
   VIDEO
   AUDIO
-  DOCUMENT            // PDF, DOCX 등
-  MIXED               // 텍스트 + 이미지 혼합
+  DOCUMENT // PDF, DOCX 등
+  MIXED // 텍스트 + 이미지 혼합
 }
 
 enum BiasLabel {
-  FAR_LEFT            // -1.0 ~ -0.66
-  PROGRESSIVE         // -0.66 ~ -0.2
-  CENTRIST            // -0.2 ~ +0.2
-  CONSERVATIVE        // +0.2 ~ +0.66
-  FAR_RIGHT           // +0.66 ~ +1.0
-  MIXED               // 양측 요소 섞임 (인용 위주)
-  NON_POLITICAL       // 정치 도메인 아님
+  FAR_LEFT // -1.0 ~ -0.66
+  PROGRESSIVE // -0.66 ~ -0.2
+  CENTRIST // -0.2 ~ +0.2
+  CONSERVATIVE // +0.2 ~ +0.66
+  FAR_RIGHT // +0.66 ~ +1.0
+  MIXED // 양측 요소 섞임 (인용 위주)
+  NON_POLITICAL // 정치 도메인 아님
   UNKNOWN
 }
 
 enum KnowledgeStatus {
-  CONFIRMED   // 확정된 사실
-  PENDING     // 미확정 (예: 법안 발의만 된 상태)
-  PREDICTED   // AI가 예측한 미래 상태
-  EXPIRED     // 만료됨 (과거)
-  RETRACTED   // 철회/무효 (출처 자체 취소)
-  DISPUTED    // 모순 발생 중 (관리자 검토 대기)
+  CONFIRMED // 확정된 사실
+  PENDING // 미확정 (예: 법안 발의만 된 상태)
+  PREDICTED // AI가 예측한 미래 상태
+  EXPIRED // 만료됨 (과거)
+  RETRACTED // 철회/무효 (출처 자체 취소)
+  DISPUTED // 모순 발생 중 (관리자 검토 대기)
 }
 
 enum KnowledgeVisibility {
-  PUBLIC      // 모든 사용자 공유
-  PRIVATE     // 개인 전용 (암호화)
-  TEAM        // 팀/워크스페이스 공유
-  RESTRICTED  // 특정 권한 있어야 접근
+  PUBLIC // 모든 사용자 공유
+  PRIVATE // 개인 전용 (암호화)
+  TEAM // 팀/워크스페이스 공유
+  RESTRICTED // 특정 권한 있어야 접근
 }
 
 model KnowledgeEdge {
-  id             String    @id @default(cuid())
-  fromFactId     String
-  fromFact       KnowledgeFact @relation("FromFact", fields: [fromFactId], references: [id], onDelete: Cascade)
-  toFactId       String
-  toFact         KnowledgeFact @relation("ToFact", fields: [toFactId], references: [id], onDelete: Cascade)
+  id         String        @id @default(cuid())
+  fromFactId String
+  fromFact   KnowledgeFact @relation("FromFact", fields: [fromFactId], references: [id], onDelete: Cascade)
+  toFactId   String
+  toFact     KnowledgeFact @relation("ToFact", fields: [toFactId], references: [id], onDelete: Cascade)
 
-  relationType   KnowledgeRelation
-  strength       Float     @default(1.0)   // 0.0~1.0
-  evidence       String?   @db.Text        // 판단 근거 텍스트
-  verifiedBy     String    @default("ai")  // ai, human, consensus
+  relationType KnowledgeRelation
+  strength     Float             @default(1.0) // 0.0~1.0
+  evidence     String?           @db.Text // 판단 근거 텍스트
+  verifiedBy   String            @default("ai") // ai, human, consensus
 
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([fromFactId, toFactId, relationType])
   @@index([relationType, strength])
 }
 
 enum KnowledgeRelation {
-  CAUSES           // A → B 야기
-  ENABLES          // A → B 가능케 함
-  CONTRADICTS      // A ⚡ B 모순
-  SUPPORTS         // A → B 보강/증거
-  DERIVED_FROM     // A ← B 파생
-  RELATED_TO       // A ~ B 관련
-  SPECIALIZES      // A ⊂ B 특수화
-  GENERALIZES      // A ⊃ B 일반화
-  TEMPORAL_AFTER   // A > B 시간 후속
-  ALTERNATIVE_TO   // A ≈ B 대안
+  CAUSES // A → B 야기
+  ENABLES // A → B 가능케 함
+  CONTRADICTS // A ⚡ B 모순
+  SUPPORTS // A → B 보강/증거
+  DERIVED_FROM // A ← B 파생
+  RELATED_TO // A ~ B 관련
+  SPECIALIZES // A ⊂ B 특수화
+  GENERALIZES // A ⊃ B 일반화
+  TEMPORAL_AFTER // A > B 시간 후속
+  ALTERNATIVE_TO // A ≈ B 대안
 }
 
 // 자가 검증 / 재확인 로그
 model KnowledgeVerification {
-  id             String    @id @default(cuid())
-  factId         String
-  verifiedAt     DateTime  @default(now())
-  method         String                    // 'source_refetch', 'llm_check', 'cross_source', 'community'
-  result         String                    // 'unchanged', 'updated', 'invalidated', 'source_gone'
+  id              String   @id @default(cuid())
+  factId          String
+  verifiedAt      DateTime @default(now())
+  method          String // 'source_refetch', 'llm_check', 'cross_source', 'community'
+  result          String // 'unchanged', 'updated', 'invalidated', 'source_gone'
   confidenceDelta Float    @default(0.0)
-  notes          String?   @db.Text
+  notes           String?  @db.Text
 
   @@index([factId, verifiedAt])
 }
 
 // 모순 사건 기록
 model KnowledgeConflict {
-  id             String    @id @default(cuid())
-  factAId        String
-  factBId        String
-  detectedAt     DateTime  @default(now())
-  resolutionState String   @default("open")   // open, resolved_A, resolved_B, coexist, escalated
-  resolutionNote String?   @db.Text
-  resolvedBy     String?                      // userId of admin
-  resolvedAt     DateTime?
+  id              String    @id @default(cuid())
+  factAId         String
+  factBId         String
+  detectedAt      DateTime  @default(now())
+  resolutionState String    @default("open") // open, resolved_A, resolved_B, coexist, escalated
+  resolutionNote  String?   @db.Text
+  resolvedBy      String? // userId of admin
+  resolvedAt      DateTime?
 
   @@index([resolutionState, detectedAt])
 }
 
 // 지식 기여 이력 (코인 지급 근거)
 model KnowledgeContribution {
-  id             String    @id @default(cuid())
-  factId         String
-  contributorId  String
-  acceptedAt     DateTime  @default(now())
-  qualityScore   Float                        // 0~1
+  id              String   @id @default(cuid())
+  factId          String
+  contributorId   String
+  acceptedAt      DateTime @default(now())
+  qualityScore    Float // 0~1
   uniquenessScore Float
-  reward         Int                          // 지급 토큰
-  votesUp        Int       @default(0)
-  votesDown      Int       @default(0)
+  reward          Int // 지급 토큰
+  votesUp         Int      @default(0)
+  votesDown       Int      @default(0)
 
   @@index([contributorId, acceptedAt])
 }
@@ -654,7 +660,7 @@ model KnowledgeGap {
   failureCount   Int       @default(1)
   firstSeenAt    DateTime  @default(now())
   lastSeenAt     DateTime  @default(now())
-  status         String    @default("open")   // open, searching, proposed, filled, abandoned
+  status         String    @default("open") // open, searching, proposed, filled, abandoned
   filledByFactId String?
   searchAttempts Int       @default(0)
   lastSearchAt   DateTime?
@@ -669,35 +675,35 @@ model KnowledgeGap {
 
 // 출처 신뢰도 (④ Source Reputation)
 model SourceReputation {
-  id                    String   @id @default(cuid())
-  source                String   @unique
-  sourceType            String   @default("user")    // user/crawl/official/agent/community
-  totalFacts            Int      @default(0)
-  confirmedUnchanged    Int      @default(0)       // 재검증 때 OK
-  invalidated           Int      @default(0)       // 나중에 틀린 것으로 판명
-  updatedCount          Int      @default(0)       // 자가 검증 시 내용 변경됨
-  reputation            Float    @default(0.7)     // 0~1 (초기 0.7 중립)
-  lastUpdated           DateTime @default(now())
-  notes                 String?  @db.Text
+  id                 String   @id @default(cuid())
+  source             String   @unique
+  sourceType         String   @default("user") // user/crawl/official/agent/community
+  totalFacts         Int      @default(0)
+  confirmedUnchanged Int      @default(0) // 재검증 때 OK
+  invalidated        Int      @default(0) // 나중에 틀린 것으로 판명
+  updatedCount       Int      @default(0) // 자가 검증 시 내용 변경됨
+  reputation         Float    @default(0.7) // 0~1 (초기 0.7 중립)
+  lastUpdated        DateTime @default(now())
+  notes              String?  @db.Text
 
   @@index([reputation])
 }
 
 // 지식 커뮤니티 (② Community Detection)
 model KnowledgeCommunity {
-  id            String    @id @default(cuid())
-  name          String                              // 자동 또는 수동 명명
-  algorithm     String    @default("louvain")
+  id            String   @id @default(cuid())
+  name          String // 자동 또는 수동 명명
+  algorithm     String   @default("louvain")
   domain        String?
-  factIds       String[]                            // 구성원 fact ids
-  summary       String?   @db.Text                  // LLM 생성 요약
-  summaryModel  String?                             // 요약 생성 모델 버전
-  size          Int       @default(0)
-  cohesion      Float     @default(0.0)             // 내부 유사도
-  centralFactId String?                             // 대표 사실
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-  version       Int       @default(1)
+  factIds       String[] // 구성원 fact ids
+  summary       String?  @db.Text // LLM 생성 요약
+  summaryModel  String? // 요약 생성 모델 버전
+  size          Int      @default(0)
+  cohesion      Float    @default(0.0) // 내부 유사도
+  centralFactId String? // 대표 사실
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  version       Int      @default(1)
 
   @@index([domain, size])
   @@index([centralFactId])
@@ -705,34 +711,34 @@ model KnowledgeCommunity {
 
 // 자동 생성된 가설 (⑦ Hypothesis Generation)
 model KnowledgeHypothesis {
-  id            String    @id @default(cuid())
-  statement     String    @db.Text                  // "A가 C를 가능하게 한다" 같은 가설 문장
-  relation      KnowledgeRelation
-  fromFactId    String
-  toFactId      String
-  pathFactIds   String[]                            // 추론 경로의 중간 사실들
-  confidence    Float                               // 0~1
-  rationale     String    @db.Text                  // LLM 생성 근거
-  status        String    @default("pending")       // pending, accepted, rejected
-  reviewedBy    String?                             // userId
-  reviewedAt    DateTime?
-  reviewNote    String?
-  createdAt     DateTime  @default(now())
+  id          String            @id @default(cuid())
+  statement   String            @db.Text // "A가 C를 가능하게 한다" 같은 가설 문장
+  relation    KnowledgeRelation
+  fromFactId  String
+  toFactId    String
+  pathFactIds String[] // 추론 경로의 중간 사실들
+  confidence  Float // 0~1
+  rationale   String            @db.Text // LLM 생성 근거
+  status      String            @default("pending") // pending, accepted, rejected
+  reviewedBy  String? // userId
+  reviewedAt  DateTime?
+  reviewNote  String?
+  createdAt   DateTime          @default(now())
 
   @@index([status, confidence])
 }
 
 // 답변 근거 체인 (① XAI)
 model AnswerEvidence {
-  id               String   @id @default(cuid())
-  questionHash     String                           // 질문 해시 (재사용)
-  questionText     String   @db.Text
-  answerText       String   @db.Text
-  factIds          String[]                         // 근거로 쓴 사실들
-  confidenceFactors Json                            // {source_reputation, time_decay, cross_source}
-  asOfDate         DateTime?
-  userId           String?
-  createdAt        DateTime @default(now())
+  id                String    @id @default(cuid())
+  questionHash      String // 질문 해시 (재사용)
+  questionText      String    @db.Text
+  answerText        String    @db.Text
+  factIds           String[] // 근거로 쓴 사실들
+  confidenceFactors Json // {source_reputation, time_decay, cross_source}
+  asOfDate          DateTime?
+  userId            String?
+  createdAt         DateTime  @default(now())
 
   @@index([userId, createdAt])
   @@index([questionHash])
@@ -740,11 +746,11 @@ model AnswerEvidence {
 
 // 블록체인 앵커링 (⑨ Audit Log)
 model AuditAnchor {
-  id           String   @id @default(cuid())
-  anchorDate   DateTime                               // 하루치 묶음 날짜 (자정 기준)
-  merkleRoot   String                                 // 머클 루트 해시
-  eventCount   Int                                    // 이 날짜의 이벤트 개수
-  chainTxHash  String?                                // HWARANG 체인 트랜잭션 해시 (anchored 후)
+  id           String       @id @default(cuid())
+  anchorDate   DateTime // 하루치 묶음 날짜 (자정 기준)
+  merkleRoot   String // 머클 루트 해시
+  eventCount   Int // 이 날짜의 이벤트 개수
+  chainTxHash  String? // HWARANG 체인 트랜잭션 해시 (anchored 후)
   chainBlockId String?
   anchoredAt   DateTime?
   events       AuditEvent[]
@@ -754,16 +760,16 @@ model AuditAnchor {
 }
 
 model AuditEvent {
-  id          String   @id @default(cuid())
-  anchorId    String?
-  anchor      AuditAnchor? @relation(fields: [anchorId], references: [id])
-  eventType   String                                  // fact.create, fact.update, fact.delete, community.update, ...
-  targetId    String                                  // 대상 엔티티 ID
-  actorId     String?                                 // userId 또는 system
-  beforeHash  String?                                 // 변경 전 상태 해시
-  afterHash   String                                  // 변경 후 상태 해시
-  metadata    Json?
-  occurredAt  DateTime @default(now())
+  id         String       @id @default(cuid())
+  anchorId   String?
+  anchor     AuditAnchor? @relation(fields: [anchorId], references: [id])
+  eventType  String // fact.create, fact.update, fact.delete, community.update, ...
+  targetId   String // 대상 엔티티 ID
+  actorId    String? // userId 또는 system
+  beforeHash String? // 변경 전 상태 해시
+  afterHash  String // 변경 후 상태 해시
+  metadata   Json?
+  occurredAt DateTime     @default(now())
 
   @@index([eventType, occurredAt])
   @@index([targetId])
@@ -774,34 +780,36 @@ model AuditEvent {
 
 // 도메인별 출처 위계 레지스트리 (① Source Hierarchy)
 model SourceHierarchyRule {
-  id         String   @id @default(cuid())
-  domain     String                                // law, medical, politics, general, ...
-  level      Int                                   // 1이 최상위
-  pattern    String                                // 정규식 또는 URL 도메인 매칭
-  tier       SourceTier
-  authority  Float                                 // 0~1
-  note       String?  @db.Text
-  active     Boolean  @default(true)
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  id        String     @id @default(cuid())
+  domain    String // law, medical, politics, general, ...
+  level     Int // 1이 최상위
+  pattern   String // 정규식 또는 URL 도메인 매칭
+  tier      SourceTier
+  authority Float // 0~1
+  country   String     @default("KR") // v3.2: KR, US, JP, EU, CN, GLOBAL
+  note      String?    @db.Text
+  active    Boolean    @default(true)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
 
   @@index([domain, level])
   @@index([tier])
+  @@index([country, domain])
 }
 
 // 정정/철회 사건 (③ Retraction Tracking)
 model RetractionEvent {
-  id             String   @id @default(cuid())
-  factId         String                               // 영향받은 사실
-  retractedBy    String                               // 정정 발행 출처
+  id             String    @id @default(cuid())
+  factId         String // 영향받은 사실
+  retractedBy    String // 정정 발행 출처
   retractionUrl  String?
   retractionDate DateTime
-  retractionType String                               // correction/retraction/update
-  reason         String   @db.Text
-  detectedAt     DateTime @default(now())
-  detectedBy     String   @default("auto")           // auto/manual/external
-  verified       Boolean  @default(false)
-  verifiedBy     String?                              // userId
+  retractionType String // correction/retraction/update
+  reason         String    @db.Text
+  detectedAt     DateTime  @default(now())
+  detectedBy     String    @default("auto") // auto/manual/external
+  verified       Boolean   @default(false)
+  verifiedBy     String? // userId
   verifiedAt     DateTime?
 
   @@index([factId])
@@ -811,14 +819,14 @@ model RetractionEvent {
 
 // 전파 관계 (② Provenance Chain)
 model ProvenanceEdge {
-  id              String   @id @default(cuid())
-  sourceFactId    String                               // 복사한 쪽
-  targetFactId    String                               // 원본
-  relationType    ProvenanceType
-  similarity      Float                                // Jaccard 또는 embedding 유사도
-  timeGapHours    Float?                               // 원본 발행 후 몇 시간 뒤 복사?
-  evidence        String?  @db.Text                    // 판단 근거
-  detectedAt      DateTime @default(now())
+  id           String         @id @default(cuid())
+  sourceFactId String // 복사한 쪽
+  targetFactId String // 원본
+  relationType ProvenanceType
+  similarity   Float // Jaccard 또는 embedding 유사도
+  timeGapHours Float? // 원본 발행 후 몇 시간 뒤 복사?
+  evidence     String?        @db.Text // 판단 근거
+  detectedAt   DateTime       @default(now())
 
   @@unique([sourceFactId, targetFactId])
   @@index([targetFactId])
@@ -827,29 +835,29 @@ model ProvenanceEdge {
 
 // ═══ v3.1: 외부 정정 DB 연동 ═══
 model ExternalRetractionSource {
-  id             String   @id @default(cuid())
-  providerName   String   @unique                     // "retraction_watch", "kpcc" (언론중재위), "snopes"
-  baseUrl        String
-  apiKey         String?                              // 필요 시
-  active         Boolean  @default(true)
-  domain         String                               // medical/news/general
-  lastSyncAt     DateTime?
-  syncIntervalHours Int   @default(24)
-  createdAt      DateTime @default(now())
+  id                String    @id @default(cuid())
+  providerName      String    @unique // "retraction_watch", "kpcc" (언론중재위), "snopes"
+  baseUrl           String
+  apiKey            String? // 필요 시
+  active            Boolean   @default(true)
+  domain            String // medical/news/general
+  lastSyncAt        DateTime?
+  syncIntervalHours Int       @default(24)
+  createdAt         DateTime  @default(now())
 }
 
 // ═══ v3.1: 정치 도메인 편향 감지 ═══
 model BiasDetection {
-  id             String   @id @default(cuid())
+  id             String        @id @default(cuid())
   factId         String
   fact           KnowledgeFact @relation(fields: [factId], references: [id], onDelete: Cascade)
-  method         String                               // 'lexicon', 'source_based', 'llm'
-  biasScore      Float                                // -1 ~ +1
+  method         String // 'lexicon', 'source_based', 'llm'
+  biasScore      Float // -1 ~ +1
   biasLabel      BiasLabel
-  confidence     Float    @default(0.7)
-  triggerPhrases String[]                             // 편향 판단 근거 문구
-  detectedAt     DateTime @default(now())
-  verifiedBy     String?                              // admin 검증
+  confidence     Float         @default(0.7)
+  triggerPhrases String[] // 편향 판단 근거 문구
+  detectedAt     DateTime      @default(now())
+  verifiedBy     String? // admin 검증
   verifiedAt     DateTime?
 
   @@index([factId, detectedAt])
@@ -858,29 +866,29 @@ model BiasDetection {
 
 // ═══ v3.1: 언론사 편향 레지스트리 ═══
 model MediaBiasProfile {
-  id             String   @id @default(cuid())
-  mediaOutlet    String   @unique                     // "chosun", "hani", "ohmynews"
-  displayName    String
-  domain         String?                              // 매칭용 URL 도메인
-  biasScore      Float                                // 전체 편향 점수
-  biasLabel      BiasLabel
-  factualityRating String                             // "high", "mixed", "low"
-  sources        String[]                             // 참조한 외부 분석 (AllSides, MBFC 등)
-  notes          String?  @db.Text
-  updatedAt      DateTime @updatedAt
+  id               String    @id @default(cuid())
+  mediaOutlet      String    @unique // "chosun", "hani", "ohmynews"
+  displayName      String
+  domain           String? // 매칭용 URL 도메인
+  biasScore        Float // 전체 편향 점수
+  biasLabel        BiasLabel
+  factualityRating String // "high", "mixed", "low"
+  sources          String[] // 참조한 외부 분석 (AllSides, MBFC 등)
+  notes            String?   @db.Text
+  updatedAt        DateTime  @updatedAt
 }
 
 // ═══ v3.1: 번역 관계 테이블 (세부 추적) ═══
 model TranslationLink {
-  id              String   @id @default(cuid())
-  sourceFactId    String                              // 번역본
-  targetFactId    String                              // 원문
-  sourceLang      String
-  targetLang      String
-  translationMethod String                            // "human", "machine", "ai_llm", "unknown"
-  confidence      Float                               // 번역 원본 추정 신뢰도
-  textSimilarity  Float?                              // 교차언어 임베딩 유사도
-  detectedAt      DateTime @default(now())
+  id                String   @id @default(cuid())
+  sourceFactId      String // 번역본
+  targetFactId      String // 원문
+  sourceLang        String
+  targetLang        String
+  translationMethod String // "human", "machine", "ai_llm", "unknown"
+  confidence        Float // 번역 원본 추정 신뢰도
+  textSimilarity    Float? // 교차언어 임베딩 유사도
+  detectedAt        DateTime @default(now())
 
   @@unique([sourceFactId, targetFactId])
   @@index([sourceLang, targetLang])
@@ -888,57 +896,578 @@ model TranslationLink {
 
 // ═══ v3.1: 미디어 사실 메타데이터 ═══
 model MediaFact {
-  id              String   @id @default(cuid())
-  factId          String   @unique
-  fact            KnowledgeFact @relation(fields: [factId], references: [id], onDelete: Cascade)
-  mediaType       MediaType
-  fileUrl         String
-  thumbnailUrl    String?
-  perceptualHash  String                              // pHash/dHash
-  simHash         String?                             // 시각 simhash 64bit
-  ocrText         String?  @db.Text                   // 이미지에서 추출한 텍스트
-  transcription   String?  @db.Text                   // 영상/오디오 스크립트
-  detectedObjects String[]                            // 객체 감지 결과 (광고/로고/얼굴 등)
-  deepfakeScore   Float?                              // 딥페이크 의심도 0~1
-  manipulationFlags String[]                          // crop, edit, filter 등
-  originalSize    Int?                                // 바이트
-  duration        Float?                              // 초 (영상/오디오)
-  resolution      String?                             // "1920x1080"
-  exifData        Json?
-  createdAt       DateTime @default(now())
+  id                String        @id @default(cuid())
+  factId            String        @unique
+  fact              KnowledgeFact @relation(fields: [factId], references: [id], onDelete: Cascade)
+  mediaType         MediaType
+  fileUrl           String
+  thumbnailUrl      String?
+  perceptualHash    String // pHash/dHash
+  simHash           String? // 시각 simhash 64bit
+  ocrText           String?       @db.Text // 이미지에서 추출한 텍스트
+  transcription     String?       @db.Text // 영상/오디오 스크립트
+  detectedObjects   String[] // 객체 감지 결과 (광고/로고/얼굴 등)
+  deepfakeScore     Float? // 딥페이크 의심도 0~1
+  manipulationFlags String[] // crop, edit, filter 등
+  originalSize      Int? // 바이트
+  duration          Float? // 초 (영상/오디오)
+  resolution        String? // "1920x1080"
+  exifData          Json?
+  createdAt         DateTime      @default(now())
 
   @@index([perceptualHash])
   @@index([deepfakeScore])
 }
 
+// ═══ v3.2: 8가지 추가 개선 ═══
+
+// ① 실시간 철회 알림 — 과거 답변이 지금 보니 틀렸을 때
+model RetractionNotification {
+  id                       String    @id @default(cuid())
+  userId                   String
+  affectedAnswerEvidenceId String? // AnswerEvidence 참조 (해당 답변)
+  retractedFactId          String // 어떤 사실이 철회됐는지
+  retractionEventId        String // RetractionEvent 참조
+  message                  String    @db.Text
+  notified                 Boolean   @default(false)
+  notifiedAt               DateTime?
+  acknowledged             Boolean   @default(false)
+  acknowledgedAt           DateTime?
+  createdAt                DateTime  @default(now())
+
+  @@index([userId, acknowledged])
+  @@index([notified])
+}
+
+// ② Adversarial Fact Injection 테스트
+model AdversarialTestCase {
+  id                String    @id @default(cuid())
+  name              String
+  description       String?   @db.Text
+  category          String // 'false_news', 'biased_wording', 'copy_spam', 'deepfake', 'mistranslation'
+  injection         Json // 주입할 가짜 사실 데이터
+  expectedDetection String // 'should_reject', 'should_flag', 'should_downgrade'
+  lastRunAt         DateTime?
+  lastResult        String? // 'passed', 'failed', 'inconclusive'
+  runHistory        Json? // 최근 실행 결과들
+  active            Boolean   @default(true)
+  createdAt         DateTime  @default(now())
+
+  @@index([category, active])
+}
+
+model AdversarialTestRun {
+  id             String    @id @default(cuid())
+  testCaseId     String
+  startedAt      DateTime  @default(now())
+  finishedAt     DateTime?
+  result         String // 'passed', 'failed', 'inconclusive'
+  details        Json
+  factIdsCreated String[] // 테스트 중 생성된 fact ids (정리용)
+
+  @@index([testCaseId, startedAt])
+}
+
+// ④ 논리적 무결성 (삼단논법 / 논리 모순)
+model LogicalInconsistency {
+  id                String    @id @default(cuid())
+  factIds           String[] // 관련 사실들 (2개 이상)
+  inconsistencyType String // 'syllogism_violation', 'direct_contradiction', 'transitivity_break', 'quantifier_mismatch'
+  explanation       String    @db.Text
+  severity          String    @default("medium") // 'low', 'medium', 'high', 'critical'
+  detectionMethod   String // 'symbolic', 'llm', 'hybrid'
+  resolved          Boolean   @default(false)
+  resolution        String?   @db.Text
+  detectedAt        DateTime  @default(now())
+  resolvedAt        DateTime?
+  resolvedBy        String?
+
+  @@index([resolved, severity])
+  @@index([inconsistencyType])
+}
+
+// ⑤ 사용자 편향 캘리브레이션
+model UserBiasCalibration {
+  id                String   @id @default(cuid())
+  userId            String   @unique
+  preferredSpectrum String   @default("centrist") // 'progressive', 'moderate', 'centrist', 'conservative'
+  toleranceRange    Float    @default(0.3) // 허용 편차 0~1
+  showOpposing      Boolean  @default(true) // 반대 관점 강제 노출
+  guardrailMode     String   @default("balanced") // 'off', 'balanced' (30% 이상 반대 강제), 'strict' (극단 차단)
+  preferences       Json? // 세부 설정 (도메인별 등)
+  updatedAt         DateTime @updatedAt
+  createdAt         DateTime @default(now())
+}
+
+// ⑥ Time Machine — 시점 스냅샷
+model KnowledgeSnapshot {
+  id                String    @id @default(cuid())
+  name              String // "2026-04-23 법률 스냅샷"
+  snapshotAt        DateTime // 스냅샷 기준 시점
+  scope             String // 'full', 'domain', 'entity'
+  scopeValue        String? // domain명 또는 entity명
+  factCount         Int
+  merkleRoot        String // 무결성 해시
+  storageLocation   String // 파일 경로 또는 외부 저장소 URL
+  compressionMethod String    @default("gzip")
+  sizeBytes         BigInt?
+  createdBy         String?
+  createdAt         DateTime  @default(now())
+  expiresAt         DateTime?
+
+  @@index([snapshotAt])
+  @@index([scope, scopeValue])
+}
+
+// ⑦ Federated Fact Check — 외부 HLKM 인스턴스와 교차 검증
+model FederatedInstance {
+  id              String    @id @default(cuid())
+  instanceId      String    @unique // UUID 또는 도메인
+  name            String
+  apiUrl          String
+  publicKey       String    @db.Text
+  organization    String?
+  trustLevel      Float     @default(0.5) // 0~1, 상호 신뢰도
+  active          Boolean   @default(true)
+  lastHandshakeAt DateTime?
+  syncsCompleted  Int       @default(0)
+  createdAt       DateTime  @default(now())
+}
+
+model FederatedQuery {
+  id         String    @id @default(cuid())
+  instanceId String
+  factId     String? // 조회 대상 사실
+  entity     String? // 또는 entity
+  query      String
+  sentAt     DateTime  @default(now())
+  receivedAt DateTime?
+  response   Json? // 원격 HLKM 응답
+  agreement  Float? // 0~1, 원격 측과의 일치도
+  status     String    @default("pending") // pending, completed, failed
+
+  @@index([instanceId, sentAt])
+  @@index([status])
+}
+
+// ═══ KYC 게이트 정책 — 핵심 ═══
+// 모든 지식 기여는 KYC 필수. 미인증 사용자는 LLM 학습 데이터 수집만.
+
+// 미인증 사용자 / 인증 사용자 공통의 LLM 학습 로그
+// 지식 그래프(KnowledgeFact)와 완전히 분리된 저장소
+model LLMTrainingLog {
+  id             String  @id @default(cuid())
+  userId         String? // 로그인 안 했으면 null
+  userIsVerified Boolean @default(false) // 수집 시점 KYC 여부
+  sessionId      String? // 세션 기반 익명 식별
+
+  // 대화 내용
+  userMessage    String  @db.Text
+  assistantReply String  @db.Text
+  conversationId String?
+  model          String? // 사용된 LLM 모델
+
+  // 메타
+  domain         String?
+  language       String  @default("ko")
+  feedbackRating String? // 'positive', 'negative', null
+  feedbackNote   String? @db.Text
+
+  // 품질 플래그 (학습 전 필터링용)
+  containsPII         Boolean   @default(false)
+  containsHarmful     Boolean   @default(false)
+  qualityScore        Float?
+  reviewedForTraining Boolean   @default(false)
+  approvedForTraining Boolean   @default(false) // 관리자 승인 후 학습 파이프라인에 편입
+  approvedAt          DateTime?
+  approvedBy          String?
+
+  // 보존 정책
+  createdAt DateTime  @default(now())
+  expiresAt DateTime? // 미인증자: 예) 90일 후 삭제
+
+  @@index([userId, createdAt])
+  @@index([approvedForTraining, createdAt])
+  @@index([userIsVerified, createdAt])
+}
+
+// 차단 기록 (미인증자가 기여 시도한 경우)
+model ContributionGateDenial {
+  id              String   @id @default(cuid())
+  userId          String?
+  sessionId       String?
+  attemptedAction String // 'ingest_fact', 'peer_review', 'dispute_initiate', 'bounty_create', 'prediction_bet'
+  reason          String // 'kyc_required', 'suspended', 'tier_insufficient', 'quota_exceeded'
+  payloadDigest   String? // 시도한 내용 해시 (복구용)
+  createdAt       DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([reason, createdAt])
+}
+
+// ═══ v3.3 크라우드소싱 거버넌스 (10 테이블) ═══
+
+// 기여자 프로필 (Tier / 평판 / 스테이킹 잔액)
+model ContributorProfile {
+  id               String          @id @default(cuid())
+  userId           String          @unique
+  tier             ContributorTier @default(BRONZE)
+  reputation       Float           @default(0.5) // 0~1
+  stakedBalance    Int             @default(0) // 스테이킹 중인 토큰
+  lifetimeStaked   BigInt          @default(0)
+  lifetimeSlashed  BigInt          @default(0)
+  correctContribs  Int             @default(0)
+  wrongContribs    Int             @default(0)
+  totalEarned      BigInt          @default(0)
+  kycVerified      Boolean         @default(false)
+  kycMethod        String? // 'ipin', 'passport', 'worldid', 'brightid'
+  kycVerifiedAt    DateTime?
+  expertTags       String[] // ['law', 'medical:cardiology'] 등
+  lastActiveAt     DateTime?
+  createdAt        DateTime        @default(now())
+  suspensionReason String?
+  suspendedUntil   DateTime?
+
+  @@index([tier, reputation])
+  @@index([kycVerified])
+}
+
+enum ContributorTier {
+  BRONZE // 신규
+  SILVER // 검증된 기본 기여자
+  GOLD // 민감 도메인 기여 가능
+  DIAMOND // 거버넌스 투표 가능
+  SUSPENDED // 정지 상태
+}
+
+// Stake-to-Contribute (기여 시 스테이킹)
+model ContributionStake {
+  id               String    @id @default(cuid())
+  factId           String // 기여한 사실
+  userId           String // 기여자
+  stakedAmount     Int // 걸린 토큰
+  status           String    @default("pending") // pending, settled_correct, slashed, partial_slash
+  settledAt        DateTime?
+  slashedAmount    Int       @default(0)
+  rewardedAmount   Int       @default(0)
+  peerReviewPassed Boolean? // null=미검토, true=통과, false=실패
+  createdAt        DateTime  @default(now())
+
+  @@index([userId, status])
+  @@index([factId])
+  @@index([status, createdAt])
+}
+
+// Peer Review 투표
+model PeerReview {
+  id             String    @id @default(cuid())
+  factId         String
+  reviewerId     String
+  vote           String // 'accept', 'reject', 'abstain'
+  stakedAmount   Int // 리뷰어도 스테이킹
+  rationale      String?   @db.Text
+  confidence     Float     @default(0.7)
+  finalizedAt    DateTime?
+  rewardedAmount Int       @default(0)
+  slashedAmount  Int       @default(0)
+  createdAt      DateTime  @default(now())
+
+  @@unique([factId, reviewerId])
+  @@index([factId])
+  @@index([reviewerId, createdAt])
+}
+
+// Dispute (논쟁) DAO
+model Dispute {
+  id             String        @id @default(cuid())
+  relatedFactIds String[] // 관련 사실들
+  topic          String
+  description    String        @db.Text
+  initiatorId    String
+  status         String        @default("open") // open, voting, resolved, invalid
+  votingEndsAt   DateTime
+  winningSide    String? // 'A', 'B', 'both_invalid', 'coexist'
+  totalStaked    Int           @default(0)
+  votes          DisputeVote[]
+  resolvedAt     DateTime?
+  resolutionNote String?       @db.Text
+  createdAt      DateTime      @default(now())
+
+  @@index([status, votingEndsAt])
+}
+
+model DisputeVote {
+  id            String   @id @default(cuid())
+  disputeId     String
+  dispute       Dispute  @relation(fields: [disputeId], references: [id], onDelete: Cascade)
+  voterId       String
+  side          String // 'A', 'B', 'both_invalid', 'coexist'
+  stakedAmount  Int
+  rationale     String?  @db.Text
+  settledAmount Int? // 승리 시 수령, 패배 시 슬래시
+  createdAt     DateTime @default(now())
+
+  @@unique([disputeId, voterId])
+  @@index([disputeId])
+}
+
+// 전문가 자격 증명
+model ExpertCredential {
+  id               String    @id @default(cuid())
+  userId           String
+  field            String // 'law', 'medical:cardiology', 'tax', ...
+  organization     String? // '대한변호사협회', '서울대병원'
+  licenseNumber    String?
+  documentUrl      String? // 업로드된 증빙
+  verifiedBy       String // 'admin', 'third_party', 'ocr_auto'
+  verifiedAt       DateTime?
+  expiresAt        DateTime?
+  status           String    @default("pending") // pending, verified, rejected, expired
+  weightMultiplier Float     @default(1.0) // 해당 field에서 기여 가중치
+  createdAt        DateTime  @default(now())
+
+  @@index([userId, field])
+  @@index([status])
+}
+
+// Sybil 탐지 플래그
+model SybilFlag {
+  id             String    @id @default(cuid())
+  userId         String
+  pattern        String // 'ip_cluster', 'behavioral', 'device_fingerprint', 'temporal'
+  severity       String    @default("medium") // 'low', 'medium', 'high', 'critical'
+  detectedAt     DateTime  @default(now())
+  evidence       Json // 판단 근거
+  relatedUserIds String[] // 같은 클러스터로 의심되는 계정들
+  resolved       Boolean   @default(false)
+  resolvedAt     DateTime?
+  resolvedBy     String?
+  resolution     String? // 'confirmed_sybil', 'false_positive', 'warning_issued'
+
+  @@index([userId, resolved])
+  @@index([severity, resolved])
+}
+
+// KYC / Proof of Personhood
+model PersonhoodVerification {
+  id            String    @id @default(cuid())
+  userId        String    @unique
+  method        String // 'ipin', 'worldid', 'brightid', 'proofofhumanity', 'manual'
+  providerId    String? // 외부 제공자의 uniqueness id (해시)
+  proof         String?   @db.Text // 증명 토큰 (유효성 검증용)
+  verifiedAt    DateTime  @default(now())
+  expiresAt     DateTime?
+  revoked       Boolean   @default(false)
+  revokedReason String?
+
+  @@index([method, verifiedAt])
+}
+
+// Bounty (지식 현상금) 시장
+model Bounty {
+  id           String             @id @default(cuid())
+  creatorId    String
+  topic        String
+  description  String             @db.Text
+  domain       String?
+  rewardAmount Int // 걸린 토큰
+  requiredTier ContributorTier    @default(SILVER) // 최소 기여자 등급
+  deadline     DateTime
+  status       String             @default("open") // open, awarded, expired, cancelled
+  winnerId     String?
+  winnerFactId String?
+  submissions  BountySubmission[]
+  createdAt    DateTime           @default(now())
+  awardedAt    DateTime?
+
+  @@index([status, deadline])
+  @@index([domain, status])
+}
+
+model BountySubmission {
+  id             String   @id @default(cuid())
+  bountyId       String
+  bounty         Bounty   @relation(fields: [bountyId], references: [id], onDelete: Cascade)
+  contributorId  String
+  factId         String
+  submissionNote String?  @db.Text
+  score          Float? // 심사 점수 0~1
+  selected       Boolean  @default(false)
+  createdAt      DateTime @default(now())
+
+  @@unique([bountyId, factId])
+  @@index([bountyId, score])
+}
+
+// Prediction Market (미래 사실 베팅)
+model PredictionMarket {
+  id             String      @id @default(cuid())
+  pendingFactId  String      @unique // PENDING 상태 fact
+  question       String      @db.Text
+  yesPool        BigInt      @default(0) // YES 측 토큰 총량
+  noPool         BigInt      @default(0)
+  bettersCount   Int         @default(0)
+  resolutionDate DateTime // 결과 확정 예정일
+  resolved       Boolean     @default(false)
+  outcome        String? // 'YES', 'NO', 'INVALID'
+  resolvedAt     DateTime?
+  bets           MarketBet[]
+  createdAt      DateTime    @default(now())
+
+  @@index([resolved, resolutionDate])
+}
+
+model MarketBet {
+  id        String           @id @default(cuid())
+  marketId  String
+  market    PredictionMarket @relation(fields: [marketId], references: [id], onDelete: Cascade)
+  userId    String
+  side      String // 'YES', 'NO'
+  amount    Int
+  payoff    Int? // 정산된 보상 (음수 = 손실)
+  settledAt DateTime?
+  createdAt DateTime         @default(now())
+
+  @@index([marketId, userId])
+  @@index([userId, createdAt])
+}
+
 // 원자 주장 분해 (⑤ Claim Decomposition)
 model DecomposedClaim {
-  id               String   @id @default(cuid())
-  parentFactId     String                               // 원본 뉴스/사실
-  atomicStatement  String   @db.Text                    // 원자적 주장
-  claimType        String                               // numeric/date/attribution/causal/qualitative
-  verifiableValue  String?  @db.Text                    // 검증 가능한 값
-  verificationStatus String  @default("pending")        // pending/verified/refuted/unverifiable
-  verifiedByFactId String?                              // 이 주장을 지지/반박하는 다른 사실
-  confidence       Float    @default(0.5)
-  extractedAt      DateTime @default(now())
+  id                 String   @id @default(cuid())
+  parentFactId       String // 원본 뉴스/사실
+  atomicStatement    String   @db.Text // 원자적 주장
+  claimType          String // numeric/date/attribution/causal/qualitative
+  verifiableValue    String?  @db.Text // 검증 가능한 값
+  verificationStatus String   @default("pending") // pending/verified/refuted/unverifiable
+  verifiedByFactId   String? // 이 주장을 지지/반박하는 다른 사실
+  confidence         Float    @default(0.5)
+  extractedAt        DateTime @default(now())
 
   @@index([parentFactId])
   @@index([verificationStatus])
 }
 
+// ============================================================
+// Hwarang Grid 분산 학습 (HFL Round / Peer Vote / Earnings / Data Shard)
+// ============================================================
+
+model Round {
+  id                 String      @id @default(cuid())
+  domain             String? // "code", "legal", "tax", null=general
+  status             RoundStatus @default(OPEN)
+  config             Json // {lora_r, alpha, lr, steps_per_round, ...}
+  validationFraction Float       @default(0.15) // peer 평가용 데이터 비율
+  createdAt          DateTime    @default(now())
+  startedAt          DateTime?
+  completedAt        DateTime?
+
+  participants RoundParticipant[]
+  shards       DataShard[]
+  votes        PeerVote[]
+  earnings     AgentEarnings[]
+
+  @@index([status, createdAt(sort: Desc)])
+  @@index([domain, status])
+}
+
+enum RoundStatus {
+  OPEN
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+model RoundParticipant {
+  id           String                 @id @default(cuid())
+  roundId      String
+  round        Round                  @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  agentId      String
+  status       RoundParticipantStatus @default(INVITED)
+  shardId      String? // DataShard.id
+  joinedAt     DateTime               @default(now())
+  submittedAt  DateTime?
+  qualityScore Float? // peer 평균 점수
+
+  @@unique([roundId, agentId])
+  @@index([agentId, status])
+  @@index([roundId, status])
+}
+
+enum RoundParticipantStatus {
+  INVITED
+  ACCEPTED
+  SUBMITTED
+  REJECTED
+  TIMEOUT
+}
+
+model PeerVote {
+  id           String   @id @default(cuid())
+  roundId      String
+  round        Round    @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  voterId      String // 투표하는 agent_id
+  peerId       String // 평가받는 agent_id
+  qualityScore Float // 0~1
+  rationale    String?  @db.Text
+  createdAt    DateTime @default(now())
+
+  @@unique([roundId, voterId, peerId])
+  @@index([roundId, peerId])
+  @@index([voterId, createdAt(sort: Desc)])
+}
+
+model AgentEarnings {
+  id        String              @id @default(cuid())
+  agentId   String
+  roundId   String?
+  round     Round?              @relation(fields: [roundId], references: [id], onDelete: SetNull)
+  amount    Float // HWR 토큰 (소수 가능)
+  source    AgentEarningsSource
+  metadata  Json?
+  createdAt DateTime            @default(now())
+
+  @@index([agentId, createdAt(sort: Desc)])
+  @@index([roundId])
+  @@index([source, createdAt(sort: Desc)])
+}
+
+enum AgentEarningsSource {
+  HFL_REWARD // 라운드 학습 기여 보상
+  PEER_BONUS // peer 평가 가산점
+  DATA_UPLOAD // 데이터 업로드 보상
+  REFERRAL // 추천 보너스
+  MANUAL // 관리자 지급
+}
+
+model DataShard {
+  id           String   @id @default(cuid())
+  roundId      String
+  round        Round    @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  shardIdx     Int // 라운드 내 shard 인덱스
+  dataUrl      String // 다운로드 URL 또는 경로
+  sizeBytes    BigInt   @default(0)
+  sampleCount  Int      @default(0)
+  isValidation Boolean  @default(false) // peer 평가용 shard 여부
+  checksum     String? // sha256
+  createdAt    DateTime @default(now())
+
+  @@unique([roundId, shardIdx])
+  @@index([roundId, isValidation])
+}
+
 // GDPR 삭제 요청 (⑩ Right-to-be-Forgotten)
 model ForgetRequest {
-  id            String   @id @default(cuid())
-  userId        String                                  // 삭제 요청자
-  scope         String                                  // "all_private", "specific_facts", "contributions"
-  targetFactIds String[]                                // scope=specific_facts 일 때
-  reason        String?  @db.Text
-  status        String   @default("pending")            // pending, approved, completed, rejected
-  requestedAt   DateTime @default(now())
+  id            String    @id @default(cuid())
+  userId        String // 삭제 요청자
+  scope         String // "all_private", "specific_facts", "contributions"
+  targetFactIds String[] // scope=specific_facts 일 때
+  reason        String?   @db.Text
+  status        String    @default("pending") // pending, approved, completed, rejected
+  requestedAt   DateTime  @default(now())
   processedAt   DateTime?
   processedBy   String?
-  reportUrl     String?                                 // 처리 완료 리포트 (감사 목적)
+  reportUrl     String? // 처리 완료 리포트 (감사 목적)
 
   @@index([userId, requestedAt])
   @@index([status])

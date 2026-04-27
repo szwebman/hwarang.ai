@@ -32,6 +32,12 @@ from hwarang_api.knowledge.types import (
     KnowledgeStatus,
     KnowledgeVisibility,
 )
+from hwarang_api.knowledge.contribution_gate import (
+    GateDenied,
+    WriteAction,
+    payload_digest,
+    require_contribution_permission,
+)
 
 # 대화-기반 수집을 위한 단순 휴리스틱 (한국어 기준).
 _FACT_LIKE_PATTERNS = [
@@ -61,11 +67,31 @@ def _floats_to_hex(vec: list[float] | None) -> str | None:
         return None
 
 
-async def ingest_fact(fact: KnowledgeFact, dry_run: bool = False) -> dict:
+async def ingest_fact(
+    fact: KnowledgeFact, dry_run: bool = False, bypass_gate: bool = False
+) -> dict:
     """신규 팩트 수집 파이프라인 본체.
 
     반환: `{fact_id, action, conflicts}` — action ∈ {inserted, superseded, disputed, duplicate}.
     """
+    # KYC 게이트 (미인증자는 절대 못 들어옴)
+    if not bypass_gate:
+        if fact.contributed_by:  # 기여자 user_id가 있어야 함
+            await require_contribution_permission(
+                fact.contributed_by,
+                WriteAction.INGEST_FACT.value,
+                domain=fact.domain,
+                payload_digest=payload_digest(
+                    {"content": fact.content, "domain": fact.domain}
+                ),
+            )
+        elif not fact.source or fact.source_type != "official":
+            # 기여자 id 없고 official crawler도 아니면 차단
+            raise GateDenied(
+                reason="not_authenticated",
+                message="기여자 식별 정보 없음. contributedBy 필드 또는 source_type='official' 필요.",
+            )
+
     # 1) content hash
     if not fact.content_hash:
         fact.content_hash = _content_hash(fact.content)

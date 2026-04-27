@@ -376,15 +376,86 @@ async def auto_participation_loop(
     get_load_fn: Callable[[], float] | None = None,
     get_tier_fn: Callable[[], str] | None = None,
     gpu_watt: int = 250,
+    prefer_websocket: bool = True,
+    ws_max_failures: int = 3,
 ) -> None:
-    """백그라운드 폴링 루프.
+    """라운드 자동 참여 루프 — WebSocket 우선 / HTTP 폴링 fallback.
 
-    마스터에서 오픈 라운드 주기 조회 → 평가 → 조건 충족 시 콜백.
-    콜백은 participation_control.join_round 호출하도록 연결.
+    1. ``prefer_websocket=True`` 이면 먼저 WebSocket 연결 시도.
+       - 성공: 서버가 ``round_open`` / ``round_announced`` 메시지를 push 하면
+         즉시 평가 후 ``on_eligible_round`` 호출.
+       - 실패 (websockets 미설치 / 연결 실패): HTTP 폴링으로 자동 fallback.
+    2. WS 가 끊어지면 5s → 10s → 20s 의 exponential backoff 로 재연결 시도.
+       ``ws_max_failures`` 회 실패하면 영구 HTTP 폴링 모드로 전환.
+    3. HTTP 폴링은 기존 ``list_available_rounds()`` + ``evaluate_round()``
+       + ``should_accept()`` 로직을 그대로 재사용.
+
+    NOTE: 호환성을 위해 시그니처에 ``prefer_websocket`` / ``ws_max_failures``
+    만 추가했고, 기존 폴링 동작은 그대로 보존.
     """
     stop_event = stop_event or asyncio.Event()
-    logger.info("auto_participation_loop 시작 (interval=%ds)", poll_interval_seconds)
+    logger.info(
+        "auto_participation_loop 시작 (interval=%ds, prefer_ws=%s)",
+        poll_interval_seconds, prefer_websocket,
+    )
 
+    # ── WebSocket 우선 시도 ──
+    if prefer_websocket:
+        ws_ok = await _try_websocket_with_backoff(
+            master_url=master_url,
+            agent_id=agent_id,
+            api_key=api_key,
+            profile=profile,
+            on_eligible_round=on_eligible_round,
+            stop_event=stop_event,
+            get_vram_fn=get_vram_fn,
+            get_load_fn=get_load_fn,
+            get_tier_fn=get_tier_fn,
+            gpu_watt=gpu_watt,
+            max_failures=ws_max_failures,
+        )
+        if stop_event.is_set():
+            logger.info("auto_participation_loop 종료 (WS 경로)")
+            return
+        if ws_ok:
+            # WS 가 정상 종료된 경우 (stop_event) — 함수 종료
+            logger.info("auto_participation_loop 종료 (WS 정상)")
+            return
+        logger.warning(
+            "WebSocket 연결 실패 %d회 → HTTP 폴링으로 영구 전환", ws_max_failures,
+        )
+
+    # ── HTTP 폴링 (기본 / fallback) ──
+    await _http_polling_loop(
+        master_url=master_url,
+        agent_id=agent_id,
+        api_key=api_key,
+        profile=profile,
+        on_eligible_round=on_eligible_round,
+        poll_interval_seconds=poll_interval_seconds,
+        stop_event=stop_event,
+        get_vram_fn=get_vram_fn,
+        get_load_fn=get_load_fn,
+        get_tier_fn=get_tier_fn,
+        gpu_watt=gpu_watt,
+    )
+    logger.info("auto_participation_loop 종료")
+
+
+async def _http_polling_loop(
+    master_url: str,
+    agent_id: str,
+    api_key: str,
+    profile: DomainProfile,
+    on_eligible_round: Callable[[RoundMeta, dict[str, Any]], Awaitable[None] | None],
+    poll_interval_seconds: int,
+    stop_event: asyncio.Event,
+    get_vram_fn: Callable[[], int] | None,
+    get_load_fn: Callable[[], float] | None,
+    get_tier_fn: Callable[[], str] | None,
+    gpu_watt: int,
+) -> None:
+    """HTTP 폴링 메인 루프 (기존 동작 그대로)."""
     while not stop_event.is_set():
         try:
             if not is_active_now(profile):
@@ -396,37 +467,51 @@ async def auto_participation_loop(
                 master_url, agent_id, api_key,
                 domain_filter=profile.primary_domains or None,
             )
-            vram = get_vram_fn() if get_vram_fn else 0
-            load = get_load_fn() if get_load_fn else 0.0
-            tier = get_tier_fn() if get_tier_fn else "BRONZE"
-
             for r in rounds:
-                ev = await evaluate_round(
-                    r, profile,
-                    current_gpu_vram_gb=vram,
-                    current_load=load,
-                    my_tier=tier,
-                    gpu_watt=gpu_watt,
+                await _evaluate_and_dispatch(
+                    r, profile, on_eligible_round,
+                    get_vram_fn, get_load_fn, get_tier_fn, gpu_watt,
                 )
-                if should_accept(ev, auto_participate=profile.auto_participate):
-                    logger.info(
-                        "적합 라운드 발견: %s (score=%.2f, ROI=%.2fx)",
-                        r.round_id, ev["match_score"], ev["expected_roi"],
-                    )
-                    result = on_eligible_round(r, ev)
-                    if asyncio.iscoroutine(result):
-                        await result
-                elif ev.get("decision") == "manual_review":
-                    logger.info(
-                        "수동 검토 필요: %s — %s",
-                        r.round_id, "; ".join(ev["reasons"]),
-                    )
         except Exception as e:
             logger.exception("폴링 루프 오류: %s", e)
 
         await _wait_or_stop(stop_event, poll_interval_seconds)
 
-    logger.info("auto_participation_loop 종료")
+
+async def _evaluate_and_dispatch(
+    r: RoundMeta,
+    profile: DomainProfile,
+    on_eligible_round: Callable[[RoundMeta, dict[str, Any]], Awaitable[None] | None],
+    get_vram_fn: Callable[[], int] | None,
+    get_load_fn: Callable[[], float] | None,
+    get_tier_fn: Callable[[], str] | None,
+    gpu_watt: int,
+) -> None:
+    """라운드 1건 평가 → 적합하면 콜백."""
+    vram = get_vram_fn() if get_vram_fn else 0
+    load = get_load_fn() if get_load_fn else 0.0
+    tier = get_tier_fn() if get_tier_fn else "BRONZE"
+
+    ev = await evaluate_round(
+        r, profile,
+        current_gpu_vram_gb=vram,
+        current_load=load,
+        my_tier=tier,
+        gpu_watt=gpu_watt,
+    )
+    if should_accept(ev, auto_participate=profile.auto_participate):
+        logger.info(
+            "적합 라운드 발견: %s (score=%.2f, ROI=%.2fx)",
+            r.round_id, ev["match_score"], ev["expected_roi"],
+        )
+        result = on_eligible_round(r, ev)
+        if asyncio.iscoroutine(result):
+            await result
+    elif ev.get("decision") == "manual_review":
+        logger.info(
+            "수동 검토 필요: %s — %s",
+            r.round_id, "; ".join(ev["reasons"]),
+        )
 
 
 async def _wait_or_stop(stop_event: asyncio.Event, seconds: int) -> None:
@@ -437,8 +522,147 @@ async def _wait_or_stop(stop_event: asyncio.Event, seconds: int) -> None:
 
 
 # ----------------------------------------------------------------------------
-# WebSocket 구독 (선택)
+# WebSocket 구독 (우선 모드 / fallback 통합)
 # ----------------------------------------------------------------------------
+
+
+def _http_to_ws(master_url: str) -> str:
+    """``http(s)://...`` → ``ws(s)://...``.  외부 schema 면 그대로 반환."""
+    u = master_url.rstrip("/")
+    if u.startswith("https://"):
+        return "wss://" + u[len("https://"):]
+    if u.startswith("http://"):
+        return "ws://" + u[len("http://"):]
+    return u
+
+
+async def _try_websocket_with_backoff(
+    master_url: str,
+    agent_id: str,
+    api_key: str,
+    profile: DomainProfile,
+    on_eligible_round: Callable[[RoundMeta, dict[str, Any]], Awaitable[None] | None],
+    stop_event: asyncio.Event,
+    get_vram_fn: Callable[[], int] | None,
+    get_load_fn: Callable[[], float] | None,
+    get_tier_fn: Callable[[], str] | None,
+    gpu_watt: int,
+    max_failures: int = 3,
+) -> bool:
+    """WS 연결 + 메시지 수신 루프.
+
+    Returns:
+        True  — stop_event 로 정상 종료된 경우 (호출자가 함수 종료해야 함)
+        False — ``websockets`` 미설치 또는 ``max_failures`` 회 연속 실패
+                (호출자가 HTTP 폴링으로 fallback 해야 함)
+    """
+    # lazy import — 라이브러리 없으면 즉시 False
+    try:
+        import websockets  # type: ignore
+        from websockets.exceptions import ConnectionClosed  # type: ignore
+    except ImportError:
+        logger.warning("websockets 미설치 — WS 모드 비활성, HTTP 폴링 사용")
+        return False
+
+    ws_base = _http_to_ws(master_url)
+    # 서버는 token 쿼리스트링 / Authorization 헤더 둘 다 지원.
+    url = (
+        f"{ws_base}/api/grid/rounds/ws"
+        f"?agent_id={agent_id}&token={api_key}"
+    )
+    headers = [("Authorization", f"Bearer {api_key}")]
+    backoff_schedule = [5, 10, 20]
+    consecutive_failures = 0
+
+    while not stop_event.is_set():
+        try:
+            # additional_headers 는 websockets>=12 인자명. 미지원 버전 폴백.
+            try:
+                connector = websockets.connect(
+                    url,
+                    additional_headers=headers,
+                    ping_interval=30,
+                    ping_timeout=10,
+                    close_timeout=5,
+                )
+            except TypeError:
+                connector = websockets.connect(
+                    url,
+                    extra_headers=headers,  # type: ignore[arg-type]
+                    ping_interval=30,
+                    ping_timeout=10,
+                    close_timeout=5,
+                )
+
+            async with connector as ws:
+                logger.info("WebSocket 연결 성공: %s", url.split("?")[0])
+                consecutive_failures = 0  # 성공 → 카운터 리셋
+
+                while not stop_event.is_set():
+                    try:
+                        # stop_event 와 동시 대기 (asyncio.wait_for 로 cancel 가능)
+                        message = await asyncio.wait_for(ws.recv(), timeout=60)
+                    except asyncio.TimeoutError:
+                        # 메시지 없어도 ping/pong 으로 keepalive 됨 — 계속 대기
+                        continue
+                    except ConnectionClosed:
+                        raise
+
+                    try:
+                        import json as _json
+                        data = _json.loads(message)
+                    except Exception:
+                        logger.debug("비-JSON 메시지 무시")
+                        continue
+
+                    msg_type = data.get("type", "")
+                    if msg_type not in ("round_open", "round_announced"):
+                        # ping/welcome 등 무관한 메시지
+                        logger.debug("WS 메시지 type=%s 무시", msg_type)
+                        continue
+
+                    # 비활성 시간대면 스킵
+                    if not is_active_now(profile):
+                        logger.debug("비활성 시간대 — round_open 무시")
+                        continue
+
+                    payload = data.get("round") or data
+                    try:
+                        r = RoundMeta.from_dict(payload)
+                    except Exception as exc:
+                        logger.warning("WS 라운드 파싱 실패: %s", exc)
+                        continue
+
+                    try:
+                        await _evaluate_and_dispatch(
+                            r, profile, on_eligible_round,
+                            get_vram_fn, get_load_fn, get_tier_fn, gpu_watt,
+                        )
+                    except Exception as exc:
+                        logger.exception("WS 라운드 디스패치 오류: %s", exc)
+
+            # async with 정상 종료 → stop_event 일 가능성
+            if stop_event.is_set():
+                return True
+
+        except Exception as e:
+            consecutive_failures += 1
+            if consecutive_failures >= max_failures:
+                logger.warning(
+                    "WS 연결 %d회 연속 실패 (마지막: %s) → fallback",
+                    consecutive_failures, e,
+                )
+                return False
+            wait = backoff_schedule[
+                min(consecutive_failures - 1, len(backoff_schedule) - 1)
+            ]
+            logger.warning(
+                "WS 오류 (시도 %d/%d): %s — %ds 후 재연결",
+                consecutive_failures, max_failures, e, wait,
+            )
+            await _wait_or_stop(stop_event, wait)
+
+    return True
 
 
 async def subscribe_websocket(
@@ -449,10 +673,9 @@ async def subscribe_websocket(
     on_round_announced: Callable[[RoundMeta], Awaitable[None] | None],
     stop_event: asyncio.Event | None = None,
 ) -> None:
-    """WebSocket 기반 라운드 공지 구독 (저지연 대안).
+    """[Deprecated] 단순 WS 구독 — 호환성 유지용.
 
-    메시지 포맷: {"type": "round_announced", "round": {...}}
-    httpx 또는 websockets 패키지 필요.
+    신규 코드는 ``auto_participation_loop(prefer_websocket=True)`` 사용 권장.
     """
     stop_event = stop_event or asyncio.Event()
     try:
@@ -461,13 +684,27 @@ async def subscribe_websocket(
         logger.warning("websockets 미설치 — WebSocket 구독 스킵, 폴링 사용 권장")
         return
 
-    url = f"{master_ws_url.rstrip('/')}/api/grid/ws/rounds?agent_id={agent_id}"
+    ws_base = _http_to_ws(master_ws_url)
+    url = (
+        f"{ws_base}/api/grid/rounds/ws"
+        f"?agent_id={agent_id}&token={api_key}"
+    )
     headers = [("Authorization", f"Bearer {api_key}")]
 
     while not stop_event.is_set():
         try:
-            async with websockets.connect(url, additional_headers=headers) as ws:
-                logger.info("WebSocket 연결 성공: %s", url)
+            try:
+                connector = websockets.connect(
+                    url, additional_headers=headers,
+                    ping_interval=30, ping_timeout=10,
+                )
+            except TypeError:
+                connector = websockets.connect(
+                    url, extra_headers=headers,  # type: ignore[arg-type]
+                    ping_interval=30, ping_timeout=10,
+                )
+            async with connector as ws:
+                logger.info("WebSocket 연결 성공: %s", url.split("?")[0])
                 async for message in ws:
                     if stop_event.is_set():
                         break
@@ -476,10 +713,11 @@ async def subscribe_websocket(
                         data = _json.loads(message)
                     except Exception:
                         continue
-                    if data.get("type") != "round_announced":
+                    if data.get("type") not in ("round_open", "round_announced"):
                         continue
+                    payload = data.get("round") or data
                     try:
-                        r = RoundMeta.from_dict(data.get("round", {}))
+                        r = RoundMeta.from_dict(payload)
                     except Exception:
                         continue
                     result = on_round_announced(r)

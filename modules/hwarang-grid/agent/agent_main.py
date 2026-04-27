@@ -317,6 +317,18 @@ class HwarangAgent:
             _asyncio.set_event_loop(loop)
             try:
                 loop.create_task(_shutdown_watcher())
+                # 환경변수로 WS/폴링 토글 + 폴링 간격 오버라이드
+                _prefer_ws = (
+                    os.environ.get("HWARANG_PREFER_WEBSOCKET", "true").lower()
+                    not in ("0", "false", "no")
+                )
+                try:
+                    _poll_interval = int(
+                        os.environ.get("HWARANG_POLL_INTERVAL", "60") or 60
+                    )
+                except Exception:
+                    _poll_interval = 60
+
                 loop.run_until_complete(
                     round_subscription.auto_participation_loop(
                         master_url=self.master_url,
@@ -325,6 +337,8 @@ class HwarangAgent:
                         profile=self.domain_profile,
                         on_eligible_round=_on_eligible,
                         stop_event=stop_event,
+                        poll_interval_seconds=_poll_interval,
+                        prefer_websocket=_prefer_ws,
                     )
                 )
             finally:
@@ -512,6 +526,12 @@ class HwarangAgent:
     # 마스터 통신
     # ════════════════════════════════════════════════════════════
 
+    def _auth_headers(self) -> dict:
+        """공통 Authorization 헤더 (Bearer 토큰)."""
+        if not self.api_key:
+            return {}
+        return {"Authorization": f"Bearer {self.api_key}"}
+
     def _register_with_master(self):
         """마스터 서버에 등록."""
         logger.info(f"마스터 등록: {self.master_url}")
@@ -524,13 +544,14 @@ class HwarangAgent:
         try:
             gpu_info = self._detect_gpu()
             response = http.post(
-                f"{self.master_url}/hfl/register",
+                f"{self.master_url}/api/grid/register",
                 data={
                     "agent_id": self.agent_id,
                     "gpu_name": gpu_info.get("name", "unknown"),
                     "vram_gb": gpu_info.get("vram_gb", 0),
                     "tier": self.config.tier or "lite",
                 },
+                headers=self._auth_headers(),
             )
 
             if response.status_code == 200:
@@ -567,11 +588,12 @@ class HwarangAgent:
 
         try:
             response = http.post(
-                f"{self.master_url}/hfl/heartbeat",
+                f"{self.master_url}/api/grid/heartbeat",
                 data={
                     "agent_id": self.agent_id,
                     "metrics": json.dumps(status),
                 },
+                headers=self._auth_headers(),
             )
 
             if response.status_code == 200:
@@ -675,8 +697,9 @@ class HwarangAgent:
 
                 try:
                     response = http.get(
-                        f"{self.master_url}/hfl/round/task/{self.agent_id}",
+                        f"{self.master_url}/api/grid/rounds/task/{self.agent_id}",
                         timeout=10,
+                        headers=self._auth_headers(),
                     )
 
                     if response.status_code == 200:

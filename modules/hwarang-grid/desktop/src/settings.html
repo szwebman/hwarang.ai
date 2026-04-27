@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>화랑 Grid 설정</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg: #0f172a;
+      --bg2: #1e293b;
+      --bg3: #334155;
+      --bg-hover: #475569;
+      --text: #f1f5f9;
+      --text2: #94a3b8;
+      --text3: #64748b;
+      --blue: #3b82f6;
+      --blue-hover: #2563eb;
+      --green: #10b981;
+      --yellow: #f59e0b;
+      --red: #ef4444;
+      --red-hover: #dc2626;
+      --purple: #8b5cf6;
+      --border: #334155;
+    }
+
+    html, body {
+      height: 100%;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Pretendard',
+                   'Noto Sans KR', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 13px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    body {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .settings-container {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px 24px 16px 24px;
+    }
+
+    h1 {
+      font-size: 18px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+
+    .subtitle {
+      color: var(--text2);
+      font-size: 12px;
+      margin-bottom: 18px;
+    }
+
+    section {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 16px;
+      margin-bottom: 12px;
+    }
+
+    section h2 {
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 10px;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 0;
+      gap: 8px;
+    }
+
+    .row + .row {
+      border-top: 1px dashed var(--bg3);
+    }
+
+    .row > span:first-child {
+      color: var(--text2);
+    }
+
+    .row .value {
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 0;
+      gap: 10px;
+      cursor: pointer;
+      color: var(--text2);
+    }
+
+    label + label {
+      border-top: 1px dashed var(--bg3);
+    }
+
+    label input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
+      accent-color: var(--blue);
+      cursor: pointer;
+    }
+
+    label input[type="number"] {
+      width: 80px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      text-align: right;
+    }
+
+    label input[type="number"]:focus {
+      outline: none;
+      border-color: var(--blue);
+    }
+
+    .presets {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 6px;
+    }
+
+    .presets button {
+      background: var(--bg3);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 9px 10px;
+      font-size: 12px;
+      cursor: pointer;
+      text-align: left;
+      transition: all 0.15s;
+    }
+
+    .presets button:hover {
+      background: var(--bg-hover);
+      border-color: var(--blue);
+    }
+
+    .presets button.active {
+      background: var(--blue);
+      border-color: var(--blue);
+      color: white;
+    }
+
+    button {
+      background: var(--bg3);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      padding: 6px 12px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    button:hover {
+      background: var(--bg-hover);
+    }
+
+    button.primary {
+      background: var(--blue);
+      border-color: var(--blue);
+    }
+    button.primary:hover { background: var(--blue-hover); }
+
+    button.danger {
+      background: transparent;
+      color: var(--red);
+      border-color: var(--red);
+    }
+    button.danger:hover {
+      background: var(--red);
+      color: white;
+    }
+
+    .pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 500;
+    }
+    .pill.ok    { background: rgba(16,185,129,0.18); color: var(--green); }
+    .pill.warn  { background: rgba(245,158,11,0.18); color: var(--yellow); }
+    .pill.fail  { background: rgba(239,68,68,0.18);  color: var(--red); }
+    .pill.tier-bronze   { background: rgba(180,83,9,0.20);   color: #fbbf24; }
+    .pill.tier-silver   { background: rgba(148,163,184,0.20); color: #cbd5e1; }
+    .pill.tier-gold     { background: rgba(234,179,8,0.20);   color: #fde047; }
+    .pill.tier-platinum { background: rgba(139,92,246,0.20);  color: var(--purple); }
+
+    .advanced-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 6px;
+    }
+
+    .footer {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      padding: 12px 24px;
+      background: var(--bg2);
+      border-top: 1px solid var(--border);
+    }
+
+    .toast {
+      position: fixed;
+      bottom: 70px;
+      left: 50%;
+      transform: translateX(-50%) translateY(100px);
+      background: var(--green);
+      color: white;
+      padding: 8px 16px;
+      border-radius: 6px;
+      font-size: 12px;
+      opacity: 0;
+      transition: all 0.25s;
+      pointer-events: none;
+      z-index: 100;
+    }
+    .toast.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+    .toast.error { background: var(--red); }
+
+    /* 스크롤바 */
+    ::-webkit-scrollbar { width: 8px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb {
+      background: var(--bg3);
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover { background: var(--bg-hover); }
+  </style>
+</head>
+<body>
+  <div class="settings-container">
+    <h1>화랑 Grid 에이전트 설정</h1>
+    <div class="subtitle">변경 후 <b>저장</b>을 눌러야 적용됩니다.</div>
+
+    <section id="account">
+      <h2>계정</h2>
+      <div class="row">
+        <span>이메일</span>
+        <span>
+          <span id="email" class="value">로그인 안 됨</span>
+          <button id="loginBtn" style="margin-left: 8px;">로그인</button>
+          <button id="logoutBtn" style="margin-left: 4px; display: none;">로그아웃</button>
+        </span>
+      </div>
+      <div class="row">
+        <span>KYC 상태</span>
+        <span>
+          <span id="kycStatus" class="pill fail">미인증</span>
+          <button id="kycBtn" style="margin-left: 8px;">KYC 시작</button>
+        </span>
+      </div>
+      <div class="row">
+        <span>등급</span>
+        <span id="tier" class="pill tier-bronze">BRONZE</span>
+      </div>
+      <div class="row">
+        <span>전문 자격</span>
+        <span id="credentials" class="value">없음</span>
+      </div>
+    </section>
+
+    <section id="domain">
+      <h2>전문 도메인</h2>
+      <div class="presets" id="presets">
+        <button data-preset="general">범용 에이전트</button>
+        <button data-preset="law_specialist">⚖️ 법률 전문</button>
+        <button data-preset="medical_specialist">🏥 의료 전문</button>
+        <button data-preset="tax_specialist">💼 세무 전문</button>
+        <button data-preset="legal_and_tax">⚖️💼 법률+세무</button>
+        <button data-preset="night_only">🌙 야간만</button>
+      </div>
+    </section>
+
+    <section id="behavior">
+      <h2>실행 설정</h2>
+      <label>
+        <span>시스템 시작 시 자동 실행</span>
+        <input type="checkbox" id="autostart" />
+      </label>
+      <label>
+        <span>적합한 라운드 자동 참여</span>
+        <input type="checkbox" id="autoParticipate" checked />
+      </label>
+      <label>
+        <span>야간 모드 (22시 ~ 07시만 실행)</span>
+        <input type="checkbox" id="nightOnly" />
+      </label>
+      <label>
+        <span>최대 동시 실행 라운드</span>
+        <input type="number" id="maxConcurrent" min="1" max="3" value="1" />
+      </label>
+    </section>
+
+    <section id="safety">
+      <h2>안전 설정</h2>
+      <label>
+        <span>최대 VRAM (GB)</span>
+        <input type="number" id="maxVram" min="4" max="80" value="24" />
+      </label>
+      <label>
+        <span>최대 GPU 온도 (°C)</span>
+        <input type="number" id="maxTemp" min="60" max="95" value="85" />
+      </label>
+      <label>
+        <span>최대 라운드 시간 (분)</span>
+        <input type="number" id="maxDuration" min="30" max="240" value="120" />
+      </label>
+      <label>
+        <span>신뢰 마스터(화이트리스트)만 참여</span>
+        <input type="checkbox" id="requireWhitelist" checked />
+      </label>
+    </section>
+
+    <section id="notifications">
+      <h2>알림</h2>
+      <label>
+        <span>보상 수령</span>
+        <input type="checkbox" id="notifyReward" checked />
+      </label>
+      <label>
+        <span>라운드 완료</span>
+        <input type="checkbox" id="notifyComplete" checked />
+      </label>
+      <label>
+        <span>오류 발생</span>
+        <input type="checkbox" id="notifyError" checked />
+      </label>
+      <label>
+        <span>GPU 과열 경고</span>
+        <input type="checkbox" id="notifyOverheat" checked />
+      </label>
+    </section>
+
+    <section id="advanced">
+      <h2>고급</h2>
+      <div class="advanced-grid">
+        <button id="openLogsBtn">📁 로그 폴더 열기</button>
+        <button id="openProfileBtn">📝 프로필 YAML 열기</button>
+        <button id="checkUpdateBtn">🔄 업데이트 확인</button>
+        <button id="resetBtn" class="danger">⚠️ 전체 초기화</button>
+      </div>
+      <div class="row" style="margin-top: 10px;">
+        <span>버전</span>
+        <span id="appVersion" class="value">0.1.0</span>
+      </div>
+    </section>
+  </div>
+
+  <div class="footer">
+    <button id="cancelBtn">취소</button>
+    <button id="saveBtn" class="primary">저장</button>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script>
+    // Tauri v1 API
+    const invoke = (window.__TAURI__ && window.__TAURI__.invoke)
+      ? window.__TAURI__.invoke
+      : async () => { console.warn("Tauri 환경 아님"); return null; };
+
+    let currentPreset = "general";
+
+    function showToast(msg, isError = false) {
+      const t = document.getElementById("toast");
+      t.textContent = msg;
+      t.classList.toggle("error", !!isError);
+      t.classList.add("show");
+      setTimeout(() => t.classList.remove("show"), 2000);
+    }
+
+    function setPreset(name) {
+      currentPreset = name;
+      document.querySelectorAll("#presets button").forEach((b) => {
+        b.classList.toggle("active", b.dataset.preset === name);
+      });
+    }
+
+    async function loadSettings() {
+      try {
+        const account = await invoke("get_account_status");
+        if (account) {
+          if (account.email) {
+            document.getElementById("email").textContent = account.email;
+            document.getElementById("loginBtn").style.display = "none";
+            document.getElementById("logoutBtn").style.display = "";
+          }
+          const kycEl = document.getElementById("kycStatus");
+          if (account.kyc_verified) {
+            kycEl.textContent = "인증됨";
+            kycEl.className = "pill ok";
+            document.getElementById("kycBtn").style.display = "none";
+          } else {
+            kycEl.textContent = "미인증";
+            kycEl.className = "pill fail";
+          }
+          const tier = (account.tier || "BRONZE").toUpperCase();
+          const tierEl = document.getElementById("tier");
+          tierEl.textContent = tier;
+          tierEl.className = "pill tier-" + tier.toLowerCase();
+          if (Array.isArray(account.expert_credentials) && account.expert_credentials.length) {
+            document.getElementById("credentials").textContent =
+              account.expert_credentials.join(", ");
+          }
+        }
+      } catch (e) { console.warn("계정 정보 로드 실패:", e); }
+
+      try {
+        const profile = await invoke("get_profile");
+        if (profile) {
+          if (profile.preset) setPreset(profile.preset);
+          if (profile.max_concurrent_rounds != null)
+            document.getElementById("maxConcurrent").value = profile.max_concurrent_rounds;
+          if (profile.auto_participate != null)
+            document.getElementById("autoParticipate").checked = !!profile.auto_participate;
+          if (profile.safety) {
+            if (profile.safety.max_vram_gb != null)
+              document.getElementById("maxVram").value = profile.safety.max_vram_gb;
+            if (profile.safety.max_duration_minutes != null)
+              document.getElementById("maxDuration").value = profile.safety.max_duration_minutes;
+          }
+        }
+      } catch (e) { console.warn("프로필 로드 실패:", e); }
+
+      try {
+        const prefs = await invoke("get_desktop_prefs");
+        if (prefs) {
+          document.getElementById("autostart").checked        = !!prefs.autostart;
+          document.getElementById("nightOnly").checked        = !!prefs.night_only;
+          document.getElementById("requireWhitelist").checked = prefs.require_whitelist !== false;
+          document.getElementById("notifyReward").checked     = prefs.notify_reward !== false;
+          document.getElementById("notifyComplete").checked   = prefs.notify_complete !== false;
+          document.getElementById("notifyError").checked      = prefs.notify_error !== false;
+          document.getElementById("notifyOverheat").checked   = prefs.notify_overheat !== false;
+          if (prefs.max_temp_c != null)
+            document.getElementById("maxTemp").value = prefs.max_temp_c;
+          if (prefs.app_version)
+            document.getElementById("appVersion").textContent = prefs.app_version;
+        }
+      } catch (e) { console.warn("환경설정 로드 실패:", e); }
+    }
+
+    function collectFormData() {
+      return {
+        profile: {
+          preset:                 currentPreset,
+          auto_participate:       document.getElementById("autoParticipate").checked,
+          max_concurrent_rounds:  parseInt(document.getElementById("maxConcurrent").value, 10) || 1,
+          safety: {
+            max_vram_gb:          parseInt(document.getElementById("maxVram").value, 10) || 24,
+            max_duration_minutes: parseInt(document.getElementById("maxDuration").value, 10) || 120,
+          },
+        },
+        prefs: {
+          autostart:         document.getElementById("autostart").checked,
+          night_only:        document.getElementById("nightOnly").checked,
+          require_whitelist: document.getElementById("requireWhitelist").checked,
+          max_temp_c:        parseInt(document.getElementById("maxTemp").value, 10) || 85,
+          notify_reward:     document.getElementById("notifyReward").checked,
+          notify_complete:   document.getElementById("notifyComplete").checked,
+          notify_error:      document.getElementById("notifyError").checked,
+          notify_overheat:   document.getElementById("notifyOverheat").checked,
+        },
+      };
+    }
+
+    async function saveSettings() {
+      try {
+        await invoke("save_settings", { settings: collectFormData() });
+        showToast("저장되었습니다");
+        setTimeout(() => {
+          if (window.__TAURI__) window.__TAURI__.window.getCurrent().close();
+          else window.close();
+        }, 600);
+      } catch (e) {
+        showToast("저장 실패: " + e, true);
+      }
+    }
+
+    // 이벤트 바인딩
+    document.querySelectorAll("#presets button").forEach((b) => {
+      b.addEventListener("click", () => setPreset(b.dataset.preset));
+    });
+
+    document.getElementById("saveBtn").onclick   = saveSettings;
+    document.getElementById("cancelBtn").onclick = () => {
+      if (window.__TAURI__) window.__TAURI__.window.getCurrent().close();
+      else window.close();
+    };
+
+    document.getElementById("loginBtn").onclick  = async () => {
+      try { await invoke("open_login_flow"); showToast("브라우저에서 로그인하세요"); }
+      catch (e) { showToast("로그인 실패: " + e, true); }
+    };
+    document.getElementById("logoutBtn").onclick = async () => {
+      if (!confirm("정말 로그아웃 하시겠습니까?")) return;
+      try {
+        await invoke("clear_account_status");
+        await loadSettings();
+        showToast("로그아웃 되었습니다");
+      } catch (e) { showToast("로그아웃 실패: " + e, true); }
+    };
+    document.getElementById("kycBtn").onclick    = async () => {
+      try { await invoke("open_kyc_flow"); showToast("브라우저에서 KYC를 진행하세요"); }
+      catch (e) { showToast("KYC 시작 실패: " + e, true); }
+    };
+
+    document.getElementById("openLogsBtn").onclick    = () => invoke("open_logs_folder").catch((e) => showToast(e, true));
+    document.getElementById("openProfileBtn").onclick = () => invoke("open_profile_file").catch((e) => showToast(e, true));
+    document.getElementById("checkUpdateBtn").onclick = async () => {
+      try {
+        const r = await invoke("check_update_manual");
+        if (r && r.available) showToast("새 버전 " + r.version + " 사용 가능");
+        else showToast("최신 버전입니다");
+      } catch (e) { showToast("업데이트 확인 실패: " + e, true); }
+    };
+    document.getElementById("resetBtn").onclick = async () => {
+      if (!confirm("모든 설정과 계정 정보를 초기화합니다. 계속하시겠습니까?")) return;
+      try { await invoke("reset_all"); await loadSettings(); showToast("초기화 완료"); }
+      catch (e) { showToast("초기화 실패: " + e, true); }
+    };
+
+    loadSettings();
+  </script>
+</body>
+</html>

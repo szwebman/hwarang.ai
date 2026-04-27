@@ -3615,3 +3615,2710 @@ _ = (
     _er_query_factcheck_snu,
     _mm_detect_deepfake_heuristic,
 )
+
+
+# ===========================================================================
+# v3.2 — 8가지 추가 개선
+# ① 실시간 철회 알림   ② 적대적 테스트   ③ 국가별 출처 위계   ④ 논리 무결성
+# ⑤ 사용자 편향 캘리브   ⑥ 타임머신 스냅샷   ⑦ 연합 팩트체크   ⑧ 불확실성 정량화
+# 기존 v1/v2/v3/v3.1 섹션은 수정하지 않고 순수 append 만 수행.
+# ===========================================================================
+from hwarang_api.knowledge.realtime_retraction_notify import (  # noqa: E402
+    create_notifications_for_retraction as _rrn_create_notifications_for_retraction,
+    list_notifications as _rrn_list_notifications,
+    acknowledge_notification as _rrn_acknowledge_notification,
+    acknowledge_all as _rrn_acknowledge_all,
+    dispatch_pending as _rrn_dispatch_pending,
+    unread_count as _rrn_unread_count,
+    notification_stats as _rrn_notification_stats,
+    on_retraction_recorded as _rrn_on_retraction_recorded,
+)
+from hwarang_api.knowledge.adversarial_testing import (  # noqa: E402
+    DEFAULT_TEST_CASES as _adv_DEFAULT_TEST_CASES,
+    seed_test_cases as _adv_seed_test_cases,
+    list_test_cases as _adv_list_test_cases,
+    run_test as _adv_run_test,
+    run_all_active as _adv_run_all_active,
+    add_test_case as _adv_add_test_case,
+    deactivate_test_case as _adv_deactivate_test_case,
+    run_history as _adv_run_history,
+    detect_regression as _adv_detect_regression,
+)
+from hwarang_api.knowledge.logic_integrity import (  # noqa: E402
+    detect_syllogism_violation as _log_detect_syllogism_violation,
+    detect_transitivity_break as _log_detect_transitivity_break,
+    detect_quantifier_mismatch as _log_detect_quantifier_mismatch,
+    detect_direct_contradiction as _log_detect_direct_contradiction,
+    run_consistency_scan as _log_run_consistency_scan,
+    list_inconsistencies as _log_list_inconsistencies,
+    resolve_inconsistency as _log_resolve_inconsistency,
+    suggest_resolution as _log_suggest_resolution,
+    logical_entailment_check as _log_logical_entailment_check,
+)
+from hwarang_api.knowledge.country_hierarchy import (  # noqa: E402
+    COUNTRY_HIERARCHY as _cty_COUNTRY_HIERARCHY,
+    COUNTRY_DISPLAY_NAMES as _cty_COUNTRY_DISPLAY_NAMES,
+    seed_country_hierarchy as _cty_seed_country_hierarchy,
+    detect_country_from_source as _cty_detect_country_from_source,
+    lookup_authority_by_country as _cty_lookup_authority_by_country,
+    apply_country_to_fact as _cty_apply_country_to_fact,
+    bulk_apply_country_hierarchy as _cty_bulk_apply_country_hierarchy,
+    compare_cross_country_authority as _cty_compare_cross_country_authority,
+    list_rules_by_country as _cty_list_rules_by_country,
+)
+from hwarang_api.knowledge.user_bias_calibration import (  # noqa: E402
+    get_or_create_calibration as _ubc_get_or_create_calibration,
+    update_calibration as _ubc_update_calibration,
+    filter_facts_for_user as _ubc_filter_facts_for_user,
+    compute_user_bias_profile_from_history as _ubc_compute_user_bias_profile_from_history,
+    warn_if_filter_bubble as _ubc_warn_if_filter_bubble,
+    suggest_opposing_view as _ubc_suggest_opposing_view,
+    enforce_guardrail_globally as _ubc_enforce_guardrail_globally,
+    list_user_calibrations as _ubc_list_user_calibrations,
+)
+from hwarang_api.knowledge.time_machine import (  # noqa: E402
+    create_snapshot as _tm_create_snapshot,
+    list_snapshots as _tm_list_snapshots,
+    get_snapshot as _tm_get_snapshot,
+    restore_snapshot_to_readonly as _tm_restore_snapshot_to_readonly,
+    compare_snapshots as _tm_compare_snapshots,
+    rollback_facts_to_snapshot as _tm_rollback_facts_to_snapshot,
+    cleanup_expired_snapshots as _tm_cleanup_expired_snapshots,
+    diff_timeline_view as _tm_diff_timeline_view,
+    what_if_rollback as _tm_what_if_rollback,
+)
+from hwarang_api.knowledge.federated_fact_check import (  # noqa: E402
+    register_instance as _fed_register_instance,
+    list_instances as _fed_list_instances,
+    handshake as _fed_handshake,
+    query_federated_instance as _fed_query_federated_instance,
+    cross_verify_fact as _fed_cross_verify_fact,
+    serve_federated_query as _fed_serve_federated_query,
+    aggregate_consensus_across_federation as _fed_aggregate_consensus_across_federation,
+    detect_divergent_instances as _fed_detect_divergent_instances,
+)
+from hwarang_api.knowledge.uncertainty import (  # noqa: E402
+    compute_confidence_interval as _unc_compute_confidence_interval,
+    apply_uncertainty_to_fact as _unc_apply_uncertainty_to_fact,
+    batch_apply_uncertainty as _unc_batch_apply_uncertainty,
+    calibration_check as _unc_calibration_check,
+)
+
+
+# ---------------------------------------------------------------------------
+# ① 실시간 철회 알림 — Retraction Notifications
+# ---------------------------------------------------------------------------
+@router.get(
+    "/notifications",
+    summary="현재 사용자 철회 알림 목록",
+    description="API 키로 식별된 사용자의 RetractionNotification 을 최신순으로 반환.",
+)
+async def api_rrn_list(
+    unacknowledged_only: bool = Query(True),
+    user_key: str = Depends(require_user),
+) -> dict:
+    try:
+        rows = await _rrn_list_notifications(
+            user_key, unacknowledged_only=unacknowledged_only
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("list_notifications failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"user_id": user_key, "count": len(rows), "notifications": rows}
+
+
+@router.post(
+    "/notifications/{notification_id}/ack",
+    summary="단일 알림 확인",
+    description="알림 소유자가 맞으면 acknowledged=True 로 기록.",
+)
+async def api_rrn_ack(
+    notification_id: str, user_key: str = Depends(require_user)
+) -> dict:
+    try:
+        await _rrn_acknowledge_notification(notification_id, user_key)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("acknowledge_notification failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"id": notification_id, "acknowledged": True}
+
+
+@router.post(
+    "/notifications/ack-all",
+    summary="전체 알림 일괄 확인",
+    description="사용자 본인의 미확인 알림 전부를 일괄 acknowledged 처리.",
+)
+async def api_rrn_ack_all(user_key: str = Depends(require_user)) -> dict:
+    try:
+        count = await _rrn_acknowledge_all(user_key)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("acknowledge_all failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"user_id": user_key, "count": count}
+
+
+@router.get(
+    "/notifications/unread-count",
+    summary="사용자 미확인 알림 수",
+    description="배지/뱃지 카운트용 정수 반환.",
+)
+async def api_rrn_unread_count(user_key: str = Depends(require_user)) -> dict:
+    try:
+        n = await _rrn_unread_count(user_key)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"user_id": user_key, "unread": n}
+
+
+class NotificationDispatchBody(BaseModel):
+    max_batch: int = 100
+
+
+@router.post(
+    "/notifications/dispatch",
+    summary="대기 중 알림 발송 — admin",
+    description="notified=False 인 알림 배치에 대해 push 를 전송. 결과 통계 반환.",
+)
+async def api_rrn_dispatch(
+    body: NotificationDispatchBody | None = None,
+    _: str = Depends(require_admin),
+) -> dict:
+    max_batch = (body.max_batch if body else 100) if body else 100
+    if max_batch < 1 or max_batch > 5000:
+        raise HTTPException(status_code=400, detail="max_batch must be 1..5000")
+    try:
+        return await _rrn_dispatch_pending(max_batch=max_batch)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("dispatch_pending failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get(
+    "/notifications/stats",
+    summary="알림 통계 — admin",
+    description="전체/확인/미확인/최근 7일 알림 카운트 반환.",
+)
+async def api_rrn_stats(_: str = Depends(require_admin)) -> dict:
+    try:
+        return await _rrn_notification_stats()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+class NotificationRetractionTriggerBody(BaseModel):
+    retraction_event_id: str
+
+
+@router.post(
+    "/notifications/trigger-for-retraction",
+    summary="철회 이벤트 기반 알림 생성 — admin",
+    description="RetractionEvent id 를 받아 on_retraction_recorded 파이프라인 실행.",
+)
+async def api_rrn_trigger(
+    body: NotificationRetractionTriggerBody,
+    _: str = Depends(require_admin),
+) -> dict:
+    if not body.retraction_event_id.strip():
+        raise HTTPException(status_code=400, detail="retraction_event_id empty")
+    try:
+        return await _rrn_on_retraction_recorded(body.retraction_event_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("on_retraction_recorded failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# ② 적대적 테스트 — Adversarial Testing
+# ---------------------------------------------------------------------------
+@router.post(
+    "/adversarial/seed",
+    summary="기본 테스트 케이스 시드 — admin",
+    description="DEFAULT_TEST_CASES 를 AdversarialTestCase 테이블에 upsert. 생성 건수 반환.",
+)
+async def api_adv_seed(_: str = Depends(require_admin)) -> dict:
+    try:
+        inserted = await _adv_seed_test_cases()
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("seed_test_cases failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"inserted": inserted, "default_cases": len(_adv_DEFAULT_TEST_CASES)}
+
+
+@router.get(
+    "/adversarial/cases",
+    summary="테스트 케이스 목록 — admin",
+    description="카테고리 필터 + 활성 전용 옵션 제공.",
+)
+async def api_adv_list_cases(
+    category: str | None = Query(None),
+    active_only: bool = Query(True),
+    _: str = Depends(require_admin),
+) -> dict:
+    try:
+        rows = await _adv_list_test_cases(category=category, active_only=active_only)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"count": len(rows), "cases": rows}
+
+
+class AdversarialAddCaseBody(BaseModel):
+    name: str
+    category: str
+    injection: dict
+    expected_detection: str
+    description: str | None = None
+
+
+@router.post(
+    "/adversarial/cases",
+    summary="신규 테스트 케이스 추가 — admin",
+    description="name/category/injection/expected_detection 를 받아 레코드 생성.",
+)
+async def api_adv_add_case(
+    body: AdversarialAddCaseBody, _: str = Depends(require_admin)
+) -> dict:
+    if not body.name.strip() or not body.category.strip():
+        raise HTTPException(status_code=400, detail="name/category required")
+    try:
+        case_id = await _adv_add_test_case(
+            name=body.name,
+            category=body.category,
+            injection=body.injection,
+            expected_detection=body.expected_detection,
+            description=body.description,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("add_test_case failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"id": case_id, "name": body.name}
+
+
+class AdversarialRunBody(BaseModel):
+    cleanup: bool = True
+
+
+@router.post(
+    "/adversarial/cases/{test_case_id}/run",
+    summary="테스트 케이스 실행 — admin",
+    description="주입 → 감지 파이프 → 판정(passed/failed/inconclusive) 기록.",
+)
+async def api_adv_run(
+    test_case_id: str,
+    body: AdversarialRunBody | None = None,
+    _: str = Depends(require_admin),
+) -> dict:
+    cleanup = body.cleanup if body else True
+    try:
+        return await _adv_run_test(test_case_id, cleanup=cleanup)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("run_test failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post(
+    "/adversarial/cases/{test_case_id}/deactivate",
+    summary="테스트 케이스 비활성화 — admin",
+    description="active=False 로 전환해 실행 대상에서 제외.",
+)
+async def api_adv_deactivate(
+    test_case_id: str, _: str = Depends(require_admin)
+) -> dict:
+    try:
+        await _adv_deactivate_test_case(test_case_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"id": test_case_id, "active": False}
+
+
+@router.post(
+    "/adversarial/run-all",
+    summary="전체 활성 케이스 실행 — admin",
+    description="active=True 인 케이스 전부를 순차 실행하여 요약 반환.",
+)
+async def api_adv_run_all(
+    body: AdversarialRunBody | None = None,
+    _: str = Depends(require_admin),
+) -> dict:
+    cleanup = body.cleanup if body else True
+    try:
+        return await _adv_run_all_active(cleanup=cleanup)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("run_all_active failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get(
+    "/adversarial/cases/{test_case_id}/history",
+    summary="테스트 케이스 실행 이력 — admin",
+    description="최근 limit 개의 실행 결과 타임스탬프/판정/상세 반환.",
+)
+async def api_adv_history(
+    test_case_id: str,
+    limit: int = Query(10, ge=1, le=100),
+    _: str = Depends(require_admin),
+) -> dict:
+    try:
+        rows = await _adv_run_history(test_case_id, limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"test_case_id": test_case_id, "count": len(rows), "history": rows}
+
+
+@router.get(
+    "/adversarial/cases/{test_case_id}/regression",
+    summary="회귀 감지 — admin",
+    description="직전 성공이었다가 최근 실패했는지 여부와 판정 전환 시점 반환.",
+)
+async def api_adv_regression(
+    test_case_id: str, _: str = Depends(require_admin)
+) -> dict:
+    try:
+        return await _adv_detect_regression(test_case_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# ④ 논리 무결성 — Logic Integrity
+# ---------------------------------------------------------------------------
+class LogicPairBody(BaseModel):
+    fact_a_id: str
+    fact_b_id: str
+
+
+@router.post(
+    "/logic/direct-contradiction",
+    summary="두 사실 직접 모순 판정",
+    description="P vs ¬P 패턴을 contradiction.detect_contradiction 으로 검사.",
+)
+async def api_log_direct(body: LogicPairBody) -> dict:
+    if body.fact_a_id == body.fact_b_id:
+        raise HTTPException(status_code=400, detail="fact_a_id and fact_b_id must differ")
+    try:
+        res = await _log_detect_direct_contradiction(body.fact_a_id, body.fact_b_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("detect_direct_contradiction failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if res is None:
+        return {"violation": False}
+    return res
+
+
+class LogicTripleBody(BaseModel):
+    fact_a: str
+    fact_b: str
+    fact_c: str
+
+
+@router.post(
+    "/logic/syllogism",
+    summary="삼단논법 위반 판정",
+    description="세 사실(id)을 LLM 추론기에 넣어 P1 ∧ P2 ⇒ ¬P3 여부 검사.",
+)
+async def api_log_syllogism(body: LogicTripleBody) -> dict:
+    if len({body.fact_a, body.fact_b, body.fact_c}) < 3:
+        raise HTTPException(status_code=400, detail="fact_a/b/c must all differ")
+    try:
+        res = await _log_detect_syllogism_violation(
+            body.fact_a, body.fact_b, body.fact_c
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("detect_syllogism_violation failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if res is None:
+        return {"violation": False}
+    return res
+
+
+@router.post(
+    "/logic/quantifier",
+    summary="양화사 충돌 판정",
+    description="'모든 X는 Y' vs '어떤 X는 ¬Y' 등의 양화사 mismatch 탐지.",
+)
+async def api_log_quantifier(body: LogicPairBody) -> dict:
+    if body.fact_a_id == body.fact_b_id:
+        raise HTTPException(status_code=400, detail="fact_a_id and fact_b_id must differ")
+    try:
+        res = await _log_detect_quantifier_mismatch(body.fact_a_id, body.fact_b_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("detect_quantifier_mismatch failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if res is None:
+        return {"violation": False}
+    return res
+
+
+class LogicTransitivityBody(BaseModel):
+    entity: str
+    relation: str
+
+
+@router.post(
+    "/logic/transitivity",
+    summary="추이성 단절 탐지",
+    description="CAUSES/IMPLIES/SUPPORTS 등의 추이성 관계에서 A→B, B→C 인데 A↛C 인 경우를 flag.",
+)
+async def api_log_transitivity(body: LogicTransitivityBody) -> dict:
+    if not body.entity.strip() or not body.relation.strip():
+        raise HTTPException(status_code=400, detail="entity/relation required")
+    try:
+        rows = await _log_detect_transitivity_break(body.entity, body.relation)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("detect_transitivity_break failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"count": len(rows), "violations": rows}
+
+
+class LogicScanBody(BaseModel):
+    domain: str | None = None
+    limit: int = 100
+
+
+@router.post(
+    "/logic/scan",
+    summary="도메인 일관성 스캔 — admin",
+    description="entity 묶음별 pairwise 모순 검사 집계.",
+)
+async def api_log_scan(
+    body: LogicScanBody, _: str = Depends(require_admin)
+) -> dict:
+    if body.limit < 1 or body.limit > 2000:
+        raise HTTPException(status_code=400, detail="limit must be 1..2000")
+    try:
+        return await _log_run_consistency_scan(
+            domain=body.domain, limit=body.limit
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("run_consistency_scan failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get(
+    "/logic/inconsistencies",
+    summary="논리 불일치 목록",
+    description="LogicalInconsistency 테이블 조회. resolved/severity 필터 지원.",
+)
+async def api_log_list_inconsistencies(
+    resolved: bool | None = Query(None),
+    severity: str | None = Query(None),
+) -> dict:
+    try:
+        rows = await _log_list_inconsistencies(
+            resolved=resolved, severity=severity
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"count": len(rows), "inconsistencies": rows}
+
+
+class LogicResolveBody(BaseModel):
+    resolution: str
+
+
+@router.post(
+    "/logic/inconsistencies/{inconsistency_id}/resolve",
+    summary="논리 불일치 해결 기록",
+    description="resolution 텍스트와 호출자(user_key)를 기록하고 resolved=True.",
+)
+async def api_log_resolve(
+    inconsistency_id: str,
+    body: LogicResolveBody,
+    user_key: str = Depends(require_user),
+) -> dict:
+    if not body.resolution.strip():
+        raise HTTPException(status_code=400, detail="resolution empty")
+    try:
+        await _log_resolve_inconsistency(
+            inconsistency_id, user_key, body.resolution
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("resolve_inconsistency failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"id": inconsistency_id, "resolved": True}
+
+
+@router.get(
+    "/logic/inconsistencies/{inconsistency_id}/suggest-resolution",
+    summary="LLM 해결안 자동 제안",
+    description="관련 사실/타입/설명을 읽어 한국어 단문 제안 생성.",
+)
+async def api_log_suggest(inconsistency_id: str) -> dict:
+    try:
+        suggestion = await _log_suggest_resolution(inconsistency_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("suggest_resolution failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"id": inconsistency_id, "suggestion": suggestion}
+
+
+class LogicEntailmentBody(BaseModel):
+    premises: list[str]
+    conclusion: str
+
+
+@router.post(
+    "/logic/entailment",
+    summary="논리 함축 검사",
+    description="premises 목록이 conclusion 을 논리적으로 함축하는지 LLM 판정.",
+)
+async def api_log_entailment(body: LogicEntailmentBody) -> dict:
+    if not body.premises or not body.conclusion.strip():
+        raise HTTPException(status_code=400, detail="premises/conclusion required")
+    try:
+        return await _log_logical_entailment_check(body.premises, body.conclusion)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("logical_entailment_check failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# ③ 국가별 출처 위계 — Country Hierarchy
+# ---------------------------------------------------------------------------
+class CountrySeedBody(BaseModel):
+    countries: list[str] | None = None
+
+
+@router.post(
+    "/country/seed",
+    summary="국가별 위계 시드 — admin",
+    description="COUNTRY_HIERARCHY 중 지정 국가 (없으면 전체) 를 SourceHierarchyRule 로 upsert.",
+)
+async def api_cty_seed(
+    body: CountrySeedBody | None = None,
+    _: str = Depends(require_admin),
+) -> dict:
+    countries = body.countries if body else None
+    try:
+        inserted = await _cty_seed_country_hierarchy(countries=countries)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("seed_country_hierarchy failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"inserted": inserted, "countries": countries}
+
+
+@router.get(
+    "/country/countries",
+    summary="지원 국가 목록",
+    description="COUNTRY_DISPLAY_NAMES (코드→표시명) 반환.",
+)
+async def api_cty_countries() -> dict:
+    return {
+        "count": len(_cty_COUNTRY_DISPLAY_NAMES),
+        "countries": dict(_cty_COUNTRY_DISPLAY_NAMES),
+        "available_in_hierarchy": sorted(_cty_COUNTRY_HIERARCHY.keys()),
+    }
+
+
+@router.get(
+    "/country/rules/{country}",
+    summary="국가 위계 규칙",
+    description="지정 국가의 모든 규칙을 도메인별로 그룹핑. domain 필터 옵션.",
+)
+async def api_cty_rules(
+    country: str, domain: str | None = Query(None)
+) -> dict:
+    try:
+        rows = await _cty_list_rules_by_country(country)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if domain:
+        rows = [r for r in rows if r.get("domain") == domain]
+    grouped: dict[str, list[dict]] = {}
+    for r in rows:
+        grouped.setdefault(r.get("domain", "unknown"), []).append(r)
+    return {
+        "country": country,
+        "display_name": _cty_COUNTRY_DISPLAY_NAMES.get(country, country),
+        "count": len(rows),
+        "rules": rows,
+        "by_domain": grouped,
+    }
+
+
+@router.post(
+    "/country/apply/{fact_id}",
+    summary="단일 사실에 국가별 위계 적용",
+    description="sourceUrl/source 에서 국가 추정 → tier/authority 재계산.",
+)
+async def api_cty_apply(fact_id: str) -> dict:
+    try:
+        return await _cty_apply_country_to_fact(fact_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("apply_country_to_fact failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+class CountryBulkApplyBody(BaseModel):
+    country: str | None = None
+    limit: int = 500
+
+
+@router.post(
+    "/country/bulk-apply",
+    summary="팩트 일괄 국가 위계 적용 — admin",
+    description="country 필터 옵션. 한 번 호출당 limit 건 처리.",
+)
+async def api_cty_bulk_apply(
+    body: CountryBulkApplyBody, _: str = Depends(require_admin)
+) -> dict:
+    if body.limit < 1 or body.limit > 5000:
+        raise HTTPException(status_code=400, detail="limit must be 1..5000")
+    try:
+        return await _cty_bulk_apply_country_hierarchy(
+            country=body.country, limit=body.limit
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("bulk_apply_country_hierarchy failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+class CountryDetectBody(BaseModel):
+    source: str
+
+
+@router.post(
+    "/country/detect",
+    summary="출처 문자열로 국가 추정",
+    description="도메인 TLD/호스트 패턴 기반 추정. 미상 시 UNKNOWN.",
+)
+async def api_cty_detect(body: CountryDetectBody) -> dict:
+    if not body.source.strip():
+        raise HTTPException(status_code=400, detail="source empty")
+    code = _cty_detect_country_from_source(body.source)
+    return {
+        "source": body.source,
+        "country": code,
+        "display_name": _cty_COUNTRY_DISPLAY_NAMES.get(code, code),
+    }
+
+
+class CountryLookupBody(BaseModel):
+    source: str
+    domain: str
+    country: str | None = None
+
+
+@router.post(
+    "/country/lookup",
+    summary="국가 기준 (tier, authority) 조회",
+    description="country 생략 시 출처로부터 자동 추정.",
+)
+async def api_cty_lookup(body: CountryLookupBody) -> dict:
+    if not body.source.strip() or not body.domain.strip():
+        raise HTTPException(status_code=400, detail="source/domain required")
+    try:
+        tier, authority = await _cty_lookup_authority_by_country(
+            body.source, body.domain, country=body.country
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("lookup_authority_by_country failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    resolved = body.country or _cty_detect_country_from_source(body.source)
+    return {
+        "source": body.source,
+        "domain": body.domain,
+        "country": resolved,
+        "display_name": _cty_COUNTRY_DISPLAY_NAMES.get(resolved, resolved),
+        "tier": tier,
+        "authority": float(authority),
+    }
+
+
+class CountryCompareBody(BaseModel):
+    source_a: str
+    source_b: str
+    domain: str
+
+
+@router.post(
+    "/country/compare",
+    summary="두 출처의 국가별 권위 비교",
+    description="각 출처를 자국 위계에서 평가해 tier/authority 와 winner 반환.",
+)
+async def api_cty_compare(body: CountryCompareBody) -> dict:
+    if not body.source_a.strip() or not body.source_b.strip():
+        raise HTTPException(status_code=400, detail="source_a/source_b required")
+    try:
+        return await _cty_compare_cross_country_authority(
+            body.source_a, body.source_b, body.domain
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("compare_cross_country_authority failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# ⑤ 사용자 편향 캘리브레이션 — User Bias Calibration
+# ---------------------------------------------------------------------------
+@router.get(
+    "/user-bias/me",
+    summary="내 편향 캘리브레이션 조회",
+    description="없으면 기본값으로 생성 후 반환.",
+)
+async def api_ubc_me(user_key: str = Depends(require_user)) -> dict:
+    try:
+        return await _ubc_get_or_create_calibration(user_key)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("get_or_create_calibration failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+class UserBiasUpdateBody(BaseModel):
+    preferredSpectrum: str | None = None
+    toleranceRange: float | None = None
+    showOpposing: bool | None = None
+    guardrailMode: str | None = None
+    preferences: dict | None = None
+
+
+@router.post(
+    "/user-bias/me/update",
+    summary="내 편향 캘리브레이션 업데이트",
+    description="부분 업데이트. toleranceRange 는 [0, 0.6] 으로 클램프됨.",
+)
+async def api_ubc_update(
+    body: UserBiasUpdateBody, user_key: str = Depends(require_user)
+) -> dict:
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not updates:
+        raise HTTPException(status_code=400, detail="no fields to update")
+    # admin 헤더가 admin- 접두면 admin=True 로 간주
+    is_admin = user_key.startswith("admin-")
+    try:
+        return await _ubc_update_calibration(user_key, admin=is_admin, **updates)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("update_calibration failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get(
+    "/user-bias/me/profile-history",
+    summary="실제 성향 진단",
+    description="최근 recent_days 일 긍정 피드백으로 본 실제 dominant 라벨과 분포.",
+)
+async def api_ubc_profile_history(
+    recent_days: int = Query(30, ge=1, le=365),
+    user_key: str = Depends(require_user),
+) -> dict:
+    try:
+        return await _ubc_compute_user_bias_profile_from_history(
+            user_key, recent_days=recent_days
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get(
+    "/user-bias/me/filter-bubble-warning",
+    summary="필터 버블 경고 조회",
+    description="한쪽 라벨 비율이 70% 이상이면 경고 dict, 아니면 null.",
+)
+async def api_ubc_warn(
+    threshold: float = Query(0.7, ge=0.5, le=0.95),
+    user_key: str = Depends(require_user),
+) -> dict:
+    try:
+        res = await _ubc_warn_if_filter_bubble(user_key, threshold=threshold)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"warning": res}
+
+
+class UserBiasFilterBody(BaseModel):
+    fact_ids: list[str]
+
+
+@router.post(
+    "/user-bias/filter-facts",
+    summary="사용자 필터 기준으로 사실 리스트 필터",
+    description="가드레일 + 선호 범위 적용 결과 반환.",
+)
+async def api_ubc_filter(
+    body: UserBiasFilterBody, user_key: str = Depends(require_user)
+) -> dict:
+    if not body.fact_ids:
+        raise HTTPException(status_code=400, detail="fact_ids empty")
+    facts = await _load_facts_pydantic(body.fact_ids)
+    try:
+        return await _ubc_filter_facts_for_user(user_key, facts)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("filter_facts_for_user failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+class UserBiasOpposingBody(BaseModel):
+    entity: str
+    limit: int = 5
+
+
+@router.post(
+    "/user-bias/suggest-opposing",
+    summary="반대 관점 추천",
+    description="사용자 스펙트럼의 반대편 편향 라벨을 가진 사실을 entity 기준으로 제안.",
+)
+async def api_ubc_opposing(
+    body: UserBiasOpposingBody, user_key: str = Depends(require_user)
+) -> dict:
+    if not body.entity.strip():
+        raise HTTPException(status_code=400, detail="entity empty")
+    if body.limit < 1 or body.limit > 50:
+        raise HTTPException(status_code=400, detail="limit must be 1..50")
+    try:
+        items = await _ubc_suggest_opposing_view(
+            user_key, body.entity, limit=body.limit
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("suggest_opposing_view failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"entity": body.entity, "count": len(items), "items": items}
+
+
+class UserBiasGuardrailBody(BaseModel):
+    enabled: bool
+
+
+@router.post(
+    "/user-bias/enforce-guardrail",
+    summary="전역 가드레일 강제/해제 — admin",
+    description="enabled=True 시 모든 사용자의 guardrailMode=off 를 balanced 로 승격.",
+)
+async def api_ubc_enforce_guardrail(
+    body: UserBiasGuardrailBody, admin_key: str = Depends(require_admin)
+) -> dict:
+    try:
+        await _ubc_enforce_guardrail_globally(body.enabled, admin_key)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("enforce_guardrail_globally failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"enabled": body.enabled}
+
+
+@router.get(
+    "/user-bias/list",
+    summary="모든 사용자 캘리브레이션 — admin",
+    description="감사/통계용. 최대 1000건 반환.",
+)
+async def api_ubc_list(_: str = Depends(require_admin)) -> dict:
+    try:
+        rows = await _ubc_list_user_calibrations(admin_only=True)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"count": len(rows), "items": rows}
+
+
+# ---------------------------------------------------------------------------
+# ⑥ 타임머신 — Time Machine Snapshots
+# ---------------------------------------------------------------------------
+class SnapshotCreateBody(BaseModel):
+    name: str
+    scope: str = "full"  # full | domain | entity
+    scope_value: str | None = None
+
+
+@router.post(
+    "/snapshots/create",
+    summary="스냅샷 생성 — admin",
+    description="지정 scope 의 사실들을 압축 저장 + merkleRoot 계산.",
+)
+async def api_tm_create(
+    body: SnapshotCreateBody, admin_key: str = Depends(require_admin)
+) -> dict:
+    if not body.name.strip():
+        raise HTTPException(status_code=400, detail="name empty")
+    if body.scope not in {"full", "domain", "entity"}:
+        raise HTTPException(status_code=400, detail="invalid scope")
+    try:
+        sid = await _tm_create_snapshot(
+            name=body.name,
+            scope=body.scope,
+            scope_value=body.scope_value,
+            created_by=admin_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("create_snapshot failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"id": sid, "name": body.name, "scope": body.scope}
+
+
+@router.get(
+    "/snapshots",
+    summary="스냅샷 목록 — admin",
+    description="scope 필터 지원. snapshotAt desc 정렬, 최대 500건.",
+)
+async def api_tm_list(
+    scope: str | None = Query(None),
+    _: str = Depends(require_admin),
+) -> dict:
+    try:
+        rows = await _tm_list_snapshots(scope=scope)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"count": len(rows), "snapshots": rows}
+
+
+@router.get(
+    "/snapshots/{snapshot_id}",
+    summary="스냅샷 상세 — admin",
+    description="메타 + 파일 존재/merkle 재검증 포함.",
+)
+async def api_tm_get(
+    snapshot_id: str, _: str = Depends(require_admin)
+) -> dict:
+    try:
+        res = await _tm_get_snapshot(snapshot_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if res.get("error") == "not_found":
+        raise HTTPException(status_code=404, detail="snapshot not found")
+    return res
+
+
+@router.post(
+    "/snapshots/{snapshot_id}/restore-readonly",
+    summary="스냅샷 읽기 전용 복원 — admin",
+    description="현재 상태는 건드리지 않고 스냅샷 데이터를 조회용 뷰로 복원.",
+)
+async def api_tm_restore_readonly(
+    snapshot_id: str, _: str = Depends(require_admin)
+) -> dict:
+    try:
+        return await _tm_restore_snapshot_to_readonly(snapshot_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("restore_snapshot_to_readonly failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+class SnapshotCompareBody(BaseModel):
+    snap_a: str
+    snap_b: str
+
+
+@router.post(
+    "/snapshots/compare",
+    summary="두 스냅샷 비교 — admin",
+    description="added / removed / modified / retracted_since 로 차이 분류.",
+)
+async def api_tm_compare(
+    body: SnapshotCompareBody, _: str = Depends(require_admin)
+) -> dict:
+    if body.snap_a == body.snap_b:
+        raise HTTPException(status_code=400, detail="snap_a and snap_b must differ")
+    try:
+        return await _tm_compare_snapshots(body.snap_a, body.snap_b)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("compare_snapshots failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+class SnapshotRollbackBody(BaseModel):
+    target_fact_ids: list[str]
+    confirm: bool = False
+
+
+@router.post(
+    "/snapshots/{snapshot_id}/rollback",
+    summary="지정 사실들을 스냅샷 시점으로 롤백 — admin",
+    description="실행 전 현재 상태를 백업 스냅샷으로 보관. confirm=True 필수.",
+)
+async def api_tm_rollback(
+    snapshot_id: str,
+    body: SnapshotRollbackBody,
+    admin_key: str = Depends(require_admin),
+) -> dict:
+    if not body.confirm:
+        raise HTTPException(status_code=400, detail="confirm=true required for rollback")
+    if not body.target_fact_ids:
+        raise HTTPException(status_code=400, detail="target_fact_ids empty")
+    try:
+        return await _tm_rollback_facts_to_snapshot(
+            snapshot_id=snapshot_id,
+            target_fact_ids=body.target_fact_ids,
+            admin_user_id=admin_key,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("rollback_facts_to_snapshot failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post(
+    "/snapshots/cleanup-expired",
+    summary="만료 스냅샷 정리 — admin",
+    description="expiresAt 이 지난 레코드+파일 삭제. 정리 건수 반환.",
+)
+async def api_tm_cleanup_expired(_: str = Depends(require_admin)) -> dict:
+    try:
+        removed = await _tm_cleanup_expired_snapshots()
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("cleanup_expired_snapshots failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"removed": removed}
+
+
+class SnapshotTimelineBody(BaseModel):
+    entity: str
+    start_date: datetime
+    end_date: datetime
+
+
+@router.post(
+    "/snapshots/diff-timeline",
+    summary="엔티티 타임라인 diff — admin",
+    description="지정 entity 가 [start, end] 구간 스냅샷/감사 이벤트에서 어떻게 변했는지 시간순 정렬.",
+)
+async def api_tm_diff_timeline(
+    body: SnapshotTimelineBody, _: str = Depends(require_admin)
+) -> dict:
+    if body.end_date < body.start_date:
+        raise HTTPException(status_code=400, detail="end_date must be after start_date")
+    if not body.entity.strip():
+        raise HTTPException(status_code=400, detail="entity empty")
+    try:
+        events = await _tm_diff_timeline_view(
+            body.entity, (body.start_date, body.end_date)
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("diff_timeline_view failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {
+        "entity": body.entity,
+        "start": body.start_date.isoformat(),
+        "end": body.end_date.isoformat(),
+        "count": len(events),
+        "events": events,
+    }
+
+
+class SnapshotWhatIfBody(BaseModel):
+    target_fact_ids: list[str]
+
+
+@router.post(
+    "/snapshots/{snapshot_id}/what-if",
+    summary="롤백 드라이런 — admin",
+    description="실행하지 않고 변경 내용만 미리 계산.",
+)
+async def api_tm_what_if(
+    snapshot_id: str,
+    body: SnapshotWhatIfBody,
+    _: str = Depends(require_admin),
+) -> dict:
+    if not body.target_fact_ids:
+        raise HTTPException(status_code=400, detail="target_fact_ids empty")
+    try:
+        return await _tm_what_if_rollback(snapshot_id, body.target_fact_ids)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("what_if_rollback failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# ⑦ 연합 팩트체크 — Federated Fact Check
+# ---------------------------------------------------------------------------
+class FederatedInstanceRegisterBody(BaseModel):
+    instance_id: str
+    name: str
+    api_url: str
+    public_key: str
+    organization: str | None = None
+    trust_level: float = 0.5
+
+
+@router.post(
+    "/federated/instances",
+    summary="연합 인스턴스 등록 — admin",
+    description="새 HLKM 인스턴스 메타를 upsert. 존재 시 name/apiUrl/publicKey/organization 갱신.",
+)
+async def api_fed_register(
+    body: FederatedInstanceRegisterBody, _: str = Depends(require_admin)
+) -> dict:
+    if not body.instance_id.strip() or not body.api_url.strip() or not body.public_key.strip():
+        raise HTTPException(status_code=400, detail="instance_id/api_url/public_key required")
+    try:
+        rid = await _fed_register_instance(
+            instance_id=body.instance_id,
+            name=body.name,
+            api_url=body.api_url,
+            public_key=body.public_key,
+            organization=body.organization,
+            trust_level=body.trust_level,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("register_instance failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"id": rid, "instance_id": body.instance_id}
+
+
+@router.get(
+    "/federated/instances",
+    summary="연합 인스턴스 목록 — admin",
+    description="active_only 필터 지원. 최대 500건.",
+)
+async def api_fed_list(
+    active_only: bool = Query(True),
+    _: str = Depends(require_admin),
+) -> dict:
+    try:
+        rows = await _fed_list_instances(active_only=active_only)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"count": len(rows), "instances": rows}
+
+
+@router.post(
+    "/federated/instances/{instance_id}/handshake",
+    summary="핸드셰이크 — admin",
+    description="서명 챌린지 교환 + lastHandshakeAt 기록.",
+)
+async def api_fed_handshake(
+    instance_id: str, _: str = Depends(require_admin)
+) -> dict:
+    try:
+        return await _fed_handshake(instance_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("handshake failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+class FederatedQueryBody(BaseModel):
+    instance_id: str
+    fact_id: str | None = None
+    entity: str | None = None
+    query: str | None = None
+
+
+@router.post(
+    "/federated/query",
+    summary="연합 인스턴스 질의 — admin",
+    description="단일 인스턴스에 fact_id / entity / query 중 하나 이상을 질의.",
+)
+async def api_fed_query(
+    body: FederatedQueryBody, _: str = Depends(require_admin)
+) -> dict:
+    if not any([body.fact_id, body.entity, body.query]):
+        raise HTTPException(
+            status_code=400, detail="at least one of fact_id / entity / query required"
+        )
+    try:
+        return await _fed_query_federated_instance(
+            instance_id=body.instance_id,
+            fact_id=body.fact_id,
+            entity=body.entity,
+            query_text=body.query,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("query_federated_instance failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+class FederatedCrossVerifyBody(BaseModel):
+    min_instances: int = 2
+
+
+@router.post(
+    "/federated/cross-verify/{fact_id}",
+    summary="교차 검증 — admin",
+    description="모든 활성 연합 인스턴스에 fact_id 조회 후 agreement 평균/동의·반대 분포 반환.",
+)
+async def api_fed_cross_verify(
+    fact_id: str,
+    body: FederatedCrossVerifyBody | None = None,
+    _: str = Depends(require_admin),
+) -> dict:
+    min_instances = body.min_instances if body else 2
+    if min_instances < 1 or min_instances > 50:
+        raise HTTPException(status_code=400, detail="min_instances must be 1..50")
+    try:
+        return await _fed_cross_verify_fact(fact_id, min_instances=min_instances)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("cross_verify_fact failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+class FederatedServeBody(BaseModel):
+    remote_instance_id: str
+    payload: dict
+
+
+@router.post(
+    "/federated/serve",
+    summary="연합 질의 응답 (PUBLIC) — 다른 인스턴스가 우리를 호출",
+    description="공용 엔드포인트. PRIVATE/RESTRICTED 필드는 자동 제외. 감사 로그 기록.",
+)
+async def api_fed_serve(body: FederatedServeBody) -> dict:
+    if not body.remote_instance_id.strip():
+        raise HTTPException(status_code=400, detail="remote_instance_id empty")
+    try:
+        return await _fed_serve_federated_query(body.remote_instance_id, body.payload)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("serve_federated_query failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get(
+    "/federated/aggregate",
+    summary="연합 합의 집계 — admin",
+    description="동일 entity 에 대해 인스턴스별 결과를 모아 consensus_strength 계산.",
+)
+async def api_fed_aggregate(
+    entity: str = Query(..., min_length=1),
+    _: str = Depends(require_admin),
+) -> dict:
+    try:
+        return await _fed_aggregate_consensus_across_federation(entity)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("aggregate_consensus_across_federation failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get(
+    "/federated/divergent/{fact_id}",
+    summary="발산 인스턴스 탐지 — admin",
+    description="agreement<0.3 인 인스턴스 목록. 감사 대상 후보로 표시.",
+)
+async def api_fed_divergent(
+    fact_id: str, _: str = Depends(require_admin)
+) -> dict:
+    try:
+        rows = await _fed_detect_divergent_instances(fact_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("detect_divergent_instances failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"fact_id": fact_id, "count": len(rows), "divergent": rows}
+
+
+# ---------------------------------------------------------------------------
+# ⑧ 불확실성 정량화 — Uncertainty
+# ---------------------------------------------------------------------------
+class UncertaintyComputeBody(BaseModel):
+    method: str = "bootstrap"  # bootstrap | bayesian | monte_carlo | ensemble
+    n_iter: int = 1000
+    confidence_level: float = 0.95
+
+
+@router.post(
+    "/uncertainty/compute/{fact_id}",
+    summary="신뢰 구간 계산 (비영속)",
+    description="DB 업데이트 없이 CI 를 계산해 반환. method: bootstrap/bayesian/monte_carlo/ensemble.",
+)
+async def api_unc_compute(
+    fact_id: str, body: UncertaintyComputeBody | None = None
+) -> dict:
+    b = body or UncertaintyComputeBody()
+    if b.method not in {"bootstrap", "bayesian", "monte_carlo", "ensemble"}:
+        raise HTTPException(status_code=400, detail="invalid method")
+    if b.n_iter < 50 or b.n_iter > 20000:
+        raise HTTPException(status_code=400, detail="n_iter must be 50..20000")
+    if not (0.5 <= b.confidence_level <= 0.999):
+        raise HTTPException(status_code=400, detail="confidence_level must be 0.5..0.999")
+    fact = await _load_fact_pydantic(fact_id)
+    try:
+        return await _unc_compute_confidence_interval(
+            fact,
+            method=b.method,
+            n_iter=b.n_iter,
+            confidence_level=b.confidence_level,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("compute_confidence_interval failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+class UncertaintyApplyBody(BaseModel):
+    method: str = "bootstrap"
+
+
+@router.post(
+    "/uncertainty/apply/{fact_id}",
+    summary="신뢰 구간 DB 반영 — admin",
+    description="compute 후 confidenceInterval/uncertaintyMethod/credibleIntervalWidth 를 저장.",
+)
+async def api_unc_apply(
+    fact_id: str,
+    body: UncertaintyApplyBody | None = None,
+    _: str = Depends(require_admin),
+) -> dict:
+    b = body or UncertaintyApplyBody()
+    if b.method not in {"bootstrap", "bayesian", "monte_carlo", "ensemble"}:
+        raise HTTPException(status_code=400, detail="invalid method")
+    try:
+        return await _unc_apply_uncertainty_to_fact(fact_id, method=b.method)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("apply_uncertainty_to_fact failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+class UncertaintyBatchBody(BaseModel):
+    domain: str | None = None
+    method: str = "bootstrap"
+    limit: int = 200
+
+
+@router.post(
+    "/uncertainty/batch",
+    summary="도메인 일괄 반영 — admin",
+    description="최근 검증된 CONFIRMED 사실 limit 건에 대해 신뢰 구간 일괄 업데이트.",
+)
+async def api_unc_batch(
+    body: UncertaintyBatchBody, _: str = Depends(require_admin)
+) -> dict:
+    if body.method not in {"bootstrap", "bayesian", "monte_carlo", "ensemble"}:
+        raise HTTPException(status_code=400, detail="invalid method")
+    if body.limit < 1 or body.limit > 5000:
+        raise HTTPException(status_code=400, detail="limit must be 1..5000")
+    try:
+        return await _unc_batch_apply_uncertainty(
+            domain=body.domain, method=body.method, limit=body.limit
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("batch_apply_uncertainty failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get(
+    "/uncertainty/calibration-check",
+    summary="캘리브레이션 검사",
+    description="도메인 단위 예측 신뢰도 vs 실제 정확도 bin 비교 + calibration_error.",
+)
+async def api_unc_calibration_check(
+    domain: str = Query(..., min_length=1),
+    last_days: int = Query(30, ge=1, le=365),
+) -> dict:
+    try:
+        return await _unc_calibration_check(domain, last_days=last_days)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("calibration_check failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# v3.2 lint keepalive
+_ = (
+    _rrn_create_notifications_for_retraction,
+    _adv_DEFAULT_TEST_CASES,
+    _cty_COUNTRY_HIERARCHY,
+)
+
+
+# ===========================================================================
+# v3.3 — HLKM 크라우드소싱 거버넌스 (KYC Gate, Sybil, Personhood, Staking,
+#        Tier, Expert, Peer Review, Dispute DAO, Reputation Staking,
+#        Bounty Market, Prediction Market)
+# ===========================================================================
+
+from hwarang_api.knowledge import contribution_gate as _gate_  # noqa: E402
+from hwarang_api.knowledge import sybil_defense as _sd_  # noqa: E402
+from hwarang_api.knowledge import proof_of_personhood as _pop_  # noqa: E402
+from hwarang_api.knowledge import staking as _stk_  # noqa: E402
+from hwarang_api.knowledge import contributor_tier as _tier_  # noqa: E402
+from hwarang_api.knowledge import expert_verification as _ev_  # noqa: E402
+from hwarang_api.knowledge import peer_review as _pr_  # noqa: E402
+from hwarang_api.knowledge import dispute_dao as _dd_  # noqa: E402
+from hwarang_api.knowledge import reputation_staking as _rs_  # noqa: E402
+from hwarang_api.knowledge import bounty_market as _bm_  # noqa: E402
+from hwarang_api.knowledge import prediction_market as _pm_  # noqa: E402
+
+
+def _gate_denied_to_http(exc: Exception) -> HTTPException:
+    """GateDenied → 403 Forbidden 로 변환."""
+    reason = getattr(exc, "reason", "gate_denied")
+    detail = getattr(exc, "detail", {}) or {}
+    return HTTPException(
+        status_code=403,
+        detail={
+            "error": "gate_denied",
+            "reason": reason,
+            "message": str(exc),
+            "detail": detail,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# KYC 게이트 (/gate/...)
+# ---------------------------------------------------------------------------
+@router.get(
+    "/gate/check",
+    summary="기여 권한 Dry-check",
+    description="현재 사용자가 특정 action 을 수행할 수 있는지 확인 (로그 남기지 않음).",
+)
+async def api_gate_check(
+    action: str = Query(..., description="ingest_fact, peer_review, dispute_vote, ..."),
+    user_key: str = Depends(require_user),
+) -> dict:
+    allowed = await _gate_.is_contribution_allowed(user_key, action)
+    return {"user_id": user_key, "action": action, "allowed": allowed}
+
+
+@router.get(
+    "/gate/denials",
+    summary="최근 차단 로그 조회 — admin",
+    description="reason/user 필터로 최근 ContributionGateDenial 이력을 조회.",
+)
+async def api_gate_denials(
+    user_id: str | None = Query(None),
+    reason: str | None = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    _: str = Depends(require_admin),
+) -> list[dict]:
+    return await _gate_.denial_log(user_id=user_id, reason=reason, limit=limit)
+
+
+@router.get(
+    "/gate/denials/stats",
+    summary="차단 통계 — admin",
+    description="최근 N 시간 차단 통계 (reason 별, top user).",
+)
+async def api_gate_denials_stats(
+    last_hours: int = Query(24, ge=1, le=720),
+    _: str = Depends(require_admin),
+) -> dict:
+    return await _gate_.denial_stats(last_hours=last_hours)
+
+
+@router.get(
+    "/gate/training-logs/pending",
+    summary="학습 로그 검토 대기 — admin",
+    description="reviewedForTraining=False 인 LLMTrainingLog 목록.",
+)
+async def api_gate_training_logs_pending(
+    verified_only: bool = Query(False),
+    limit: int = Query(100, ge=1, le=500),
+    _: str = Depends(require_admin),
+) -> list[dict]:
+    return await _gate_.list_pending_training_logs(
+        limit=limit, verified_only=verified_only
+    )
+
+
+class GateTrainingApproveBody(BaseModel):
+    quality_score: float | None = None
+
+
+@router.post(
+    "/gate/training-logs/{log_id}/approve",
+    summary="학습 로그 승인 — admin",
+    description="검토를 거친 로그를 학습 파이프라인에 편입.",
+)
+async def api_gate_training_log_approve(
+    log_id: str,
+    body: GateTrainingApproveBody,
+    admin_key: str = Depends(require_admin),
+) -> dict:
+    ok = await _gate_.approve_for_training(
+        log_id, admin_user_id=admin_key, quality_score=body.quality_score
+    )
+    if not ok:
+        raise HTTPException(status_code=400, detail="approve_for_training failed")
+    return {"log_id": log_id, "approved": True}
+
+
+class GateTrainingRejectBody(BaseModel):
+    note: str | None = None
+
+
+@router.post(
+    "/gate/training-logs/{log_id}/reject",
+    summary="학습 로그 반려 — admin",
+    description="해당 대화 로그를 학습에서 제외.",
+)
+async def api_gate_training_log_reject(
+    log_id: str,
+    body: GateTrainingRejectBody,
+    admin_key: str = Depends(require_admin),
+) -> dict:
+    ok = await _gate_.reject_for_training(log_id, admin_user_id=admin_key, note=body.note)
+    if not ok:
+        raise HTTPException(status_code=400, detail="reject_for_training failed")
+    return {"log_id": log_id, "approved": False}
+
+
+@router.post(
+    "/gate/training-logs/purge-expired",
+    summary="만료 로그 정리 — admin",
+    description="expiresAt 이 지난 미인증 사용자 로그 일괄 삭제.",
+)
+async def api_gate_training_logs_purge(
+    batch: int = Query(500, ge=1, le=5000),
+    _: str = Depends(require_admin),
+) -> dict:
+    count = await _gate_.purge_expired_training_logs(batch=batch)
+    return {"purged": count}
+
+
+@router.get(
+    "/gate/training-logs/stats",
+    summary="학습 로그 통계 — admin",
+)
+async def api_gate_training_logs_stats(_: str = Depends(require_admin)) -> dict:
+    return await _gate_.training_log_stats()
+
+
+# ---------------------------------------------------------------------------
+# 실존 인증 (/pop/...)
+# ---------------------------------------------------------------------------
+@router.get(
+    "/pop/methods",
+    summary="지원 인증 수단",
+    description="사용 가능한 실존 인증(KYC) 방법 목록.",
+)
+async def api_pop_methods() -> dict:
+    return {
+        "methods": [
+            {"id": "ipin", "label": "아이핀 (한국 실명인증)", "region": "KR"},
+            {"id": "worldid", "label": "WorldID (Worldcoin)", "region": "global"},
+            {"id": "brightid", "label": "BrightID (소셜 그래프)", "region": "global"},
+            {"id": "proofofhumanity", "label": "Proof of Humanity", "region": "global"},
+        ]
+    }
+
+
+class PopStartBody(BaseModel):
+    method: str
+
+
+@router.post(
+    "/pop/start",
+    summary="실존 인증 시작",
+    description="선택한 method 의 검증 세션을 시작하고 challenge 를 반환.",
+)
+async def api_pop_start(
+    body: PopStartBody, user_key: str = Depends(require_user)
+) -> dict:
+    try:
+        return await _pop_.start_verification(user_key, body.method)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class PopCompleteBody(BaseModel):
+    method: str
+    proof: str
+
+
+@router.post(
+    "/pop/complete",
+    summary="실존 인증 완료",
+    description="provider 로부터 받은 proof 를 검증해 KYC 상태를 True 로 전이.",
+)
+async def api_pop_complete(
+    body: PopCompleteBody, user_key: str = Depends(require_user)
+) -> dict:
+    try:
+        return await _pop_.complete_verification(user_key, body.method, body.proof)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class PopRevokeBody(BaseModel):
+    reason: str
+
+
+@router.post(
+    "/pop/revoke/{user_id}",
+    summary="인증 철회 — admin",
+    description="해당 사용자의 실존 인증을 강제로 무효화.",
+)
+async def api_pop_revoke(
+    user_id: str,
+    body: PopRevokeBody,
+    _: str = Depends(require_admin),
+) -> dict:
+    await _pop_.revoke_verification(user_id, body.reason)
+    return {"user_id": user_id, "revoked": True}
+
+
+@router.get(
+    "/pop/status",
+    summary="내 인증 상태",
+)
+async def api_pop_status(user_key: str = Depends(require_user)) -> dict:
+    verified = await _pop_.is_verified(user_key)
+    return {"user_id": user_key, "kyc_verified": verified}
+
+
+@router.get(
+    "/pop/list",
+    summary="인증 목록 — admin",
+)
+async def api_pop_list(
+    method: str | None = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    _: str = Depends(require_admin),
+) -> list[dict]:
+    return await _pop_.list_verifications(method=method, limit=limit)
+
+
+# ---------------------------------------------------------------------------
+# Sybil 방어 (/sybil/...) admin
+# ---------------------------------------------------------------------------
+@router.post(
+    "/sybil/scan/{user_id}",
+    summary="Sybil 스캔 실행 — admin",
+)
+async def api_sybil_scan(
+    user_id: str, _: str = Depends(require_admin)
+) -> list[dict]:
+    return await _sd_.scan_user(user_id)
+
+
+@router.get(
+    "/sybil/flags",
+    summary="Sybil 플래그 조회 — admin",
+)
+async def api_sybil_flags(
+    severity: str | None = Query(None),
+    resolved: bool | None = Query(None),
+    limit: int = Query(200, ge=1, le=1000),
+    _: str = Depends(require_admin),
+) -> list[dict]:
+    return await _sd_.list_active_flags(
+        severity=severity, resolved=resolved, limit=limit
+    )
+
+
+class SybilResolveBody(BaseModel):
+    resolution: str  # "confirmed" | "false_positive"
+    note: str | None = None
+
+
+@router.post(
+    "/sybil/flags/{flag_id}/resolve",
+    summary="Sybil 플래그 처리 — admin",
+)
+async def api_sybil_flag_resolve(
+    flag_id: str,
+    body: SybilResolveBody,
+    admin_key: str = Depends(require_admin),
+) -> dict:
+    await _sd_.resolve_flag(
+        flag_id, resolution=body.resolution, admin_id=admin_key, note=body.note
+    )
+    return {"flag_id": flag_id, "resolved": True, "resolution": body.resolution}
+
+
+class SybilSuspendBody(BaseModel):
+    reason: str
+    duration_days: int | None = None
+
+
+@router.post(
+    "/sybil/suspend/{user_id}",
+    summary="계정 정지 — admin",
+)
+async def api_sybil_suspend(
+    user_id: str,
+    body: SybilSuspendBody,
+    admin_key: str = Depends(require_admin),
+) -> dict:
+    await _sd_.suspend_account(
+        user_id,
+        reason=body.reason,
+        duration_days=body.duration_days,
+        admin_id=admin_key,
+    )
+    return {"user_id": user_id, "suspended": True}
+
+
+@router.post(
+    "/sybil/unsuspend/{user_id}",
+    summary="정지 해제 — admin",
+)
+async def api_sybil_unsuspend(
+    user_id: str, admin_key: str = Depends(require_admin)
+) -> dict:
+    await _sd_.lift_suspension(user_id, admin_id=admin_key)
+    return {"user_id": user_id, "suspended": False}
+
+
+@router.get(
+    "/sybil/clusters",
+    summary="Sybil 클러스터 요약 — admin",
+)
+async def api_sybil_clusters(_: str = Depends(require_admin)) -> list[dict]:
+    return await _sd_.cluster_overview()
+
+
+@router.post(
+    "/sybil/daily-scan",
+    summary="일일 Sybil 배치 스캔 — admin",
+)
+async def api_sybil_daily_scan(
+    limit: int = Query(500, ge=1, le=5000),
+    _: str = Depends(require_admin),
+) -> dict:
+    return await _sd_.daily_sybil_scan(limit=limit)
+
+
+# ---------------------------------------------------------------------------
+# Staking (/stake/...)
+# ---------------------------------------------------------------------------
+@router.get(
+    "/stake/requirements",
+    summary="도메인별 최소 stake 요구",
+)
+async def api_stake_requirements(
+    domain: str = Query("general"),
+    user_key: str = Depends(require_user),
+) -> dict:
+    req = await _stk_.required_stake(user_key, domain)
+    return {"user_id": user_key, "domain": domain, "required_stake": int(req)}
+
+
+class StakeDepositBody(BaseModel):
+    amount: int
+
+
+@router.post(
+    "/stake/deposit",
+    summary="스테이킹 잔액 입금",
+)
+async def api_stake_deposit(
+    body: StakeDepositBody, user_key: str = Depends(require_user)
+) -> dict:
+    try:
+        new_bal = await _stk_.deposit_to_stake_balance(user_key, int(body.amount))
+        return {"user_id": user_key, "balance": int(new_bal)}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class StakeWithdrawBody(BaseModel):
+    amount: int
+
+
+@router.post(
+    "/stake/withdraw",
+    summary="스테이킹 잔액 출금",
+)
+async def api_stake_withdraw(
+    body: StakeWithdrawBody, user_key: str = Depends(require_user)
+) -> dict:
+    try:
+        new_bal = await _stk_.withdraw_stake_balance(user_key, int(body.amount))
+        return {"user_id": user_key, "balance": int(new_bal)}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get(
+    "/stake/health",
+    summary="내 스테이킹 건강도",
+)
+async def api_stake_health(user_key: str = Depends(require_user)) -> dict:
+    return await _stk_.stake_health(user_key)
+
+
+@router.get(
+    "/stake/my",
+    summary="내 스테이킹 목록",
+)
+async def api_stake_my(
+    status: str | None = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    user_key: str = Depends(require_user),
+) -> list[dict]:
+    return await _stk_.list_user_stakes(user_key, status=status, limit=limit)
+
+
+@router.post(
+    "/stake/auto-settle-expired",
+    summary="만료 stake 자동 정산 — admin",
+)
+async def api_stake_auto_settle(
+    batch: int = Query(500, ge=1, le=5000),
+    _: str = Depends(require_admin),
+) -> dict:
+    return await _stk_.auto_settle_expired(batch=batch)
+
+
+# ---------------------------------------------------------------------------
+# 기여자 Tier (/tier/...)
+# ---------------------------------------------------------------------------
+@router.get(
+    "/tier/my",
+    summary="내 Tier 프로필",
+)
+async def api_tier_my(user_key: str = Depends(require_user)) -> dict:
+    return await _tier_.get_or_create_profile(user_key)
+
+
+@router.post(
+    "/tier/evaluate/{user_id}",
+    summary="Tier 평가 실행",
+    description="해당 사용자에 대해 tier 승급 평가 트리거.",
+)
+async def api_tier_evaluate(
+    user_id: str, _: str = Depends(require_user)
+) -> dict:
+    new_tier = await _tier_.evaluate_tier_upgrade(user_id)
+    return {"user_id": user_id, "new_tier": new_tier}
+
+
+@router.post(
+    "/tier/auto-promote",
+    summary="일괄 자동 승급 — admin",
+)
+async def api_tier_auto_promote(
+    batch: int = Query(100, ge=1, le=1000),
+    _: str = Depends(require_admin),
+) -> dict:
+    return await _tier_.auto_promote_eligible(batch=batch)
+
+
+@router.get(
+    "/tier/distribution",
+    summary="Tier 분포 통계 — admin",
+)
+async def api_tier_distribution(_: str = Depends(require_admin)) -> dict:
+    return await _tier_.tier_distribution()
+
+
+@router.get(
+    "/tier/leaderboard",
+    summary="기여자 리더보드",
+)
+async def api_tier_leaderboard(
+    by: str = Query("reputation"),
+    limit: int = Query(50, ge=1, le=200),
+) -> list[dict]:
+    return await _tier_.leaderboard(by=by, limit=limit)
+
+
+@router.get(
+    "/tier/daily-count/{user_id}",
+    summary="오늘 기여 수",
+)
+async def api_tier_daily_count(user_id: str) -> dict:
+    count = await _tier_.daily_contribution_count(user_id)
+    return {"user_id": user_id, "count": int(count)}
+
+
+# ---------------------------------------------------------------------------
+# 전문가 자격 (/expert/...)
+# ---------------------------------------------------------------------------
+@router.get(
+    "/expert/fields",
+    summary="지원 전문 분야 목록",
+)
+async def api_expert_fields() -> dict:
+    # expert_verification 내부 상수 재노출 (없을 수 있으므로 fallback)
+    fields = getattr(_ev_, "SUPPORTED_FIELDS", None) or [
+        "law", "medicine", "finance", "engineering", "education",
+        "government", "research", "journalism",
+    ]
+    return {"fields": list(fields)}
+
+
+class ExpertSubmitBody(BaseModel):
+    field: str
+    organization: str | None = None
+    license_number: str | None = None
+    document_url: str | None = None
+    note: str | None = None
+
+
+@router.post(
+    "/expert/submit",
+    summary="전문가 자격 신청",
+)
+async def api_expert_submit(
+    body: ExpertSubmitBody, user_key: str = Depends(require_user)
+) -> dict:
+    try:
+        cred_id = await _ev_.submit_credential(
+            user_id=user_key,
+            field=body.field,
+            organization=body.organization,
+            license_number=body.license_number,
+            document_url=body.document_url,
+            note=body.note,
+        )
+        return {"credential_id": cred_id, "status": "pending"}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class ExpertVerifyBody(BaseModel):
+    weight_multiplier: float = 1.5
+    expires_at: datetime | None = None
+
+
+@router.post(
+    "/expert/verify/{credential_id}",
+    summary="전문가 자격 승인 — admin",
+)
+async def api_expert_verify(
+    credential_id: str,
+    body: ExpertVerifyBody,
+    admin_key: str = Depends(require_admin),
+) -> dict:
+    try:
+        await _ev_.verify_credential(
+            credential_id,
+            admin_id=admin_key,
+            weight_multiplier=body.weight_multiplier,
+            expires_at=body.expires_at,
+        )
+        return {"credential_id": credential_id, "verified": True}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class ExpertRejectBody(BaseModel):
+    reason: str
+
+
+@router.post(
+    "/expert/reject/{credential_id}",
+    summary="전문가 자격 반려 — admin",
+)
+async def api_expert_reject(
+    credential_id: str,
+    body: ExpertRejectBody,
+    admin_key: str = Depends(require_admin),
+) -> dict:
+    await _ev_.reject_credential(credential_id, admin_id=admin_key, reason=body.reason)
+    return {"credential_id": credential_id, "rejected": True}
+
+
+@router.get(
+    "/expert/pending",
+    summary="검토 대기 큐 — admin",
+)
+async def api_expert_pending(
+    field: str | None = Query(None),
+    _: str = Depends(require_admin),
+) -> list[dict]:
+    return await _ev_.list_pending_credentials(field=field)
+
+
+@router.get(
+    "/expert/by-field/{field}",
+    summary="분야별 인증 전문가 목록",
+)
+async def api_expert_by_field(field: str) -> list[dict]:
+    return await _ev_.list_experts_by_field(field)
+
+
+class ExpertRevokeBody(BaseModel):
+    reason: str
+
+
+@router.post(
+    "/expert/revoke/{credential_id}",
+    summary="전문가 자격 철회 — admin",
+)
+async def api_expert_revoke(
+    credential_id: str,
+    body: ExpertRevokeBody,
+    admin_key: str = Depends(require_admin),
+) -> dict:
+    await _ev_.revoke_credential(credential_id, admin_id=admin_key, reason=body.reason)
+    return {"credential_id": credential_id, "revoked": True}
+
+
+# ---------------------------------------------------------------------------
+# 동료 검토 (/review/...)
+# ---------------------------------------------------------------------------
+class ReviewSubmitBody(BaseModel):
+    fact_id: str
+    vote: Literal["accept", "reject", "abstain"]
+    rationale: str | None = None
+    confidence: float = 0.7
+    stake: int | None = None
+
+
+@router.post(
+    "/review/submit",
+    summary="Peer Review 투표 제출",
+)
+async def api_review_submit(
+    body: ReviewSubmitBody, user_key: str = Depends(require_user)
+) -> dict:
+    try:
+        rid = await _pr_.submit_review(
+            fact_id=body.fact_id,
+            reviewer_id=user_key,
+            vote=body.vote,
+            rationale=body.rationale,
+            confidence=body.confidence,
+            stake=body.stake,
+        )
+        return {"review_id": rid, "fact_id": body.fact_id}
+    except _gate_.GateDenied as exc:
+        raise _gate_denied_to_http(exc) from exc
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/review/finalize/{fact_id}",
+    summary="Peer Review 확정 — admin",
+)
+async def api_review_finalize(
+    fact_id: str, _: str = Depends(require_admin)
+) -> dict:
+    return await _pr_.finalize_reviews(fact_id)
+
+
+@router.get(
+    "/review/pending",
+    summary="내 검토 대기 목록",
+)
+async def api_review_pending(
+    limit: int = Query(20, ge=1, le=200),
+    user_key: str = Depends(require_user),
+) -> list[dict]:
+    return await _pr_.list_pending_reviews_for_user(user_key, limit=limit)
+
+
+@router.get(
+    "/review/of-fact/{fact_id}",
+    summary="Fact 의 모든 리뷰",
+)
+async def api_review_of_fact(fact_id: str) -> list[dict]:
+    return await _pr_.list_reviews_of_fact(fact_id)
+
+
+@router.get(
+    "/review/stats",
+    summary="내 리뷰 성과",
+)
+async def api_review_stats(
+    days: int = Query(30, ge=1, le=365),
+    user_key: str = Depends(require_user),
+) -> dict:
+    return await _pr_.review_stats_for_user(user_key, days=days)
+
+
+@router.post(
+    "/review/auto-assign/{fact_id}",
+    summary="리뷰어 자동 배정 — admin",
+)
+async def api_review_auto_assign(
+    fact_id: str,
+    count: int = Query(3, ge=1, le=20),
+    _: str = Depends(require_admin),
+) -> dict:
+    selected = await _pr_.auto_assign_reviewers(fact_id, count=count)
+    if selected:
+        await _pr_.notify_reviewers(fact_id, selected)
+    return {"fact_id": fact_id, "assigned": selected}
+
+
+@router.post(
+    "/review/close-stale",
+    summary="기한 초과 리뷰 종료 — admin",
+)
+async def api_review_close_stale(
+    hours: int = Query(72, ge=1, le=720),
+    _: str = Depends(require_admin),
+) -> dict:
+    finalized = await _pr_.close_stale_reviews(older_than_hours=hours)
+    return {"finalized": finalized}
+
+
+# ---------------------------------------------------------------------------
+# 분쟁 DAO (/dispute/...)
+# ---------------------------------------------------------------------------
+class DisputeInitiateBody(BaseModel):
+    related_fact_ids: list[str]
+    topic: str
+    description: str
+    voting_period_hours: int = 96
+
+
+@router.post(
+    "/dispute/initiate",
+    summary="분쟁 제기",
+)
+async def api_dispute_initiate(
+    body: DisputeInitiateBody, user_key: str = Depends(require_user)
+) -> dict:
+    try:
+        did = await _dd_.initiate_dispute(
+            initiator_id=user_key,
+            related_fact_ids=body.related_fact_ids,
+            topic=body.topic,
+            description=body.description,
+            voting_period_hours=body.voting_period_hours,
+        )
+        return {"dispute_id": did}
+    except _gate_.GateDenied as exc:
+        raise _gate_denied_to_http(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class DisputeVoteBody(BaseModel):
+    side: Literal["A", "B", "both_invalid", "coexist"]
+    staked_amount: int
+    rationale: str | None = None
+
+
+@router.post(
+    "/dispute/{dispute_id}/vote",
+    summary="분쟁 투표",
+)
+async def api_dispute_vote(
+    dispute_id: str,
+    body: DisputeVoteBody,
+    user_key: str = Depends(require_user),
+) -> dict:
+    try:
+        vid = await _dd_.vote(
+            dispute_id=dispute_id,
+            voter_id=user_key,
+            side=body.side,
+            staked_amount=body.staked_amount,
+            rationale=body.rationale,
+        )
+        return {"vote_id": vid, "dispute_id": dispute_id}
+    except _gate_.GateDenied as exc:
+        raise _gate_denied_to_http(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/dispute/{dispute_id}/withdraw-vote",
+    summary="분쟁 투표 철회",
+)
+async def api_dispute_withdraw_vote(
+    dispute_id: str, user_key: str = Depends(require_user)
+) -> dict:
+    ok = await _dd_.withdraw_vote(dispute_id, user_key)
+    return {"dispute_id": dispute_id, "withdrawn": ok}
+
+
+@router.post(
+    "/dispute/{dispute_id}/finalize",
+    summary="분쟁 확정 — admin",
+)
+async def api_dispute_finalize(
+    dispute_id: str,
+    force: bool = Query(False),
+    _: str = Depends(require_admin),
+) -> dict:
+    try:
+        return await _dd_.finalize_dispute(dispute_id, force=force)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get(
+    "/dispute/open",
+    summary="열려있는 분쟁 목록",
+)
+async def api_dispute_open(
+    my_tier_can_vote: bool = Query(False),
+    user_key: str = Depends(require_user),
+) -> list[dict]:
+    return await _dd_.list_open_disputes(
+        my_tier_can_vote=my_tier_can_vote, user_id=user_key
+    )
+
+
+@router.get(
+    "/dispute/my-votes",
+    summary="내 분쟁 투표 이력",
+)
+async def api_dispute_my_votes(
+    limit: int = Query(50, ge=1, le=200),
+    user_key: str = Depends(require_user),
+) -> list[dict]:
+    return await _dd_.list_my_votes(user_key, limit=limit)
+
+
+@router.post(
+    "/dispute/auto-finalize",
+    summary="만료 분쟁 자동 확정 — admin",
+)
+async def api_dispute_auto_finalize(
+    batch: int = Query(50, ge=1, le=500),
+    _: str = Depends(require_admin),
+) -> dict:
+    return await _dd_.auto_finalize_expired(batch=batch)
+
+
+@router.get(
+    "/dispute/stats",
+    summary="분쟁 통계",
+)
+async def api_dispute_stats(
+    last_days: int = Query(30, ge=1, le=365),
+) -> dict:
+    return await _dd_.dispute_stats(last_days=last_days)
+
+
+@router.get(
+    "/dispute/{dispute_id}/collusion-check",
+    summary="공모 의심 탐지 — admin",
+)
+async def api_dispute_collusion(
+    dispute_id: str, _: str = Depends(require_admin)
+) -> list[dict]:
+    return await _dd_.detect_vote_collusion(dispute_id)
+
+
+@router.get(
+    "/dispute/{dispute_id}/summary",
+    summary="분쟁 마크다운 리포트",
+)
+async def api_dispute_summary(dispute_id: str) -> dict:
+    md = await _dd_.dispute_markdown_summary(dispute_id)
+    return {"dispute_id": dispute_id, "markdown": md}
+
+
+@router.get(
+    "/dispute/{dispute_id}",
+    summary="분쟁 상세",
+)
+async def api_dispute_get(dispute_id: str) -> dict:
+    try:
+        return await _dd_.get_dispute(dispute_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# Reputation Staking (/rep-stake/...)
+# ---------------------------------------------------------------------------
+class RepStakePlaceBody(BaseModel):
+    fact_id: str
+    amount: float
+    reason: str | None = None
+
+
+@router.post(
+    "/rep-stake/place",
+    summary="평판 스테이킹 건다",
+)
+async def api_rep_stake_place(
+    body: RepStakePlaceBody, user_key: str = Depends(require_user)
+) -> dict:
+    try:
+        row = await _rs_.stake_reputation(
+            user_id=user_key,
+            fact_id=body.fact_id,
+            amount=body.amount,
+            reason=body.reason,
+        )
+        return {"stake_id": getattr(row, "id", None) or row.get("id"), "ok": True}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get(
+    "/rep-stake/available",
+    summary="스테이킹 가능 평판",
+)
+async def api_rep_stake_available(user_key: str = Depends(require_user)) -> dict:
+    avail = await _rs_.available_reputation_to_stake(user_key)
+    return {"user_id": user_key, "available": float(avail)}
+
+
+@router.get(
+    "/rep-stake/active",
+    summary="활성 평판 스테이킹",
+)
+async def api_rep_stake_active(user_key: str = Depends(require_user)) -> list[dict]:
+    return await _rs_.list_active_reputation_stakes(user_key)
+
+
+@router.get(
+    "/rep-stake/history",
+    summary="평판 스테이킹 이력",
+)
+async def api_rep_stake_history(
+    limit: int = Query(100, ge=1, le=500),
+    user_key: str = Depends(require_user),
+) -> list[dict]:
+    return await _rs_.reputation_bet_history(user_key, limit=limit)
+
+
+@router.get(
+    "/rep-stake/leaderboard",
+    summary="평판 베팅 리더보드",
+)
+async def api_rep_stake_leaderboard(
+    limit: int = Query(20, ge=1, le=100),
+) -> list[dict]:
+    return await _rs_.reputation_bet_leaderboard(limit=limit)
+
+
+@router.get(
+    "/rep-stake/fact/{fact_id}/backing",
+    summary="Fact 별 평판 백킹 요약",
+)
+async def api_rep_stake_backing(fact_id: str) -> dict:
+    return await _rs_.fact_reputation_backing(fact_id)
+
+
+@router.post(
+    "/rep-stake/auto-settle",
+    summary="평판 스테이킹 자동 정산 — admin",
+)
+async def api_rep_stake_auto_settle(
+    batch: int = Query(200, ge=1, le=2000),
+    _: str = Depends(require_admin),
+) -> dict:
+    return await _rs_.auto_settle_reputation_stakes(batch=batch)
+
+
+# ---------------------------------------------------------------------------
+# Bounty Market (/bounty/...)
+# ---------------------------------------------------------------------------
+class BountyCreateBody(BaseModel):
+    topic: str
+    description: str
+    reward_amount: int
+    deadline_days: int = 14
+    domain: str | None = None
+    required_tier: str = "SILVER"
+
+
+@router.post(
+    "/bounty/create",
+    summary="현상금 생성",
+)
+async def api_bounty_create(
+    body: BountyCreateBody, user_key: str = Depends(require_user)
+) -> dict:
+    try:
+        bid = await _bm_.create_bounty(
+            creator_id=user_key,
+            topic=body.topic,
+            description=body.description,
+            reward_amount=body.reward_amount,
+            deadline_days=body.deadline_days,
+            domain=body.domain,
+            required_tier=body.required_tier,
+        )
+        return {"bounty_id": bid}
+    except _gate_.GateDenied as exc:
+        raise _gate_denied_to_http(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class BountySubmitBody(BaseModel):
+    fact_id: str
+    submission_note: str | None = None
+
+
+@router.post(
+    "/bounty/{bounty_id}/submit",
+    summary="현상금 답변 제출",
+)
+async def api_bounty_submit(
+    bounty_id: str,
+    body: BountySubmitBody,
+    user_key: str = Depends(require_user),
+) -> dict:
+    try:
+        sid = await _bm_.submit_to_bounty(
+            bounty_id=bounty_id,
+            contributor_id=user_key,
+            fact_id=body.fact_id,
+            submission_note=body.submission_note,
+        )
+        return {"submission_id": sid, "bounty_id": bounty_id}
+    except _gate_.GateDenied as exc:
+        raise _gate_denied_to_http(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class BountyScoreBody(BaseModel):
+    judging_method: Literal["arbitrator", "peer_vote", "creator"] = "arbitrator"
+
+
+@router.post(
+    "/bounty/{bounty_id}/score",
+    summary="현상금 점수 산출 — admin",
+)
+async def api_bounty_score(
+    bounty_id: str,
+    body: BountyScoreBody,
+    _: str = Depends(require_admin),
+) -> list[dict]:
+    return await _bm_.score_submissions(bounty_id, judging_method=body.judging_method)
+
+
+class BountyAwardBody(BaseModel):
+    winner_submission_id: str | None = None
+
+
+@router.post(
+    "/bounty/{bounty_id}/award",
+    summary="현상금 지급 — admin",
+)
+async def api_bounty_award(
+    bounty_id: str,
+    body: BountyAwardBody,
+    admin_key: str = Depends(require_admin),
+) -> dict:
+    try:
+        return await _bm_.award_bounty(
+            bounty_id=bounty_id,
+            winner_submission_id=body.winner_submission_id,
+            admin_id=admin_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/bounty/{bounty_id}/cancel",
+    summary="현상금 취소",
+)
+async def api_bounty_cancel(
+    bounty_id: str, user_key: str = Depends(require_user)
+) -> dict:
+    try:
+        return await _bm_.cancel_bounty(bounty_id, creator_id=user_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get(
+    "/bounty/open",
+    summary="공개 현상금 목록",
+)
+async def api_bounty_open(
+    domain: str | None = Query(None),
+    min_reward: int | None = Query(None),
+    sort_by: str = Query("reward"),
+) -> list[dict]:
+    return await _bm_.list_open_bounties(
+        domain=domain, min_reward=min_reward, sort_by=sort_by
+    )
+
+
+@router.get(
+    "/bounty/my-bounties",
+    summary="내 현상금 목록",
+)
+async def api_bounty_mine(user_key: str = Depends(require_user)) -> list[dict]:
+    return await _bm_.list_my_bounties(user_key)
+
+
+@router.get(
+    "/bounty/my-submissions",
+    summary="내가 제출한 답변",
+)
+async def api_bounty_my_subs(user_key: str = Depends(require_user)) -> list[dict]:
+    return await _bm_.list_my_submissions(user_key)
+
+
+@router.get(
+    "/bounty/stats",
+    summary="현상금 통계 — admin",
+)
+async def api_bounty_stats(
+    last_days: int = Query(30, ge=1, le=365),
+    _: str = Depends(require_admin),
+) -> dict:
+    return await _bm_.bounty_stats(last_days=last_days)
+
+
+@router.get(
+    "/bounty/top-earners",
+    summary="현상금 상위 수상자",
+)
+async def api_bounty_top(
+    last_days: int = Query(30, ge=1, le=365),
+    limit: int = Query(20, ge=1, le=100),
+) -> list[dict]:
+    return await _bm_.top_earners(last_days=last_days, limit=limit)
+
+
+# ---------------------------------------------------------------------------
+# Prediction Market (/market/...)
+# ---------------------------------------------------------------------------
+class MarketCreateBody(BaseModel):
+    pending_fact_id: str
+    question: str
+    resolution_date: datetime
+
+
+@router.post(
+    "/market/create",
+    summary="예측 시장 생성 — admin",
+)
+async def api_market_create(
+    body: MarketCreateBody, _: str = Depends(require_admin)
+) -> dict:
+    try:
+        mid = await _pm_.create_market(
+            pending_fact_id=body.pending_fact_id,
+            question=body.question,
+            resolution_date=body.resolution_date,
+        )
+        return {"market_id": mid}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class MarketBetBody(BaseModel):
+    side: Literal["YES", "NO"]
+    amount: int
+
+
+@router.post(
+    "/market/{market_id}/bet",
+    summary="예측 시장 베팅",
+)
+async def api_market_bet(
+    market_id: str,
+    body: MarketBetBody,
+    user_key: str = Depends(require_user),
+) -> dict:
+    try:
+        bid = await _pm_.place_bet(
+            market_id=market_id,
+            user_id=user_key,
+            side=body.side,
+            amount=body.amount,
+        )
+        return {"bet_id": bid, "market_id": market_id}
+    except _gate_.GateDenied as exc:
+        raise _gate_denied_to_http(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get(
+    "/market/{market_id}/odds",
+    summary="현재 odds",
+)
+async def api_market_odds(market_id: str) -> dict:
+    try:
+        return await _pm_.current_odds(market_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get(
+    "/market/{market_id}/payoff-preview",
+    summary="예상 payoff 미리보기",
+)
+async def api_market_payoff(
+    market_id: str,
+    side: Literal["YES", "NO"] = Query("YES"),
+    amount: int = Query(100, ge=1),
+) -> dict:
+    try:
+        return await _pm_.expected_payoff(market_id, side=side, amount=amount)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class MarketResolveBody(BaseModel):
+    outcome: Literal["YES", "NO", "INVALID"]
+
+
+@router.post(
+    "/market/{market_id}/resolve",
+    summary="예측 시장 정산 — admin",
+)
+async def api_market_resolve(
+    market_id: str,
+    body: MarketResolveBody,
+    admin_key: str = Depends(require_admin),
+) -> dict:
+    try:
+        return await _pm_.resolve_market(
+            market_id, outcome=body.outcome, resolver_id=admin_key
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/market/auto-resolve",
+    summary="자동 정산 — admin",
+)
+async def api_market_auto_resolve(_: str = Depends(require_admin)) -> dict:
+    return await _pm_.auto_resolve_markets()
+
+
+@router.get(
+    "/market/active",
+    summary="활성 시장 목록",
+)
+async def api_market_active(
+    domain: str | None = Query(None),
+    sort_by: str = Query("pool_size"),
+) -> list[dict]:
+    return await _pm_.list_active_markets(domain=domain, sort_by=sort_by)
+
+
+@router.get(
+    "/market/my-bets",
+    summary="내 베팅 목록",
+)
+async def api_market_my_bets(
+    status: str | None = Query(None),
+    user_key: str = Depends(require_user),
+) -> list[dict]:
+    return await _pm_.list_my_bets(user_key, status=status)
+
+
+@router.get(
+    "/market/stats",
+    summary="예측 시장 통계",
+)
+async def api_market_stats() -> dict:
+    return await _pm_.market_stats()
+
+
+@router.get(
+    "/market/calibration",
+    summary="예측 시장 캘리브레이션 리포트",
+)
+async def api_market_calibration(
+    last_days: int = Query(90, ge=1, le=365),
+) -> dict:
+    return await _pm_.calibration_report(last_days=last_days)
+
+
+@router.get(
+    "/market/{market_id}/manipulation",
+    summary="조작 의심 패턴 감지 — admin",
+)
+async def api_market_manipulation(
+    market_id: str, _: str = Depends(require_admin)
+) -> list[dict]:
+    try:
+        return await _pm_.detect_manipulation(market_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+# v3.3 lint keepalive
+_ = (
+    _gate_,
+    _sd_,
+    _pop_,
+    _stk_,
+    _tier_,
+    _ev_,
+    _pr_,
+    _dd_,
+    _rs_,
+    _bm_,
+    _pm_,
+)

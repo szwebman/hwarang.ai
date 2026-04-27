@@ -294,7 +294,7 @@ class NetworkAdaptiveTransfer:
             from urllib.request import urlopen, Request
 
             # 작은 데이터로 RTT 측정
-            test_url = f"{master_url}/grid/hfl/lora/version"
+            test_url = f"{master_url}/api/grid/lora/version"
 
             start = time.time()
             with urlopen(Request(test_url), timeout=10) as resp:
@@ -311,7 +311,7 @@ class NetworkAdaptiveTransfer:
 
             start = time.time()
             req = Request(
-                f"{master_url}/grid/hfl/bandwidth-test",
+                f"{master_url}/api/grid/bandwidth-test",
                 data=test_data,
                 method="POST",
             )
@@ -398,8 +398,8 @@ class NetworkAdaptiveTransfer:
         try:
             import httpx
 
-            submit_url = (f"{master_url}/grid/hfl/submit/{round_id}"
-                         if round_id else f"{master_url}/grid/hfl/submit/manual")
+            submit_url = (f"{master_url}/api/grid/rounds/{round_id}/submit"
+                         if round_id else f"{master_url}/api/grid/submit/manual")
 
             metadata = {
                 "agent_id": agent_id,

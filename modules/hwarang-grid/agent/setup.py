@@ -34,6 +34,7 @@ setup(
     python_requires=">=3.10",
     install_requires=[
         "httpx>=0.25.0",
+        "websockets>=12.0",
     ],
     extras_require={
         "gpu": [

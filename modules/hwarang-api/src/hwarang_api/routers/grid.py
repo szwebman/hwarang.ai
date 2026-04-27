@@ -3,35 +3,73 @@
 에이전트 등록, HFL 연합 학습, 리워드 지급 엔드포인트.
 hfl_master.py의 기능을 API 서버에 통합.
 
+모든 경로는 `/api/grid/*` 로 통일.
+
 엔드포인트:
-  POST /grid/register          - 에이전트 등록
-  POST /grid/heartbeat         - 하트비트 수신
-  GET  /grid/status             - Grid 상태 조회
-  POST /grid/hfl/round/start   - 학습 라운드 시작 (관리자)
-  GET  /grid/hfl/round/task    - 학습 작업 조회
-  POST /grid/hfl/submit        - LoRA 업로드
-  GET  /grid/hfl/lora/latest   - 최신 LoRA 다운로드
-  GET  /grid/hfl/lora/version  - LoRA 버전 조회
-  POST /grid/rewards/emit      - 코인 리워드 지급
-  GET  /grid/rewards/stats     - 리워드 통계
+  POST /api/grid/register                    - 에이전트 등록
+  POST /api/grid/heartbeat                   - 하트비트 수신
+  GET  /api/grid/status                      - Grid 상태 조회
+  POST /api/grid/rounds/start                - 학습 라운드 시작 (관리자)
+  GET  /api/grid/rounds/task/{agent_id}      - 학습 작업 조회
+  POST /api/grid/rounds/{round_id}/submit    - LoRA 업로드
+  GET  /api/grid/lora/latest                 - 최신 LoRA 다운로드
+  GET  /api/grid/lora/version                - LoRA 버전 조회
+  GET  /api/grid/rounds/open                 - 참여 가능 라운드 목록
+  GET  /api/grid/rounds/{round_id}/peer-lora/{peer_agent_id}
+  GET  /api/grid/rounds/{round_id}/eval-shard
+  POST /api/grid/rounds/{round_id}/peer-vote
+  GET  /api/grid/rounds/{round_id}/participants
+  GET  /api/grid/agents/{agent_id}/earnings  - 수익 내역
+  WS   /api/grid/rounds/ws                   - 라운드 이벤트 push
+  POST /api/grid/rewards/emit                - 코인 리워드 지급
+  GET  /api/grid/rewards/stats               - 리워드 통계
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import time
 import hashlib
+from datetime import datetime
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
+from typing import Any
 
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
+from fastapi import (
+    APIRouter,
+    UploadFile,
+    File,
+    Form,
+    HTTPException,
+    Depends,
+    Header,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import FileResponse, JSONResponse
+
+from hwarang_api.middleware.auth import verify_api_key
+
+# 분산 학습 보조 모듈 (다른 그룹이 동시 작성 중) — 모듈이 아직 없을 때도
+# grid.py 임포트 자체는 성공해야 한다.
+try:  # pragma: no cover - 임포트 시점에만 평가
+    from hwarang_api.grid.matcher import AgentMatcher  # type: ignore
+except Exception:  # pragma: no cover
+    AgentMatcher = None  # type: ignore[assignment]
+
+try:  # pragma: no cover
+    from hwarang_api.grid.sharder import DataShardingService  # type: ignore
+except Exception:  # pragma: no cover
+    DataShardingService = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/grid", tags=["Grid/HFL"])
+router = APIRouter(prefix="/api/grid", tags=["Grid/HFL"])
 
 # ════════════════════════════════════════════════════════════════
 # 인메모리 상태 (프로덕션에서는 Redis/DB로 교체)
@@ -144,7 +182,7 @@ async def register_agent(
         "referral_code": _users.get(user_id, {}).get("referral_code", ""),
         "current_lora": {
             "version": _lora_version,
-            "download_url": "/grid/hfl/lora/latest",
+            "download_url": "/api/grid/lora/latest",
         } if _lora_path else None,
     }
 
@@ -266,7 +304,7 @@ async def heartbeat(
         commands.append({
             "type": "update_lora",
             "version": _lora_version,
-            "download_url": "/grid/hfl/lora/latest",
+            "download_url": "/api/grid/lora/latest",
         })
 
     # 학습 작업 확인
@@ -280,8 +318,8 @@ async def heartbeat(
                         "round_id": _current_round["round_id"],
                         "task": "train_lora",
                         "config": _current_round.get("config", {}),
-                        "data_url": f"/grid/hfl/data/{_current_round['round_id']}",
-                        "upload_url": f"/grid/hfl/submit/{_current_round['round_id']}",
+                        "data_url": f"/api/grid/rounds/{_current_round['round_id']}/data",
+                        "upload_url": f"/api/grid/rounds/{_current_round['round_id']}/submit",
                     },
                 })
 
@@ -323,7 +361,7 @@ async def grid_status():
 # HFL 학습 라운드
 # ════════════════════════════════════════════════════════════════
 
-@router.post("/hfl/round/start")
+@router.post("/rounds/start")
 async def start_round(
     lora_r: int = 16,
     lora_alpha: int = 32,
@@ -371,7 +409,7 @@ async def start_round(
     }
 
 
-@router.get("/hfl/round/task/{agent_id}")
+@router.get("/rounds/task/{agent_id}")
 async def get_round_task(agent_id: str):
     """에이전트 학습 작업 조회."""
     if not _current_round:
@@ -391,13 +429,13 @@ async def get_round_task(agent_id: str):
         "round_id": _current_round["round_id"],
         "task": "train_lora",
         "config": _current_round["config"],
-        "data_url": f"/grid/hfl/data/{_current_round['round_id']}",
-        "upload_url": f"/grid/hfl/submit/{_current_round['round_id']}",
+        "data_url": f"/api/grid/rounds/{_current_round['round_id']}/data",
+        "upload_url": f"/api/grid/rounds/{_current_round['round_id']}/submit",
         "deadline": time.time() + 3600,
     }
 
 
-@router.post("/hfl/submit/{round_id}")
+@router.post("/rounds/{round_id}/submit")
 async def submit_lora(
     round_id: str,
     agent_id: str = Form(...),
@@ -568,7 +606,7 @@ async def submit_lora(
     return result
 
 
-@router.get("/hfl/lora/latest")
+@router.get("/lora/latest")
 async def download_latest_lora():
     """최신 통합 LoRA 다운로드."""
     if not _lora_path:
@@ -585,7 +623,7 @@ async def download_latest_lora():
     )
 
 
-@router.get("/hfl/lora/version")
+@router.get("/lora/version")
 async def lora_version():
     """현재 LoRA 버전."""
     return {
@@ -773,3 +811,447 @@ async def collected_data_stats():
         "by_source": by_source,
         "recent": _collected_data[-20:],
     }
+
+
+# ════════════════════════════════════════════════════════════════
+# v3.3: 분산 학습 / Peer 평가 / 수익 / WebSocket
+# ════════════════════════════════════════════════════════════════
+#
+# 새로 추가된 엔드포인트는 모두 Bearer 토큰 인증을 사용 (verify_api_key).
+# Prisma 모델: Round, RoundParticipant, PeerVote, AgentEarnings, DataShard.
+# AgentMatcher / DataShardingService 가 사용 가능하면 활용, 없으면 안전 폴백.
+
+# WebSocket 연결 풀: agent_id → [WebSocket]
+_ws_connections: dict[str, list[WebSocket]] = {}
+
+
+def _verify_ws_bearer(token: str | None) -> bool:
+    """WebSocket 핸드셰이크용 가벼운 Bearer 검증.
+
+    HTTP 라우트의 verify_api_key 와 동일한 정책 (hk- prefix).
+    settings.require_auth=False 환경에서는 토큰 없어도 허용.
+    """
+    if not token:
+        return False
+    if token.startswith("Bearer "):
+        token = token[7:]
+    return token.startswith("hk-")
+
+
+async def broadcast_round_event(
+    event_type: str,
+    round_id: str,
+    domain: str | None = None,
+    metadata: dict | None = None,
+    target_agents: list[str] | None = None,
+) -> None:
+    """라운드 이벤트를 connected agents 한테 fanout.
+
+    target_agents=None 이면 전체 broadcast,
+    list 가 주어지면 해당 agent_id 들만.
+    """
+    payload = {
+        "type": event_type,
+        "round_id": round_id,
+        "domain": domain,
+        "metadata": metadata or {},
+        "ts": time.time(),
+    }
+    targets = target_agents if target_agents is not None else list(_ws_connections.keys())
+
+    for agent_id in targets:
+        conns = _ws_connections.get(agent_id, [])
+        dead: list[WebSocket] = []
+        for ws in conns:
+            try:
+                await ws.send_json(payload)
+            except Exception as e:
+                logger.debug(f"WS send 실패 ({agent_id}): {e}")
+                dead.append(ws)
+        for ws in dead:
+            try:
+                conns.remove(ws)
+            except ValueError:
+                pass
+        if not conns and agent_id in _ws_connections:
+            _ws_connections.pop(agent_id, None)
+
+
+@router.get("/rounds/open")
+async def list_open_rounds(
+    agent_id: str = Query(...),
+    domain: str | None = Query(None),
+    max_results: int = Query(20, ge=1, le=100),
+    api_key: str | None = Depends(verify_api_key),
+):
+    """에이전트가 참여 가능한 OPEN 상태 라운드 목록.
+
+    AgentMatcher 가 있으면 도메인·tier·평판 기반으로 매칭 점수 계산.
+    """
+    try:
+        from hwarang_api.db import prisma
+    except Exception:
+        prisma = None  # type: ignore[assignment]
+
+    rounds: list[dict[str, Any]] = []
+
+    if prisma is not None and getattr(prisma, "is_connected", lambda: False)():
+        try:
+            where: dict[str, Any] = {"status": "OPEN"}
+            if domain:
+                where["domain"] = domain
+            db_rounds = await prisma.round.find_many(  # type: ignore[attr-defined]
+                where=where,
+                take=max_results,
+                order={"createdAt": "desc"},
+            )
+            for r in db_rounds:
+                rounds.append({
+                    "round_id": r.id,
+                    "domain": r.domain,
+                    "status": r.status,
+                    "config": r.config,
+                    "created_at": r.createdAt.isoformat() if r.createdAt else None,
+                })
+        except Exception as e:
+            logger.warning(f"prisma.round.find_many 실패: {e}")
+
+    # 폴백: 인메모리 _current_round
+    if not rounds and _current_round and _current_round.get("status") in ("training", "collecting", "OPEN"):
+        if not domain or _current_round.get("domain") == domain:
+            rounds.append({
+                "round_id": _current_round["round_id"],
+                "domain": _current_round.get("domain"),
+                "status": _current_round.get("status"),
+                "config": _current_round.get("config", {}),
+                "created_at": None,
+            })
+
+    # AgentMatcher 점수 매김
+    if AgentMatcher is not None and rounds:
+        try:
+            matcher = AgentMatcher()
+            agent = _agents.get(agent_id, {"agent_id": agent_id})
+            scored = []
+            for r in rounds:
+                score = await matcher.score(agent, r) if asyncio.iscoroutinefunction(getattr(matcher, "score", None)) else 0.5  # type: ignore[arg-type]
+                scored.append({**r, "match_score": score})
+            scored.sort(key=lambda x: x.get("match_score", 0), reverse=True)
+            rounds = scored
+        except Exception as e:
+            logger.debug(f"AgentMatcher 점수 매김 실패(무시): {e}")
+
+    return {"agent_id": agent_id, "domain": domain, "rounds": rounds[:max_results]}
+
+
+@router.get("/rounds/{round_id}/peer-lora/{peer_agent_id}")
+async def download_peer_lora(
+    round_id: str,
+    peer_agent_id: str,
+    api_key: str | None = Depends(verify_api_key),
+):
+    """다른 에이전트가 제출한 LoRA 다운로드 (peer 평가용)."""
+    adapter_path = LORA_INBOX / round_id / peer_agent_id / "adapter_model.safetensors"
+    if not adapter_path.exists():
+        raise HTTPException(404, "peer LoRA 없음")
+
+    return FileResponse(
+        str(adapter_path),
+        filename=f"{peer_agent_id}_adapter.safetensors",
+        headers={
+            "X-Round-Id": round_id,
+            "X-Peer-Agent-Id": peer_agent_id,
+        },
+    )
+
+
+@router.get("/rounds/{round_id}/eval-shard")
+async def get_eval_shard(
+    round_id: str,
+    agent_id: str = Query(...),
+    api_key: str | None = Depends(verify_api_key),
+):
+    """peer 평가용 validation shard 메타데이터 (10~20%).
+
+    DataShardingService 가 있으면 그쪽으로 위임.
+    """
+    if DataShardingService is not None:
+        try:
+            svc = DataShardingService()
+            result = svc.get_validation_shard(round_id, agent_id)  # type: ignore[attr-defined]
+            if asyncio.iscoroutine(result):
+                result = await result
+            return result
+        except Exception as e:
+            logger.warning(f"DataShardingService.get_validation_shard 실패: {e}")
+
+    # 폴백: 인메모리 라운드 → 더미 메타데이터
+    if not _current_round or _current_round.get("round_id") != round_id:
+        raise HTTPException(404, "라운드 없음")
+
+    return {
+        "round_id": round_id,
+        "agent_id": agent_id,
+        "shard_kind": "validation",
+        "validation_fraction": 0.15,
+        "data_url": f"/api/grid/rounds/{round_id}/data?kind=validation",
+        "sample_count": 0,
+    }
+
+
+@router.post("/rounds/{round_id}/peer-vote")
+async def submit_peer_vote(
+    round_id: str,
+    payload: dict,
+    api_key: str | None = Depends(verify_api_key),
+):
+    """peer 평가 투표 제출.
+
+    Body: {voter_id, peer_id, quality_score, rationale?}
+    """
+    voter_id = payload.get("voter_id")
+    peer_id = payload.get("peer_id")
+    quality_score = payload.get("quality_score")
+    rationale = payload.get("rationale")
+
+    if not voter_id or not peer_id or quality_score is None:
+        raise HTTPException(400, "voter_id, peer_id, quality_score 필수")
+    try:
+        quality_score = float(quality_score)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "quality_score 는 숫자여야 함")
+    if not (0 <= quality_score <= 1):
+        raise HTTPException(400, "quality_score 는 0~1 범위")
+
+    try:
+        from hwarang_api.db import prisma
+    except Exception:
+        prisma = None  # type: ignore[assignment]
+
+    if prisma is not None and getattr(prisma, "is_connected", lambda: False)():
+        try:
+            vote = await prisma.peervote.upsert(  # type: ignore[attr-defined]
+                where={
+                    "roundId_voterId_peerId": {
+                        "roundId": round_id,
+                        "voterId": voter_id,
+                        "peerId": peer_id,
+                    }
+                },
+                data={
+                    "create": {
+                        "roundId": round_id,
+                        "voterId": voter_id,
+                        "peerId": peer_id,
+                        "qualityScore": quality_score,
+                        "rationale": rationale,
+                    },
+                    "update": {
+                        "qualityScore": quality_score,
+                        "rationale": rationale,
+                    },
+                },
+            )
+            return {"status": "recorded", "vote_id": vote.id}
+        except Exception as e:
+            logger.warning(f"prisma.peervote.upsert 실패: {e}")
+
+    # 폴백: 인메모리
+    if _current_round and _current_round.get("round_id") == round_id:
+        votes = _current_round.setdefault("peer_votes", [])
+        votes.append({
+            "voter_id": voter_id,
+            "peer_id": peer_id,
+            "quality_score": quality_score,
+            "rationale": rationale,
+            "ts": time.time(),
+        })
+    return {"status": "recorded_inmem"}
+
+
+@router.get("/rounds/{round_id}/participants")
+async def list_round_participants(
+    round_id: str,
+    api_key: str | None = Depends(verify_api_key),
+):
+    """라운드 참가자 목록."""
+    try:
+        from hwarang_api.db import prisma
+    except Exception:
+        prisma = None  # type: ignore[assignment]
+
+    if prisma is not None and getattr(prisma, "is_connected", lambda: False)():
+        try:
+            parts = await prisma.roundparticipant.find_many(  # type: ignore[attr-defined]
+                where={"roundId": round_id},
+                order={"joinedAt": "asc"},
+            )
+            return {
+                "round_id": round_id,
+                "participants": [
+                    {
+                        "agent_id": p.agentId,
+                        "status": p.status,
+                        "shard_id": p.shardId,
+                        "joined_at": p.joinedAt.isoformat() if p.joinedAt else None,
+                        "submitted_at": p.submittedAt.isoformat() if p.submittedAt else None,
+                        "quality_score": p.qualityScore,
+                    }
+                    for p in parts
+                ],
+            }
+        except Exception as e:
+            logger.warning(f"prisma.roundparticipant.find_many 실패: {e}")
+
+    # 폴백: 인메모리
+    if _current_round and _current_round.get("round_id") == round_id:
+        submitted_ids = {s["agent_id"] for s in _current_round.get("submissions", [])}
+        return {
+            "round_id": round_id,
+            "participants": [
+                {
+                    "agent_id": aid,
+                    "status": "SUBMITTED" if aid in submitted_ids else "ACCEPTED",
+                    "shard_id": None,
+                    "joined_at": None,
+                    "submitted_at": None,
+                    "quality_score": None,
+                }
+                for aid in _current_round.get("participants", [])
+            ],
+        }
+    raise HTTPException(404, "라운드 없음")
+
+
+@router.get("/agents/{agent_id}/earnings")
+async def get_agent_earnings(
+    agent_id: str,
+    since: str | None = Query(None, description="ISO8601 시작 시각"),
+    api_key: str | None = Depends(verify_api_key),
+):
+    """에이전트 수익 내역."""
+    since_dt: datetime | None = None
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(400, "since 는 ISO8601 형식")
+
+    try:
+        from hwarang_api.db import prisma
+    except Exception:
+        prisma = None  # type: ignore[assignment]
+
+    if prisma is not None and getattr(prisma, "is_connected", lambda: False)():
+        try:
+            where: dict[str, Any] = {"agentId": agent_id}
+            if since_dt:
+                where["createdAt"] = {"gte": since_dt}
+            rows = await prisma.agentearnings.find_many(  # type: ignore[attr-defined]
+                where=where,
+                order={"createdAt": "desc"},
+            )
+            total = sum(float(r.amount) for r in rows)
+            return {
+                "agent_id": agent_id,
+                "since": since,
+                "total": total,
+                "earnings": [
+                    {
+                        "amount": float(r.amount),
+                        "source": r.source,
+                        "round_id": r.roundId,
+                        "created_at": r.createdAt.isoformat() if r.createdAt else None,
+                    }
+                    for r in rows
+                ],
+            }
+        except Exception as e:
+            logger.warning(f"prisma.agentearnings.find_many 실패: {e}")
+
+    # 폴백: _reward_history
+    history = [r for r in _reward_history if r.get("agent_id") == agent_id]
+    if since_dt:
+        cutoff = since_dt.timestamp()
+        history = [r for r in history if r.get("timestamp", 0) >= cutoff]
+    return {
+        "agent_id": agent_id,
+        "since": since,
+        "total": sum(r.get("amount", 0) for r in history),
+        "earnings": [
+            {
+                "amount": r.get("amount", 0),
+                "source": r.get("reason", "unknown"),
+                "round_id": None,
+                "created_at": datetime.fromtimestamp(r.get("timestamp", 0)).isoformat()
+                    if r.get("timestamp") else None,
+            }
+            for r in history
+        ],
+    }
+
+
+@router.websocket("/rounds/ws")
+async def rounds_websocket(
+    websocket: WebSocket,
+    agent_id: str = Query(...),
+    token: str | None = Query(None),
+):
+    """라운드 이벤트 push 채널.
+
+    Connect: ws://.../api/grid/rounds/ws?agent_id=AGENT&token=Bearer%20hk-...
+    또는 헤더 Authorization: Bearer hk-...
+
+    서버 → 에이전트 메시지:
+      {"type": "round_open"|"round_close"|"round_completed",
+       "round_id": ..., "domain": ..., "metadata": {...}}
+    """
+    # 헤더 또는 query 에서 토큰 수집
+    auth_header = websocket.headers.get("authorization") or websocket.headers.get("Authorization")
+    bearer = auth_header or token
+
+    require_auth = True
+    try:
+        require_auth = bool(websocket.app.state.settings.require_auth)
+    except Exception:
+        pass
+
+    if require_auth and not _verify_ws_bearer(bearer):
+        await websocket.close(code=1008)  # policy violation
+        return
+
+    await websocket.accept()
+    _ws_connections.setdefault(agent_id, []).append(websocket)
+    logger.info(f"WS connected: {agent_id} (총 {sum(len(v) for v in _ws_connections.values())}개)")
+
+    try:
+        # 환영 메시지 + 현재 라운드 상태
+        await websocket.send_json({
+            "type": "hello",
+            "agent_id": agent_id,
+            "current_round": {
+                "round_id": _current_round["round_id"],
+                "status": _current_round.get("status"),
+            } if _current_round else None,
+            "ts": time.time(),
+        })
+
+        # ping/pong 유지 — 클라이언트 메시지 받으면 echo
+        while True:
+            msg = await websocket.receive_text()
+            try:
+                data = json.loads(msg)
+                if data.get("type") == "ping":
+                    await websocket.send_json({"type": "pong", "ts": time.time()})
+            except json.JSONDecodeError:
+                pass
+    except WebSocketDisconnect:
+        logger.info(f"WS disconnected: {agent_id}")
+    except Exception as e:
+        logger.warning(f"WS 오류 ({agent_id}): {e}")
+    finally:
+        conns = _ws_connections.get(agent_id, [])
+        if websocket in conns:
+            conns.remove(websocket)
+        if not conns and agent_id in _ws_connections:
+            _ws_connections.pop(agent_id, None)

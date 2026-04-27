@@ -15,10 +15,27 @@
       "shell": {
         "open": true,
         "execute": true,
-        "sidecar": false
+        "sidecar": true,
+        "scope": [
+          {
+            "name": "binaries/hwarang-agent",
+            "sidecar": true,
+            "args": true
+          }
+        ]
       },
       "notification": {
         "all": true
+      },
+      "dialog": {
+        "all": false,
+        "message": true,
+        "ask": true
+      },
+      "process": {
+        "all": false,
+        "relaunch": true,
+        "exit": false
       }
     },
     "bundle": {
@@ -36,8 +53,12 @@
       "shortDescription": "화랑 AI Grid 에이전트",
       "longDescription": "GPU 공유 네트워크에 참여하여 AI 학습에 기여하고 HWR 코인을 받으세요.",
       "copyright": "2025 Persismore",
+      "externalBin": [
+        "binaries/hwarang-agent"
+      ],
       "macOS": {
-        "minimumSystemVersion": "11.0"
+        "minimumSystemVersion": "11.0",
+        "exceptionDomain": "hwarang.ai"
       },
       "windows": {
         "certificateThumbprint": null,
@@ -50,9 +71,41 @@
       "iconAsTemplate": true,
       "menuOnLeftClick": true
     },
-    "windows": [],
+    "windows": [
+      {
+        "label": "settings",
+        "title": "화랑 Grid 설정",
+        "url": "settings.html",
+        "width": 600,
+        "height": 720,
+        "minWidth": 520,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "visible": false,
+        "decorations": true,
+        "alwaysOnTop": false,
+        "skipTaskbar": false,
+        "center": true,
+        "fileDropEnabled": false
+      }
+    ],
+    "updater": {
+      "active": true,
+      "endpoints": [
+        "https://hwarang.ai/api/agent/update/latest.json"
+      ],
+      "dialog": true,
+      "pubkey": ""
+    },
     "security": {
-      "csp": null
+      "csp": null,
+      "dangerousRemoteDomainIpcAccess": []
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "schemes": ["hwarang-grid"]
     }
   }
 }

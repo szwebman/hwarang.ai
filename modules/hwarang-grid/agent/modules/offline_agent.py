@@ -68,7 +68,7 @@ class OfflineAgentModule:
             try:
                 import urllib.request
                 req = urllib.request.Request(
-                    f"{master_url}/api/agent/sync",
+                    f"{master_url}/api/grid/sync",
                     data=json.dumps(entry).encode(),
                     headers={"Content-Type": "application/json"},
                 )

@@ -471,7 +471,7 @@ class DataDeduplicator:
             # 내 해시 목록 전송
             recent_hashes = list(self._seen_hashes)[-10000:]
             response = client.post(
-                f"{master_url}/grid/data/dedup-sync",
+                f"{master_url}/api/grid/data/dedup-sync",
                 json={"agent_id": agent_id, "hashes": recent_hashes},
             )
 
