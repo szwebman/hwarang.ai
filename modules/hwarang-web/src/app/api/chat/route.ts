@@ -76,18 +76,33 @@ export async function POST(request: NextRequest) {
   }
 
   // ─── 2.5. Conversation 영속화 (좌측 채팅 리스트 표시용) ──
+  // 클라이언트가 UUID 를 보내면 그걸로 upsert (reverse proxy 가 헤더 잘라도 ID 유지).
   const lastUserMessage = [...(body.messages || [])]
     .reverse()
     .find((m: any) => m.role === "user");
   let conversationId: string | null = body.conversationId ?? null;
   if (lastUserMessage?.content) {
     const titleSeed = String(lastUserMessage.content).slice(0, 40).replace(/\s+/g, " ").trim() || "새 대화";
+
     if (conversationId) {
-      const existing = await prisma.conversation.findFirst({
-        where: { id: conversationId, userId },
-        select: { id: true },
+      // 클라이언트 제공 ID 로 upsert — 본인 소유 검증 포함
+      const existing = await prisma.conversation.findUnique({
+        where: { id: conversationId },
+        select: { id: true, userId: true },
       });
-      if (!existing) conversationId = null;
+      if (existing && existing.userId !== userId) {
+        // 다른 사람 대화 ID 위조 시도 — 무시하고 새로 생성
+        conversationId = null;
+      } else if (!existing) {
+        await prisma.conversation.create({
+          data: {
+            id: conversationId,
+            userId,
+            title: titleSeed,
+            model: body.model || "auto",
+          },
+        });
+      }
     }
     if (!conversationId) {
       const created = await prisma.conversation.create({

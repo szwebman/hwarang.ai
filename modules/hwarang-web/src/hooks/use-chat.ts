@@ -78,6 +78,16 @@ export function useChat(options: UseChatOptions = {}) {
       setIsStreaming(true);
 
       try {
+        // 첫 메시지면 클라이언트에서 UUID 생성 — 서버가 이 ID 로 conversation upsert.
+        // 응답 헤더가 reverse proxy 에서 잘려도 ID 가 유지됨.
+        if (!conversationIdRef.current) {
+          const newId =
+            typeof crypto !== "undefined" && crypto.randomUUID
+              ? crypto.randomUUID()
+              : `c_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+          setConversationId(newId);
+        }
+
         const allMessages = [...messages, userMessage];
         const response = await fetch(apiUrl, {
           method: "POST",
@@ -93,7 +103,7 @@ export function useChat(options: UseChatOptions = {}) {
           }),
         });
 
-        // 응답 헤더에서 conversationId 회수 (스트리밍 우선)
+        // 응답 헤더에서 conversationId 회수 (백업 — reverse proxy 가 살려 보내면)
         const cidHeader = response.headers.get("X-Conversation-Id");
         if (cidHeader) setConversationId(cidHeader);
 
