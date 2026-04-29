@@ -70,13 +70,21 @@ echo "  최종: $(wc -l < "$COMBINED") 샘플 → $COMBINED"
 # ============================================================
 # 4. LoRA 학습
 # ============================================================
-echo "[4/5] LoRA 학습 시작"
-$PYTHON scripts/lora_train.py \
-    --checkpoint "$BASE" \
+echo "[4/5] LoRA 학습 시작 (qlora_qwen.py — AWQ/GPTQ 자동 감지)"
+EPOCHS=${EPOCHS:-3}
+BATCH_SIZE=${BATCH_SIZE:-2}
+GRAD_ACCUM=${GRAD_ACCUM:-8}
+LR=${LR:-2e-4}
+
+$PYTHON scripts/qlora_qwen.py \
+    --model-path "$BASE" \
     --data "$COMBINED" \
     --output "$OUTPUT" \
-    --r "$LORA_R" --alpha "$LORA_ALPHA" \
-    --target-modules q_proj k_proj v_proj o_proj gate_proj up_proj down_proj \
+    --epochs "$EPOCHS" \
+    --batch-size "$BATCH_SIZE" \
+    --grad-accum "$GRAD_ACCUM" \
+    --lr "$LR" \
+    --lora-r "$LORA_R" --lora-alpha "$LORA_ALPHA" \
     --max-length "$MAX_LEN"
 
 echo "  학습 완료: $OUTPUT"

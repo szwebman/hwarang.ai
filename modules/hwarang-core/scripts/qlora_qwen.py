@@ -94,26 +94,48 @@ def main():
     logger.info(f"  데이터셋 준비 완료: {len(dataset)} 예제")
 
     # ============================================================
-    # 2. 모델 로드 (bitsandbytes INT4 양자화)
+    # 2. 모델 로드 (양자화 자동 감지)
+    #    AWQ / GPTQ 이미 양자화된 모델은 bnb 추가 적용 안 함.
+    #    풀 정밀도 모델만 bitsandbytes INT4 적용.
     # ============================================================
-    logger.info("모델 로드 중 (INT4 양자화)... 약 2~3분 소요")
-
     import torch
-    from transformers import BitsAndBytesConfig
 
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_use_double_quant=True,
-    )
+    config_json = os.path.join(args.model_path, "config.json")
+    quant_method = None
+    if os.path.exists(config_json):
+        try:
+            with open(config_json, encoding="utf-8") as f:
+                cfg = json.load(f)
+            quant_cfg = cfg.get("quantization_config") or {}
+            quant_method = (quant_cfg.get("quant_method") or "").lower()
+        except Exception as exc:
+            logger.warning(f"config.json 파싱 실패 (무시): {exc}")
 
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_path,
-        quantization_config=bnb_config,
-        device_map="auto",
-        trust_remote_code=True,
-    )
+    if quant_method in ("awq", "gptq"):
+        logger.info(f"모델 로드 중 (이미 {quant_method.upper()} 양자화됨, bnb 미적용)...")
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_path,
+            device_map="auto",
+            trust_remote_code=True,
+            torch_dtype=torch.bfloat16,
+        )
+    else:
+        logger.info("모델 로드 중 (bitsandbytes INT4 양자화)... 약 2~3분 소요")
+        from transformers import BitsAndBytesConfig
+
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+        )
+
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_path,
+            quantization_config=bnb_config,
+            device_map="auto",
+            trust_remote_code=True,
+        )
 
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_path,
