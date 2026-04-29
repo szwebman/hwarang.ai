@@ -1,13 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import { useChat } from "@/hooks/use-chat";
 import { useAutoScroll } from "@/hooks/use-scroll";
 import { MessageBubble } from "./message-bubble";
 import { MessageInput } from "./message-input";
+import type { AttachedImage } from "@/types/chat";
 
 interface ChatAreaProps {
   conversationId?: string | null;
@@ -17,11 +18,25 @@ interface ChatAreaProps {
 export function ChatArea({ conversationId, onConversationIdChange }: ChatAreaProps = {}) {
   const { data: session } = useSession();
   const router = useRouter();
-  const { messages, sendMessage, isStreaming, error, clearMessages, loadConversation } = useChat({
+  // 입력창 OptionBar 상태 — "" = Auto 라우팅
+  const [selectedModel, setSelectedModel] = useState<string>("");
+  const [safetyMode, setSafetyMode] = useState<string>("standard");
+  const {
+    messages,
+    sendMessage,
+    continueMessage,
+    isStreaming,
+    error,
+    clearMessages,
+    loadConversation,
+  } = useChat({
     conversationId,
     onConversationIdChange,
+    model: selectedModel,
+    safety: safetyMode,
   });
   const scrollRef = useAutoScroll(messages);
+  const lastAssistantContentRef = useRef<string>("");
 
   // 사이드바에서 다른 대화 클릭 시 메시지 로드, null 이면 빈 상태
   useEffect(() => {
@@ -32,12 +47,48 @@ export function ChatArea({ conversationId, onConversationIdChange }: ChatAreaPro
     }
   }, [conversationId, loadConversation, clearMessages]);
 
-  const handleSendWithAuth = async (text: string) => {
+  // assistant 응답이 끝날 때마다 OptionBar 의 사용량 즉시 갱신 트리거.
+  // 30초 폴링과 별개로, 토큰 차감 직후의 잔액을 빠르게 반영.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const last = messages[messages.length - 1];
+    if (!last || last.role !== "assistant") return;
+    // 스트리밍이 끝나고 (isStreaming false) 컨텐츠가 확정된 시점에만 발사
+    if (isStreaming) return;
+    if (last.content === lastAssistantContentRef.current) return;
+    if (!last.content) return;
+    lastAssistantContentRef.current = last.content;
+    window.dispatchEvent(new Event("hwarang:usage-changed"));
+  }, [messages, isStreaming]);
+
+  // [레거시 호환] 옵션 카드가 onOptionSelect prop 을 받지 못한 경우(다른 곳에서 직접 카드 렌더 등)
+  // 만 fallback 으로 "{title} 스타일로 진행해줘" 자동 전송.
+  // 신규 인라인 흐름(continueMessage)에서는 이 이벤트를 발사하지 않음.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as
+        | { option: { title: string; keywords: string[] } }
+        | undefined;
+      if (!detail?.option) return;
+      const { option } = detail;
+      const followup = `${option.title} 스타일로 진행해줘. (${option.keywords.join(", ")})`;
+      sendMessage(followup, undefined, { skipOptions: true });
+    };
+    window.addEventListener("hwarang:option-selected", handler);
+    return () => window.removeEventListener("hwarang:option-selected", handler);
+  }, [sendMessage]);
+
+  const handleSendWithAuth = async (
+    text: string,
+    _files?: File[],
+    images?: AttachedImage[],
+  ) => {
     if (!session) {
       router.push("/login");
       return;
     }
-    await sendMessage(text);
+    await sendMessage(text, images);
     if (typeof window !== "undefined") {
       window.dispatchEvent(new Event("hwarang:conversation-changed"));
     }
@@ -96,7 +147,13 @@ export function ChatArea({ conversationId, onConversationIdChange }: ChatAreaPro
             <div className="space-y-1">
               {messages.map((message, idx) => (
                 <div key={message.id} className="animate-fade-in" style={{ animationDelay: `${Math.min(idx * 30, 200)}ms` }}>
-                  <MessageBubble message={message} />
+                  <MessageBubble
+                    message={message}
+                    onOptionSelect={async (msgId, opt) => {
+                      // Claude-style 인라인 — 같은 메시지에 답변 이어붙이기
+                      await continueMessage(msgId, opt.id, opt.title, opt.keywords);
+                    }}
+                  />
                 </div>
               ))}
             </div>
@@ -197,6 +254,10 @@ export function ChatArea({ conversationId, onConversationIdChange }: ChatAreaPro
             onSend={handleSendWithAuth}
             disabled={isStreaming}
             placeholder={session ? "메시지를 입력하세요..." : "로그인 후 이용 가능합니다"}
+            selectedModel={selectedModel}
+            setSelectedModel={setSelectedModel}
+            safetyMode={safetyMode}
+            setSafetyMode={setSafetyMode}
           />
           <p className="text-[11px] text-center mt-2" style={{ color: "var(--muted-foreground)", opacity: 0.6 }}>
             화랑 AI는 실수할 수 있습니다. 중요한 정보는 확인하세요.

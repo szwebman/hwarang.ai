@@ -26,6 +26,37 @@ export interface LLMResponse {
   finishReason: string;
 }
 
+/**
+ * 옵션 카드 1개 (웹과 동일 스키마, options.py 의 generate 응답).
+ */
+export interface OptionCard {
+  id: string;
+  title: string;
+  description: string;
+  keywords: string[];
+  preview_emoji: string;
+}
+
+/**
+ * 직접 chat 호출 응답 (옵션 모드 / 일반 답변 통합).
+ */
+export type DirectChatResponse =
+  | {
+      type: "options";
+      intro: string;
+      options: OptionCard[];
+      deliverable?: string;
+      conversationId?: string;
+    }
+  | {
+      type: "answer";
+      content: string;
+      model?: string;
+      chargedTokens?: number;
+      latencyMs?: number;
+      conversationId?: string;
+    };
+
 interface Config {
   provider: string;
   apiUrl: string;
@@ -389,6 +420,143 @@ export class LLMClient {
         }
       }
     }
+  }
+
+  // ================================================================
+  // Direct chat (옵션 모드 / 이미지 / 사용량 메타) — 웹과 동등
+  // ================================================================
+
+  /**
+   * /api/chat 단일턴 호출. AgentLoop 의 conversationHistory 와 별개로
+   * webview 가 직접 user 메시지+이미지를 보내고 옵션/답변/메타를 받는 경로.
+   *
+   * - 옵션 응답이 오면 _meta.options 를 그대로 노출
+   * - 일반 답변이면 choices[0].message.content + _meta 를 OpenAI 호환 처리
+   * - non-stream 으로만 동작 (스트리밍은 후속 작업)
+   */
+  async chatDirect(params: {
+    text: string;
+    images?: string[]; // base64 data URLs (data:image/png;base64,...)
+    model?: string;
+    safety?: string;
+    conversationId?: string;
+    history?: { role: "user" | "assistant"; content: string }[];
+  }): Promise<DirectChatResponse> {
+    const url = `${this.config.apiUrl}/api/chat`;
+
+    const userContent: any =
+      params.images && params.images.length > 0
+        ? {
+            role: "user",
+            content: params.text,
+            images: params.images,
+          }
+        : { role: "user", content: params.text };
+
+    const messages = [...(params.history || []), userContent];
+
+    const body: Record<string, unknown> = {
+      model: params.model || this.config.model,
+      messages,
+      temperature: this.config.temperature,
+      max_tokens: this.config.maxTokens,
+      stream: false,
+    };
+    if (params.safety) body.safety = params.safety;
+    if (params.conversationId) body.conversationId = params.conversationId;
+
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: this.getHwarangHeaders(),
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      const errText = await resp.text();
+      throw new Error(`Hwarang API ${resp.status}: ${errText}`);
+    }
+
+    const data = (await resp.json()) as any;
+    const meta = data._meta || {};
+    const conversationId = meta.conversationId;
+
+    // 옵션 모드 응답 감지
+    if (meta.options?.options?.length) {
+      const intro =
+        data.choices?.[0]?.message?.content ||
+        `다음 ${meta.options.options.length}가지 중 선택해 주세요:`;
+      return {
+        type: "options",
+        intro,
+        options: meta.options.options,
+        deliverable: meta.options.deliverable,
+        conversationId,
+      };
+    }
+
+    const content =
+      data.choices?.[0]?.message?.content ||
+      data.response ||
+      data.content ||
+      "";
+
+    return {
+      type: "answer",
+      content,
+      model: meta.model,
+      chargedTokens: meta.chargedTokens,
+      latencyMs: meta.latencyMs,
+      conversationId,
+    };
+  }
+
+  /**
+   * 옵션 카드 클릭 후속 호출. continueOptionId/Title/Keywords 를 보내서
+   * 같은 메시지에 답변을 이어붙임.
+   */
+  async continueMessage(params: {
+    optionId: string;
+    optionTitle: string;
+    keywords: string[];
+    messageId?: string;
+    conversationId?: string;
+    history?: { role: "user" | "assistant"; content: string }[];
+  }): Promise<{ content: string; chargedTokens?: number; conversationId?: string }> {
+    const url = `${this.config.apiUrl}/api/chat`;
+
+    const body: Record<string, unknown> = {
+      model: this.config.model,
+      messages: params.history || [],
+      continueOptionId: params.optionId,
+      continueOptionTitle: params.optionTitle,
+      continueOptionKeywords: params.keywords,
+      stream: false,
+      temperature: this.config.temperature,
+      max_tokens: this.config.maxTokens,
+    };
+    if (params.messageId) body.continueMessageId = params.messageId;
+    if (params.conversationId) body.conversationId = params.conversationId;
+
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: this.getHwarangHeaders(),
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      const errText = await resp.text();
+      throw new Error(`Hwarang API ${resp.status}: ${errText}`);
+    }
+    const data = (await resp.json()) as any;
+    const meta = data._meta || {};
+    const content =
+      data.choices?.[0]?.message?.content ||
+      data.response ||
+      data.content ||
+      "";
+    return {
+      content,
+      chargedTokens: meta.chargedTokens,
+      conversationId: meta.conversationId,
+    };
   }
 
   // ================================================================

@@ -127,6 +127,30 @@ except Exception as _exc:
     pid_manager = None  # type: ignore
     logger.warning("pid_manager 임포트 실패: %s", _exc)
 
+# 인지(자율 결정) 모듈 — graceful import
+try:
+    from modules.cognitive import (  # type: ignore
+        decide_about_round,
+        RoundOffer as CognitiveRoundOffer,
+    )
+except Exception as _exc:
+    decide_about_round = None  # type: ignore
+    CognitiveRoundOffer = None  # type: ignore
+    logger.warning("cognitive 모듈 임포트 실패: %s", _exc)
+
+# 인지 callback 서버 — Master 의 consult 받기
+try:
+    from modules.cognitive.callback_server import (  # type: ignore
+        start_callback_server as _start_cognitive_callback,
+        stop_callback_server as _stop_cognitive_callback,
+        build_callback_url as _build_callback_url,
+    )
+except Exception as _exc:
+    _start_cognitive_callback = None  # type: ignore
+    _stop_cognitive_callback = None  # type: ignore
+    _build_callback_url = None  # type: ignore
+    logger.debug("cognitive callback_server 임포트 실패: %s", _exc)
+
 
 class HwarangAgent:
     """화랑 Grid 에이전트.
@@ -148,12 +172,22 @@ class HwarangAgent:
         self.hfl_active = False
         self._http_client = None
 
+        # 분산 크롤 워커 상태
+        self._crawler_agent = None
+        self._crawler_thread: threading.Thread | None = None
+
         # 데몬 모드 / 상태 추적
         self._daemon_mode: bool = False
         self._started_at = None
         self.last_error: str | None = None
         self._status_writer_thread: threading.Thread | None = None
         self._status_stop_event = None  # asyncio.Event (생성 시점 미정)
+
+        # cognitive callback 서버 상태 (마스터 → 에이전트 consult 수신)
+        self._callback_runner = None
+        self._callback_loop = None
+        self._callback_thread: threading.Thread | None = None
+        self._callback_url: str = ""
 
         # ~/.hwarang/ 자동 생성
         try:
@@ -291,10 +325,57 @@ class HwarangAgent:
             import asyncio as _asyncio
 
             async def _on_eligible(round_meta, ev):
-                """라운드 적합 판정 → 참여."""
+                """라운드 적합 판정 → (인지 결정) → 참여/거절."""
                 if participation_control is None:
                     logger.info("participation_control 없음 — 수동 join 필요")
                     return
+
+                # ── 인지(자율 결정) 게이트 ─────────────────
+                # round_subscription 의 1차 적합성(VRAM/티어/마감)을 통과한 뒤,
+                # 사용자 활동/배터리/야간/도메인 적성 등을 더해 한 번 더 판단.
+                cognitive_on = (
+                    os.environ.get("HWARANG_AGENT_COGNITIVE", "false").lower()
+                    in ("1", "true", "yes")
+                )
+                if cognitive_on and decide_about_round is not None and CognitiveRoundOffer is not None:
+                    try:
+                        offer = CognitiveRoundOffer(
+                            round_id=round_meta.round_id,
+                            domain=getattr(round_meta, "domain", "general") or "general",
+                            estimated_minutes=int(getattr(round_meta, "estimated_time_minutes", 30) or 30),
+                            estimated_hwr=float(getattr(round_meta, "estimated_reward", 100) or 100),
+                            min_vram_gb=float(getattr(round_meta, "min_vram_gb", 8) or 8),
+                            sample_count=int(getattr(round_meta, "sample_count", 1000) or 1000),
+                        )
+                        use_llm = os.environ.get("HWARANG_AGENT_LLM_DECIDE", "false").lower() in (
+                            "1", "true", "yes",
+                        )
+                        decision = await decide_about_round(offer, use_llm=use_llm)
+                        logger.info(
+                            "라운드 %s 인지 결정: %s (conf=%.2f) — %s",
+                            offer.round_id, decision.action, decision.confidence, decision.reasoning,
+                        )
+                        if decision.action != "accept":
+                            try:
+                                await participation_control.decline_round(
+                                    master_url=self.master_url,
+                                    agent_id=self.agent_id,
+                                    api_key=self.api_key,
+                                    round_id=offer.round_id,
+                                    reason=f"cognitive:{decision.action}:{decision.reasoning}"[:200],
+                                )
+                            except Exception as exc:
+                                logger.debug("decline 전송 실패: %s", exc)
+                            if decision.suggested_alternatives:
+                                logger.info(
+                                    "  대안 추천: %s",
+                                    ", ".join(decision.suggested_alternatives),
+                                )
+                            return
+                    except Exception as exc:
+                        # 인지 모듈 오류는 join 을 막지 않음 (폴백: 그냥 join)
+                        logger.warning("cognitive 결정 실패, 기본 join 진행: %s", exc)
+
                 try:
                     await participation_control.join_round(
                         master_url=self.master_url,
@@ -373,6 +454,9 @@ class HwarangAgent:
             self.current_lora_version = checkpoint.get("lora_version", 0)
             logger.info(f"체크포인트 복원: LoRA v{self.current_lora_version}")
 
+        # cognitive callback 서버 — register 전에 띄워야 callback_url 등록 가능
+        self._start_callback_server_if_enabled()
+
         # 마스터 등록
         self._register_with_master()
 
@@ -418,6 +502,14 @@ class HwarangAgent:
         if round_subscription is not None and self.domain_profile is not None:
             self._start_thread("auto_participation", self._run_auto_participation_loop)
 
+        # 분산 크롤 워커 (마스터 큐에서 작업 임대)
+        try:
+            crawl_cfg = self.config.modules.crawling
+            if getattr(crawl_cfg, "enabled", False) and getattr(crawl_cfg, "distributed_enabled", True):
+                self._start_thread("crawler_worker", self._run_crawler_worker)
+        except Exception as exc:
+            logger.warning("크롤러 워커 시작 실패: %s", exc)
+
         # status_writer (데몬 모드 + 모듈 로드된 경우 — CLI가 이미 띄웠으면 중복 방지)
         if (
             self._daemon_mode
@@ -457,9 +549,22 @@ class HwarangAgent:
         self.watchdog.cleanup()
         self.watchdog.reset_crash_count()
 
+        # cognitive callback 서버 중지
+        try:
+            self._stop_callback_server()
+        except Exception as exc:
+            logger.debug("callback 서버 중지 실패: %s", exc)
+
         # P2P 중지
         if "p2p" in self.modules:
             self.modules["p2p"].stop()
+
+        # 크롤러 워커 중지 신호 (run_until_complete 가 _watcher 에 의해 곧 종료됨)
+        if self._crawler_agent is not None:
+            try:
+                self._crawler_agent.stop()
+            except Exception:
+                pass
 
         # 커넥션 풀 정리
         ConnectionPool.get().close()
@@ -523,6 +628,98 @@ class HwarangAgent:
             logger.warning("status_writer_loop 종료: %s", exc)
 
     # ════════════════════════════════════════════════════════════
+    # cognitive callback 서버 (마스터 → 에이전트 consult 수신)
+    # ════════════════════════════════════════════════════════════
+
+    def _start_callback_server_if_enabled(self):
+        """``HWARANG_AGENT_COGNITIVE=true`` 일 때 별도 스레드에 aiohttp 서버 기동.
+
+        스레드 분리 이유: agent_main 의 메인 스레드는 동기 ``_main_loop`` 라
+        asyncio 루프를 호스팅하지 않음. 콜백은 짧은 응답이라 별도 루프로 충분.
+        """
+        cognitive_on = os.environ.get("HWARANG_AGENT_COGNITIVE", "false").lower() in (
+            "1", "true", "yes",
+        )
+        if not cognitive_on:
+            return
+        if _start_cognitive_callback is None or _build_callback_url is None:
+            logger.warning("aiohttp 미설치 — cognitive callback 서버 비활성")
+            return
+
+        try:
+            port = int(os.environ.get("HWARANG_AGENT_CALLBACK_PORT", "7878") or 7878)
+        except Exception:
+            port = 7878
+
+        try:
+            self._callback_url = _build_callback_url(port)
+        except Exception as exc:
+            logger.warning("callback URL 결정 실패: %s", exc)
+            self._callback_url = ""
+
+        import asyncio as _asyncio
+
+        ready = threading.Event()
+
+        def _run_loop():
+            loop = _asyncio.new_event_loop()
+            _asyncio.set_event_loop(loop)
+            self._callback_loop = loop
+            try:
+                self._callback_runner = loop.run_until_complete(
+                    _start_cognitive_callback(port=port)
+                )
+                if self._callback_runner is None:
+                    logger.warning("callback 서버 runner 없음 (aiohttp 미설치?)")
+                    ready.set()
+                    return
+                ready.set()
+                loop.run_forever()
+            except Exception as exc:
+                logger.warning("callback 서버 루프 오류: %s", exc)
+                ready.set()
+            finally:
+                try:
+                    loop.close()
+                except Exception:
+                    pass
+
+        t = threading.Thread(target=_run_loop, name="cognitive-callback", daemon=True)
+        t.start()
+        # 최대 5초 대기 — 바인딩 실패해도 register 는 진행
+        ready.wait(timeout=5.0)
+        self._callback_thread = t
+        logger.info(
+            "cognitive callback 서버 — url=%s (port=%d)",
+            self._callback_url or "(미상)", port,
+        )
+
+    def _stop_callback_server(self):
+        """callback 서버 정리 — stop() 에서 호출."""
+        if self._callback_runner is None or self._callback_loop is None:
+            return
+        import asyncio as _asyncio
+
+        try:
+            fut = _asyncio.run_coroutine_threadsafe(
+                _stop_cognitive_callback(self._callback_runner),
+                self._callback_loop,
+            )
+            try:
+                fut.result(timeout=5.0)
+            except Exception as exc:
+                logger.debug("callback runner cleanup 결과 대기 실패: %s", exc)
+        except Exception as exc:
+            logger.debug("callback runner cleanup 예약 실패: %s", exc)
+
+        try:
+            self._callback_loop.call_soon_threadsafe(self._callback_loop.stop)
+        except Exception:
+            pass
+        self._callback_runner = None
+        self._callback_loop = None
+
+    # ════════════════════════════════════════════════════════════
     # 마스터 통신
     # ════════════════════════════════════════════════════════════
 
@@ -543,6 +740,15 @@ class HwarangAgent:
 
         try:
             gpu_info = self._detect_gpu()
+            # 도메인 — DomainProfile 이 있으면 primary_domains 직렬화
+            domains_json = "[]"
+            try:
+                if self.domain_profile is not None:
+                    primaries = list(getattr(self.domain_profile, "primary_domains", []) or [])
+                    domains_json = json.dumps(primaries)
+            except Exception:
+                domains_json = "[]"
+
             response = http.post(
                 f"{self.master_url}/api/grid/register",
                 data={
@@ -550,6 +756,10 @@ class HwarangAgent:
                     "gpu_name": gpu_info.get("name", "unknown"),
                     "vram_gb": gpu_info.get("vram_gb", 0),
                     "tier": self.config.tier or "lite",
+                    "domains": domains_json,
+                    "callback_url": self._callback_url or "",
+                    "callback_token": os.environ.get("HWARANG_AGENT_CALLBACK_TOKEN", ""),
+                    "region": os.environ.get("HWARANG_AGENT_REGION", "kr"),
                 },
                 headers=self._auth_headers(),
             )
@@ -973,6 +1183,55 @@ class HwarangAgent:
                     logger.info(f"🔄 학습 데이터 변환 완료: {training_path}")
 
             time.sleep(self.config.modules.crawling.interval_hours * 3600)
+
+    def _run_crawler_worker(self):
+        """분산 크롤 워커 — 마스터 큐에서 작업 임대 → fetch → 제출.
+
+        agent_main 의 스레드 모델 안에서 자체 asyncio loop 를 띄워
+        `crawler_agent.CrawlerAgent` 를 구동한다.
+        """
+        try:
+            from modules.crawler_agent import CrawlerAgent, CrawlerConfig
+        except Exception as exc:
+            logger.warning("crawler_agent 임포트 실패: %s", exc)
+            return
+
+        crawl_cfg = self.config.modules.crawling
+        cfg = CrawlerConfig(
+            master_url=self.master_url,
+            api_key=self.api_key or "",
+            agent_id=self.agent_id,
+            domain_filter=list(getattr(crawl_cfg, "domain_filter", []) or []) or None,
+            max_concurrent=getattr(crawl_cfg, "max_concurrent", 3),
+            poll_interval_seconds=getattr(crawl_cfg, "poll_interval_seconds", 30),
+            request_timeout_sec=getattr(crawl_cfg, "request_timeout", 15),
+            respect_robots=getattr(crawl_cfg, "respect_robots", True),
+        )
+
+        import asyncio as _asyncio
+        loop = _asyncio.new_event_loop()
+        _asyncio.set_event_loop(loop)
+        try:
+            crawler = CrawlerAgent(cfg)
+            self._crawler_agent = crawler
+
+            async def _watcher():
+                while self.running:
+                    await _asyncio.sleep(2)
+                crawler.stop()
+
+            try:
+                loop.run_until_complete(
+                    _asyncio.gather(_watcher(), crawler.run())
+                )
+            except Exception as exc:
+                logger.warning("크롤러 워커 종료: %s", exc)
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
+            self._crawler_agent = None
 
     def _run_auto_update(self):
         """자동 업데이트 체크 루프."""

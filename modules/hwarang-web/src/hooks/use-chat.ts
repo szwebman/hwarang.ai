@@ -3,13 +3,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { parseSSEStream } from "@/lib/stream-parser";
 import { generateId } from "@/lib/utils";
-import type { Message } from "@/types/chat";
+import type { AttachedImage, Message } from "@/types/chat";
 
 interface UseChatOptions {
   model?: string;
   apiUrl?: string;
   conversationId?: string | null;
   onConversationIdChange?: (id: string) => void;
+  /** 안전 정책 — "loose" | "standard" | "strict". 백엔드 chat/route.ts 가 적용 (별도 작업). */
+  safety?: string;
 }
 
 export interface ChatError {
@@ -19,7 +21,13 @@ export interface ChatError {
 }
 
 export function useChat(options: UseChatOptions = {}) {
-  const { model = "", apiUrl = "/api/chat", conversationId: externalCid, onConversationIdChange } = options;
+  const {
+    model = "",
+    apiUrl = "/api/chat",
+    conversationId: externalCid,
+    onConversationIdChange,
+    safety = "standard",
+  } = options;
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<ChatError | null>(null);
@@ -47,6 +55,7 @@ export function useChat(options: UseChatOptions = {}) {
           id: m.id,
           role: m.role,
           content: m.content,
+          images: m.images || [],
           createdAt: new Date(m.createdAt),
         }))
       );
@@ -55,7 +64,11 @@ export function useChat(options: UseChatOptions = {}) {
   }, []);
 
   const sendMessage = useCallback(
-    async (content: string) => {
+    async (
+      content: string,
+      images?: AttachedImage[],
+      opts?: { skipOptions?: boolean },
+    ) => {
       setError(null);
 
       // Add user message
@@ -63,6 +76,7 @@ export function useChat(options: UseChatOptions = {}) {
         id: generateId(),
         role: "user",
         content,
+        images: images && images.length > 0 ? images : undefined,
         createdAt: new Date(),
       };
 
@@ -98,8 +112,14 @@ export function useChat(options: UseChatOptions = {}) {
             messages: allMessages.map((m) => ({
               role: m.role,
               content: m.content,
+              // VLM 라우팅용 — base64 data URL 만 보냄 (preview ObjectURL 은 클라이언트 전용)
+              images: m.images?.map((i) => i.base64) || [],
             })),
             stream: true,
+            // 옵션 카드 클릭 후 후속 메시지 — 옵션 모드 우회 (즉시 vLLM 호출).
+            skipOptions: opts?.skipOptions ?? false,
+            // 안전 모드 — backend chat/route.ts 가 안전 정책 적용 (loose/standard/strict)
+            safety,
           }),
         });
 
@@ -141,14 +161,25 @@ export function useChat(options: UseChatOptions = {}) {
           throw e;
         }
 
-        for await (const chunk of parseSSEStream(response)) {
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === assistantId
-                ? { ...m, content: m.content + chunk }
-                : m
-            )
-          );
+        for await (const evt of parseSSEStream(response)) {
+          if (evt.type === "content") {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantId
+                  ? { ...m, content: m.content + evt.content }
+                  : m
+              )
+            );
+          } else if (evt.type === "meta") {
+            // 서버가 응답 직후 첨부한 메타 (verification 출처 등)
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantId
+                  ? { ...m, meta: { ...(m.meta || {}), ...evt.meta } }
+                  : m
+              )
+            );
+          }
         }
       } catch (err) {
         const errorMessage =
@@ -168,7 +199,153 @@ export function useChat(options: UseChatOptions = {}) {
         setIsStreaming(false);
       }
     },
-    [messages, model, apiUrl, setConversationId]
+    [messages, model, apiUrl, setConversationId, safety]
+  );
+
+  /**
+   * 옵션 카드에서 하나를 선택했을 때 — 같은 assistant 메시지에 답변을 인라인으로 이어붙임.
+   * - 새 user/assistant 메시지를 만들지 않음 (입력창도 비우지 않음).
+   * - meta.options.selectedOptionId 를 셋해서 카드를 잠그고 ✓ 표시.
+   * - 서버에는 continueOptionId/Title/Keywords 를 보내 옵션 모드를 우회.
+   * - SSE content 델타는 같은 messageId 의 message.content 뒤에 누적.
+   */
+  const continueMessage = useCallback(
+    async (
+      messageId: string,
+      optionId: string,
+      optionTitle: string,
+      optionKeywords: string[],
+    ) => {
+      setError(null);
+
+      // 1. 카드 잠금 표시 (선택된 옵션 ID 기록) + 답변 시작 구분선이 보이도록 mark
+      setMessages((prev) =>
+        prev.map((m) => {
+          if (m.id !== messageId) return m;
+          if (!m.meta?.options) return m;
+          return {
+            ...m,
+            meta: {
+              ...m.meta,
+              options: { ...m.meta.options, selectedOptionId: optionId },
+            },
+          };
+        }),
+      );
+
+      setIsStreaming(true);
+
+      try {
+        // 첫 메시지가 옵션이었을 가능성도 있으므로 conversationId 보장
+        if (!conversationIdRef.current) {
+          const newId =
+            typeof crypto !== "undefined" && crypto.randomUUID
+              ? crypto.randomUUID()
+              : `c_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+          setConversationId(newId);
+        }
+
+        // route.ts 가 lastUserMessage 를 기준으로 라우팅하므로 그대로 messages 전달.
+        const response = await fetch(apiUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model,
+            conversationId: conversationIdRef.current,
+            messages: messages.map((m) => ({
+              role: m.role,
+              content: m.content,
+              images: m.images?.map((i) => i.base64) || [],
+            })),
+            stream: true,
+            // 옵션 후속 — 서버는 옵션 감지 우회 + 선택 컨텍스트를 system prompt 로 주입.
+            skipOptions: true,
+            continueOptionId: optionId,
+            continueOptionTitle: optionTitle,
+            continueOptionKeywords: optionKeywords,
+            continueMessageId: messageId,
+            safety,
+          }),
+        });
+
+        const cidHeader = response.headers.get("X-Conversation-Id");
+        if (cidHeader) setConversationId(cidHeader);
+
+        if (!response.ok) {
+          let errorBody: { error?: string; message?: string; detail?: string; code?: string } = {};
+          try {
+            errorBody = await response.json();
+          } catch {}
+          const message =
+            errorBody.error ||
+            errorBody.message ||
+            errorBody.detail ||
+            `요청 실패 (${response.status})`;
+          const e = new Error(message) as Error & { status?: number; code?: string };
+          e.status = response.status;
+          e.code = errorBody.code;
+          throw e;
+        }
+
+        // 같은 messageId 에 content/meta 이어붙이기
+        for await (const evt of parseSSEStream(response)) {
+          if (evt.type === "content") {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === messageId ? { ...m, content: m.content + evt.content } : m,
+              ),
+            );
+          } else if (evt.type === "meta") {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === messageId
+                  ? {
+                      ...m,
+                      meta: {
+                        ...(m.meta || {}),
+                        ...evt.meta,
+                        // selectedOptionId 보존 — 새로 들어온 meta.options 가 덮어쓰지 않도록
+                        options: m.meta?.options
+                          ? {
+                              ...m.meta.options,
+                              ...(evt.meta?.options || {}),
+                              selectedOptionId:
+                                m.meta.options.selectedOptionId ??
+                                evt.meta?.options?.selectedOptionId,
+                            }
+                          : evt.meta?.options,
+                      },
+                    }
+                  : m,
+              ),
+            );
+          }
+        }
+      } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : "옵션 진행 중 오류";
+        const status =
+          err && typeof err === "object" && "status" in err
+            ? (err as { status?: number }).status
+            : undefined;
+        const code =
+          err && typeof err === "object" && "code" in err
+            ? (err as { code?: string }).code
+            : undefined;
+        setError({ message: errorMessage, status, code });
+        // 실패 시 카드 잠금 해제 — 사용자가 다시 시도할 수 있게
+        setMessages((prev) =>
+          prev.map((m) => {
+            if (m.id !== messageId) return m;
+            if (!m.meta?.options) return m;
+            const { selectedOptionId: _drop, ...restOptions } = m.meta.options;
+            return { ...m, meta: { ...m.meta, options: restOptions } };
+          }),
+        );
+      } finally {
+        setIsStreaming(false);
+      }
+    },
+    [messages, model, apiUrl, setConversationId, safety],
   );
 
   const clearMessages = useCallback(() => {
@@ -177,5 +354,13 @@ export function useChat(options: UseChatOptions = {}) {
     conversationIdRef.current = null;
   }, []);
 
-  return { messages, sendMessage, isStreaming, error, clearMessages, loadConversation };
+  return {
+    messages,
+    sendMessage,
+    continueMessage,
+    isStreaming,
+    error,
+    clearMessages,
+    loadConversation,
+  };
 }

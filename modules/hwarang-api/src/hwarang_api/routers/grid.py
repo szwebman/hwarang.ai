@@ -52,6 +52,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel
 
 from hwarang_api.middleware.auth import verify_api_key
 
@@ -109,12 +110,26 @@ async def register_agent(
     user_id: str = Form(""),
     agent_name: str = Form(""),
     referral_code: str = Form(""),
+    domains: str = Form("[]"),               # JSON 배열 — ["code","design",...]
+    callback_url: str = Form(""),            # 에이전트 측 HTTP 서버 URL (cognitive consult 수신)
+    callback_token: str = Form(""),          # callback Bearer 토큰 — 마스터→에이전트 호출 시 사용
+    region: str = Form("kr"),
 ):
     """에이전트 등록.
 
     한 유저가 여러 에이전트(PC)를 등록 가능.
     추천인 코드 입력 시 양쪽에 보상.
+
+    callback_url / callback_token 이 들어오면 ``cognitive/orchestrator.py``
+    의 ``_ask_agent`` 가 진짜 의향 질의를 발송한다.
     """
+    # domains 파싱 — 실패해도 등록은 통과
+    try:
+        domains_list = json.loads(domains) if domains else []
+        if not isinstance(domains_list, list):
+            domains_list = []
+    except Exception:
+        domains_list = []
     # 유저 등록/업데이트
     if user_id:
         if user_id not in _users:
@@ -165,6 +180,10 @@ async def register_agent(
         "gpu_name": gpu_name,
         "vram_gb": vram_gb,
         "tier": tier,
+        "domains": domains_list,
+        "region": region,
+        "callback_url": callback_url,           # cognitive consult 수신 endpoint
+        "callback_token": callback_token,       # Bearer 토큰 (마스터 → 에이전트)
         "registered_at": time.time(),
         "last_heartbeat": time.time(),
         "status": "idle",
@@ -1203,6 +1222,475 @@ async def get_agent_earnings(
             for r in history
         ],
     }
+
+
+# ════════════════════════════════════════════════════════════════
+# 라운드 협상 (Negotiate) — Master ↔ Agent 조건 변경
+# ════════════════════════════════════════════════════════════════
+#
+# 라운드 시작 의향 조사 (consult) 후 거절자가 많을 때 master 가
+# 보상 ↑ / 시간 ↓ 등 새 조건을 에이전트에 제시하고 재평가를 받는다.
+# negotiate    — 1 명에게 명시적 새 조건 제시 (master cognitive 가 호출)
+# auto-negotiate — 조건 자동 보정 + consult 재호출
+
+
+def _check_agent_bearer(authorization: str | None) -> str | None:
+    """``Authorization: Bearer <agent_id>`` 형식의 약식 에이전트 인증.
+
+    grid 의 _agents 에 등록된 agent_id 면 통과. 토큰 미사용 환경에서는
+    내부 키만으로도 호출 가능하도록 (``verify_api_key``) Depends 와 병행 가능.
+    """
+    if not authorization:
+        return None
+    token = authorization.strip()
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    if token in _agents:
+        return token
+    # hk- 접두사 internal 토큰이면 master 명의로 통과
+    if token.startswith("hk-"):
+        return "_master_"
+    return None
+
+
+class NegotiateRequest(BaseModel):
+    round_id: str
+    domain: str
+    agent_id: str | None = None  # master → 특정 에이전트 지정
+    new_estimated_minutes: int | None = None
+    new_estimated_hwr: float | None = None
+    rationale: str = ""
+
+
+@router.post("/rounds/{round_id}/negotiate")
+async def negotiate_round(
+    round_id: str,
+    req: NegotiateRequest,
+    authorization: str | None = Header(None),
+):
+    """Master 가 에이전트한테 조건 변경을 제안.
+
+    예: 라운드 처음엔 30분/100 HWR 였는데, 거절자 많아서 25분/150 HWR 로
+    재제시. 에이전트의 ``/cognitive/negotiate`` 엔드포인트를 호출하고
+    수락 시 라운드 ``config`` 를 갱신, ``CognitiveMemory`` 에 협상 이력 저장.
+    """
+    caller = _check_agent_bearer(authorization)
+    if caller is None:
+        raise HTTPException(401, "Bearer 토큰 필요")
+
+    # 1. 대상 에이전트
+    target_agent_id = req.agent_id or (caller if caller != "_master_" else None)
+    if not target_agent_id:
+        raise HTTPException(400, "agent_id 필요")
+
+    agent = _agents.get(target_agent_id)
+    if not agent:
+        raise HTTPException(404, f"에이전트 없음: {target_agent_id}")
+
+    callback_url = agent.get("callback_url")
+    if not callback_url:
+        return {
+            "accepted": False,
+            "reason": "no_callback",
+            "agent_id": target_agent_id,
+        }
+
+    # 2. 에이전트한테 새 조건 제시 (HTTP)
+    response_data: dict = {}
+    try:
+        import httpx
+
+        headers = {}
+        callback_token = agent.get("callback_token")
+        if callback_token:
+            headers["Authorization"] = f"Bearer {callback_token}"
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                f"{str(callback_url).rstrip('/')}/cognitive/negotiate",
+                json={
+                    "round_id": req.round_id,
+                    "domain": req.domain,
+                    "new_estimated_minutes": req.new_estimated_minutes,
+                    "new_estimated_hwr": req.new_estimated_hwr,
+                    "rationale": req.rationale,
+                },
+                headers=headers,
+            )
+        if resp.status_code != 200:
+            return {
+                "accepted": False,
+                "reason": f"http_{resp.status_code}",
+                "agent_id": target_agent_id,
+            }
+        response_data = resp.json() if resp.content else {}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("negotiate HTTP 실패 (%s): %s", target_agent_id, exc)
+        return {
+            "accepted": False,
+            "reason": f"http_error: {exc}",
+            "agent_id": target_agent_id,
+        }
+
+    accepted = bool(response_data.get("accepted", False))
+
+    # 3. 라운드 조건 업데이트 (DB)
+    if accepted:
+        try:
+            from hwarang_api.db import prisma as _prisma
+
+            if getattr(_prisma, "is_connected", lambda: False)():
+                round_ = await _prisma.round.find_unique(
+                    where={"id": round_id}
+                )
+                if round_:
+                    new_config = dict(getattr(round_, "config", None) or {})
+                    if req.new_estimated_minutes:
+                        new_config["estimated_minutes"] = req.new_estimated_minutes
+                    if req.new_estimated_hwr:
+                        new_config["estimated_hwr"] = req.new_estimated_hwr
+                    new_config["negotiated_with"] = target_agent_id
+                    new_config["negotiation_rationale"] = req.rationale
+                    await _prisma.round.update(
+                        where={"id": round_id},
+                        data={"config": new_config},
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("round.update 실패: %s", exc)
+
+        # 인메모리 라운드도 갱신
+        if _current_round and _current_round.get("round_id") == round_id:
+            cfg = _current_round.setdefault("config", {})
+            if req.new_estimated_minutes:
+                cfg["estimated_minutes"] = req.new_estimated_minutes
+            if req.new_estimated_hwr:
+                cfg["estimated_hwr"] = req.new_estimated_hwr
+            cfg["negotiated_with"] = target_agent_id
+            cfg["negotiation_rationale"] = req.rationale
+
+    # 4. CognitiveMemory 에 협상 이력
+    try:
+        from hwarang_api.cognitive.memory import record_decision
+
+        await record_decision(
+            actor="master",
+            observed={
+                "round_id": round_id,
+                "agent_id": target_agent_id,
+                "domain": req.domain,
+                "new_minutes": req.new_estimated_minutes,
+                "new_hwr": req.new_estimated_hwr,
+            },
+            reasoning=f"라운드 협상 — {req.rationale}",
+            decision=(
+                f"new conditions: {req.new_estimated_minutes}분 / "
+                f"{req.new_estimated_hwr} HWR"
+            ),
+            action_taken=f"negotiate:{accepted}",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("협상 기록 실패: %s", exc)
+
+    return {
+        "accepted": accepted,
+        "agent_response": response_data,
+        "agent_id": target_agent_id,
+    }
+
+
+@router.post("/rounds/{round_id}/auto-negotiate")
+async def auto_negotiate_round(
+    round_id: str,
+    decline_ratio: float = Query(
+        0.5, ge=0.0, le=1.0,
+        description="거절률 임계 — 이 이상이면 보상 +50%",
+    ),
+    authorization: str | None = Header(None),
+):
+    """라운드에 거절자 많으면 자동 조건 개선 후 consult 재호출.
+
+    Master Cognitive 가 호출. 라운드 config 의 ``estimated_hwr`` 을 +50%
+    상향 후 ``consult_agents_for_round`` 재호출. 결과 dict 반환.
+    """
+    caller = _check_agent_bearer(authorization)
+    if caller is None:
+        raise HTTPException(401, "Bearer 토큰 필요")
+
+    # 1. 라운드 조회 — DB 우선, 없으면 인메모리
+    round_obj: Any = None
+    domain = "general"
+    config: dict[str, Any] = {}
+    try:
+        from hwarang_api.db import prisma as _prisma
+
+        if getattr(_prisma, "is_connected", lambda: False)():
+            round_obj = await _prisma.round.find_unique(where={"id": round_id})
+            if round_obj:
+                if getattr(round_obj, "status", "") not in ("OPEN", "open"):
+                    return {"error": "invalid_round", "status": round_obj.status}
+                domain = getattr(round_obj, "domain", "general")
+                config = dict(getattr(round_obj, "config", None) or {})
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("round.find_unique 실패: %s", exc)
+
+    if round_obj is None:
+        # 인메모리 폴백
+        if not _current_round or _current_round.get("round_id") != round_id:
+            return {"error": "invalid_round", "round_id": round_id}
+        domain = _current_round.get("domain") or "general"
+        config = dict(_current_round.get("config", {}) or {})
+
+    current_hwr = float(config.get("estimated_hwr", 100))
+    current_minutes = int(config.get("estimated_minutes", 30))
+    min_vram_gb = float(config.get("min_vram_gb", 8))
+
+    # 2. 보상 +50%
+    new_hwr = round(current_hwr * 1.5, 2)
+
+    # 3. 적합 에이전트 다시 모집 — 새 조건으로
+    try:
+        from hwarang_api.cognitive.orchestrator import consult_agents_for_round
+
+        result = await consult_agents_for_round(
+            domain=domain,
+            estimated_minutes=current_minutes,
+            estimated_hwr=new_hwr,
+            min_vram_gb=min_vram_gb,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("auto_negotiate consult 실패: %s", exc)
+        return {"error": f"consult_failed: {exc}"}
+
+    # 4. 라운드 config 업데이트 (DB + 인메모리)
+    config["estimated_hwr"] = new_hwr
+    config["auto_negotiated"] = True
+    config["auto_negotiated_at"] = time.time()
+
+    try:
+        from hwarang_api.db import prisma as _prisma
+
+        if round_obj is not None and getattr(_prisma, "is_connected", lambda: False)():
+            await _prisma.round.update(
+                where={"id": round_id},
+                data={"config": config},
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("round.update 실패: %s", exc)
+
+    if _current_round and _current_round.get("round_id") == round_id:
+        _current_round.setdefault("config", {}).update(config)
+
+    # 5. 협상 이력
+    try:
+        from hwarang_api.cognitive.memory import record_decision
+
+        await record_decision(
+            actor="master",
+            observed={
+                "round_id": round_id,
+                "domain": domain,
+                "old_hwr": current_hwr,
+                "new_hwr": new_hwr,
+                "decline_ratio_threshold": decline_ratio,
+            },
+            reasoning=(
+                f"auto-negotiate — 보상 {current_hwr} → {new_hwr} HWR "
+                f"(+50%)"
+            ),
+            decision=f"new_hwr={new_hwr}",
+            action_taken=f"auto_negotiate:willing={result.get('willing', 0)}",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("auto_negotiate 기록 실패: %s", exc)
+
+    return {
+        "negotiation_result": result,
+        "old_hwr": current_hwr,
+        "new_hwr": new_hwr,
+        "new_willing": result.get("willing", 0),
+    }
+
+
+# ════════════════════════════════════════════════════════════════
+# Code/Design Round 자동 트리거 — 디버그/수동 진입점
+# ════════════════════════════════════════════════════════════════
+#
+# scheduler 가 매 6 시간 알아서 호출하지만, 운영자가 즉시 평가/시작/검증할
+# 수 있도록 동일 로직을 HTTP 로 노출.
+
+
+@router.post("/code-rounds/evaluate-trigger")
+async def code_round_evaluate_trigger(
+    domain: str = Query("code", description="code | design"),
+    api_key: str | None = Depends(verify_api_key),
+):
+    """라운드 시작 조건만 평가 (실제 시작 X). 디버그용.
+
+    응답: ``{should_start, reason, rlhf_count, pair_count|pattern_count, hours_since_last}``
+    """
+    try:
+        if domain == "code":
+            from hwarang_api.grid.code_round.code_round_orchestrator import (
+                evaluate_code_round_trigger,
+            )
+
+            d = await evaluate_code_round_trigger()
+            return {
+                "domain": "code",
+                "should_start": d.should_start,
+                "reason": d.reason,
+                "rlhf_count": d.rlhf_count,
+                "pair_count": d.pair_count,
+                "hours_since_last": d.hours_since_last,
+            }
+        if domain == "design":
+            from hwarang_api.grid.code_round.design_round_orchestrator import (
+                evaluate_design_round_trigger,
+            )
+
+            d2 = await evaluate_design_round_trigger()
+            return {
+                "domain": "design",
+                "should_start": d2.should_start,
+                "reason": d2.reason,
+                "rlhf_count": d2.rlhf_count,
+                "pattern_count": d2.pattern_count,
+                "hours_since_last": d2.hours_since_last,
+            }
+        raise HTTPException(400, "domain must be 'code' or 'design'")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("evaluate-trigger 실패")
+        raise HTTPException(500, f"evaluate-trigger 실패: {e}")
+
+
+@router.post("/code-rounds/start")
+async def code_round_start(
+    domain: str = Query("code", description="code | design"),
+    api_key: str | None = Depends(verify_api_key),
+):
+    """즉시 라운드 시작 (조건 통과 시).
+
+    조건이 안 맞으면 ``{started: False, reason: ...}`` 반환.
+    """
+    try:
+        if domain == "code":
+            from hwarang_api.grid.code_round.code_round_orchestrator import (
+                start_code_round,
+            )
+
+            return await start_code_round(broadcast_callback=broadcast_round_event)
+        if domain == "design":
+            from hwarang_api.grid.code_round.design_round_orchestrator import (
+                start_design_round,
+            )
+
+            return await start_design_round(broadcast_callback=broadcast_round_event)
+        raise HTTPException(400, "domain must be 'code' or 'design'")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("code-rounds/start 실패")
+        raise HTTPException(500, f"code-rounds/start 실패: {e}")
+
+
+@router.post("/code-rounds/{round_id}/validate")
+async def code_round_validate(
+    round_id: str,
+    api_key: str | None = Depends(verify_api_key),
+):
+    """특정 라운드의 품질 검증을 즉시 실행 (cron 대기 X).
+
+    응답: ``{round_id, new_score, baseline_score, accepted, rolled_back}``
+    """
+    try:
+        from hwarang_api.grid.code_round.code_round_quality import (
+            validate_completed_round,
+        )
+
+        result = await validate_completed_round(round_id)
+        if result.get("skipped"):
+            raise HTTPException(400, f"validation skipped: {result['skipped']}")
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("code-rounds/validate 실패")
+        raise HTTPException(500, f"validate 실패: {e}")
+
+
+# ────────────────────────────────────────────────────────────────
+# LoRA 평가셋 / 수동 평가 트리거
+# ────────────────────────────────────────────────────────────────
+@router.post("/code-rounds/{round_id}/evaluate")
+async def code_round_evaluate(
+    round_id: str,
+    api_key: str | None = Depends(verify_api_key),
+):
+    """수동 평가 트리거 — cron/워커 안 기다리고 즉시 실행.
+
+    응답: ``validate_completed_round`` 의 dict.
+    """
+    try:
+        from hwarang_api.grid.code_round.code_round_quality import (
+            validate_completed_round,
+        )
+
+        return await validate_completed_round(round_id)
+    except Exception as e:
+        logger.exception("code-rounds/evaluate 실패")
+        raise HTTPException(500, f"evaluate 실패: {e}")
+
+
+@router.get("/code-rounds/eval-set")
+async def code_round_eval_set_get(
+    domain: str = "code",
+    api_key: str | None = Depends(verify_api_key),
+):
+    """평가셋 jsonl 경로 + 존재 여부."""
+    try:
+        from hwarang_api.grid.code_round.eval_set_builder import (
+            build_or_load_eval_set,
+        )
+
+        path = await build_or_load_eval_set(domain)
+        size = 0
+        count = 0
+        if path:
+            try:
+                p = Path(path)
+                size = p.stat().st_size
+                with open(p, "r", encoding="utf-8") as f:
+                    count = sum(1 for _ in f)
+            except OSError:
+                pass
+        return {
+            "domain": domain,
+            "path": path,
+            "exists": bool(path),
+            "size_bytes": size,
+            "samples": count,
+        }
+    except Exception as e:
+        logger.exception("code-rounds/eval-set 실패")
+        raise HTTPException(500, f"eval-set 실패: {e}")
+
+
+@router.post("/code-rounds/eval-set/rebuild")
+async def code_round_eval_set_rebuild(
+    domain: str = "code",
+    api_key: str | None = Depends(verify_api_key),
+):
+    """평가셋 강제 재구성 (DB 변경 후 갱신용)."""
+    try:
+        from hwarang_api.grid.code_round.eval_set_builder import rebuild_eval_set
+
+        path = await rebuild_eval_set(domain)
+        return {"rebuilt": True, "domain": domain, "path": path}
+    except Exception as e:
+        logger.exception("code-rounds/eval-set/rebuild 실패")
+        raise HTTPException(500, f"eval-set rebuild 실패: {e}")
 
 
 @router.websocket("/rounds/ws")

@@ -484,6 +484,18 @@ from .uncertainty import (
     std_from_samples,
 )
 
+# Trusted Source Network — 화이트리스트 출처 크롤링 + cross-verify
+from .source_crawler import (
+    SourceCrawler,
+    crawl_all_sources,
+    crawl_one_source,
+)
+from .cross_verifier import (
+    Evidence,
+    ClaimVerification,
+    verify_claim,
+)
+
 # v3.3 크라우드소싱 거버넌스 + KYC 게이트
 from .contribution_gate import (
     WriteAction,

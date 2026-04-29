@@ -210,6 +210,29 @@ hwarang-agent init --preset medical_specialist
 
 ---
 
+## 분산 크롤링
+
+화랑 v1.5+ 부터 에이전트는 학습/추론뿐 아니라 **데이터 크롤링도 분담**
+합니다. 관리자가 등록한 신뢰 출처 (법제처, 통계청, 메이저 언론사 등) 만
+대상이고, 중복 없이 분산 처리됩니다.
+
+```bash
+# 크롤링만 (GPU 안 씀, 가벼움 — 노트북에서도 OK)
+hwarang-agent crawl-only --concurrent 3
+
+# 도메인 전문 (법률 LoRA 가진 에이전트라면)
+hwarang-agent crawl-only --domain legal,tax --concurrent 5
+```
+
+마스터는 30 분 이상 안 leased 된 작업을 직접 처리하는 **fallback** 가
+있어, 에이전트가 0 명이거나 늦어도 시스템은 멈추지 않습니다 (속도만
+느려짐). 따라서 에이전트 참여는 *순수하게 처리량 가속* 용도이고
+보상 (HWR 코인) 은 처리한 작업당 분배됩니다.
+
+자세한 내용: [docs/deployment/DISTRIBUTED_CRAWL.md](../../../docs/deployment/DISTRIBUTED_CRAWL.md)
+
+---
+
 ## 라이선스
 
 MIT. © Persismore / hwarang.ai

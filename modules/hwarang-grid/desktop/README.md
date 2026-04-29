@@ -3,6 +3,35 @@
 Hwarang Grid 네트워크에 GPU 자원을 기여하는 사용자가 백그라운드에서 항상 실행해 두는
 가벼운 트레이/메뉴바 앱. Tauri(Rust) 기반.
 
+## 빠른 시작 (3 줄)
+
+```bash
+git clone https://github.com/szwebman/hwarang.ai && cd hwarang.ai/modules/hwarang-grid/desktop
+./build.sh                                    # macOS / Linux. Windows 는 build_signed.sh -Platform windows
+open src-tauri/target/release/bundle/dmg/*.dmg # 산출물 실행 (또는 MSI / AppImage)
+```
+
+## 설치 방법 (사용자용)
+
+| OS | 산출물 | 설치 |
+|----|--------|------|
+| macOS | `Hwarang-Grid-Agent_<ver>.dmg` | DMG 더블클릭 → 앱 아이콘을 Applications 으로 드래그 |
+| Windows | `Hwarang-Grid-Agent_<ver>.msi` (또는 NSIS `*-setup.exe`) | 더블클릭 → 마법사 따라가기. 첫 실행 시 SmartScreen 허용 필요 |
+| Linux | `*.AppImage` (또는 `*.deb`) | `chmod +x *.AppImage && ./*.AppImage` (deb 는 `sudo dpkg -i`) |
+
+릴리스: https://github.com/szwebman/hwarang.ai/releases
+
+## 환경변수 (선택)
+
+런타임 동작을 조정합니다. 모두 OS 환경변수로 주입하거나 `~/.hwarang/desktop_env`
+(KEY=VALUE 한 줄씩) 에 작성.
+
+| 변수 | 기본값 | 설명 |
+|------|--------|------|
+| `HWARANG_MASTER_URL` | `https://grid.hwarang.ai` | Grid 마스터 엔드포인트 (라운드 배정/제출) |
+| `HWARANG_PREFER_WEBSOCKET` | `1` | `1` = WebSocket 우선, `0` = HTTP 폴링 강제 |
+| `HWARANG_POLL_INTERVAL` | `30` | HTTP 폴링 모드 시 상태 폴링 주기(초) |
+
 ## 요구 사양
 
 - Rust 1.74+

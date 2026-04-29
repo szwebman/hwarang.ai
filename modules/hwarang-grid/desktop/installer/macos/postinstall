@@ -1,0 +1,69 @@
+#!/bin/bash
+# ─────────────────────────────────────────────────────────────────────────────
+# 화랑 Grid Agent — macOS .pkg postinstall 훅
+#
+# Tauri 1.x 의 .pkg 번들러가 호출.
+# 목적: PyInstaller 사이드카 hwarang-agent 를 /usr/local/bin 에 symlink 하여
+#       사용자가 터미널에서 `hwarang-agent` 만 입력해도 실행되도록 PATH 노출.
+#
+# 동작:
+#   1. .app 내부 사이드카 위치 탐색 (aarch64 / x86_64 / universal 순)
+#   2. /usr/local/bin/hwarang-agent symlink 생성 (idempotent)
+#   3. 실행 권한 보정
+#   4. 실패해도 앱 동작에는 지장 없도록 종료 코드 0
+# ─────────────────────────────────────────────────────────────────────────────
+
+# graceful: 개별 실패가 앱 설치를 망치지 않도록 -e 끔
+set -uo pipefail
+
+APP_NAME="Hwarang Grid Agent"
+APP_PATH="/Applications/${APP_NAME}.app"
+SIDECAR_DIR="${APP_PATH}/Contents/Resources/binaries"
+SYMLINK_PATH="/usr/local/bin/hwarang-agent"
+
+ARCH="$(uname -m)"
+case "$ARCH" in
+    arm64)  TRIPLE="aarch64-apple-darwin" ;;
+    x86_64) TRIPLE="x86_64-apple-darwin" ;;
+    *)      TRIPLE="" ;;
+esac
+
+CANDIDATES=(
+    "${SIDECAR_DIR}/hwarang-agent-${TRIPLE}"
+    "${SIDECAR_DIR}/hwarang-agent"
+    "${SIDECAR_DIR}/hwarang-agent-universal-apple-darwin"
+)
+
+BINARY=""
+for c in "${CANDIDATES[@]}"; do
+    if [[ -n "$c" && -f "$c" ]]; then
+        BINARY="$c"
+        break
+    fi
+done
+
+if [[ -z "$BINARY" ]]; then
+    echo "[WARN] hwarang-agent 사이드카를 찾지 못함 (검색: ${SIDECAR_DIR}) — PATH 등록 건너뜀"
+    exit 0
+fi
+
+# /usr/local/bin 디렉토리 확보 (M1+ 일부 시스템에는 기본적으로 없음)
+if [[ ! -d /usr/local/bin ]]; then
+    mkdir -p /usr/local/bin 2>/dev/null || {
+        echo "[WARN] /usr/local/bin 생성 실패 (관리자 권한 부족) — PATH 등록 건너뜀"
+        exit 0
+    }
+fi
+
+# 실행 권한 보정
+chmod +x "$BINARY" 2>/dev/null || true
+
+# Symlink (idempotent: -f 로 기존 링크 덮어쓰기)
+if ln -sf "$BINARY" "$SYMLINK_PATH" 2>/dev/null; then
+    echo "[ OK ] hwarang-agent CLI 등록 완료 → $SYMLINK_PATH"
+    echo "       사용 예: hwarang-agent login / hwarang-agent status"
+else
+    echo "[WARN] symlink 생성 실패: $SYMLINK_PATH (사용자가 첫 실행 시 자동 시도됨)"
+fi
+
+exit 0

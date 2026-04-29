@@ -362,6 +362,33 @@ export class AuthManager {
     await this.fetchUserInfo();
   }
 
+  /**
+   * Webview에서 사용할 가벼운 사용량 정보. (statusBar 와 동일 소스)
+   * 네트워크 실패 시 캐시된 _user 의 토큰 정보를 반환한다.
+   */
+  async fetchUsage(): Promise<{
+    balance: number;
+    dailyUsed: number;
+    dailyLimit: number;
+    totalUsed: number;
+  } | null> {
+    if (!this._apiKey) return null;
+    // 우선 최신화 시도
+    try {
+      await this.fetchUserInfo();
+    } catch {
+      // 무시 — 캐시 반환
+    }
+    const t = this._user?.tokens;
+    if (!t) return null;
+    return {
+      balance: t.balance ?? 0,
+      dailyUsed: t.dailyUsed ?? 0,
+      dailyLimit: t.dailyLimit ?? 0,
+      totalUsed: t.totalUsed ?? 0,
+    };
+  }
+
   canMakeRequest(estimatedTokens: number = 500): { allowed: boolean; reason?: string } {
     if (!this._user) {
       return { allowed: false, reason: "로그인이 필요합니��" };

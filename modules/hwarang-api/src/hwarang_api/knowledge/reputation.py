@@ -1,4 +1,9 @@
-"""HLKM ④ Source Reputation — 출처 평판 관리.
+"""출처 평판 — 지식 출처의 사실 정확도 신뢰.
+
+주의: 에이전트 작업 평판은 ``hwarang_api.grid.social.reputation`` 에 별도 시스템.
+통합 조회는 ``hwarang_api.cognitive.trust.unified_trust.UnifiedTrust`` 사용.
+
+HLKM ④ Source Reputation — 출처 평판 관리.
 
 KnowledgeFact 의 출처(source)별 평판 점수를 계산/유지한다.
 평판은 재검증 결과(unchanged/updated/invalidated/source_gone)의

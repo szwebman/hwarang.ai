@@ -12,6 +12,8 @@
 
 import * as vscode from "vscode";
 import { AgentLoop, AgentMessage } from "../tools/agent-loop";
+import { LLMClient } from "./llm-client";
+import { AuthManager } from "./auth";
 
 interface StoredMessage {
   role: "user" | "assistant" | "tool_call" | "tool_result";
@@ -41,16 +43,27 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private webviewView?: vscode.WebviewView;
   private agentLoop: AgentLoop;
   private context: vscode.ExtensionContext;
+  private llmClient: LLMClient;
+  private authManager: AuthManager;
   private currentConversationId: string | null = null;
   private currentMessages: StoredMessage[] = [];
+  /** 옵션 답변용 단순 history (web 의 messages 배열과 동등) */
+  private directHistory: { role: "user" | "assistant"; content: string }[] = [];
+  /** 옵션 카드를 보낸 마지막 메시지 ID — continueMessage 시 사용 */
+  private lastOptionsMessageId: string | null = null;
+  private usageRefreshTimer: NodeJS.Timer | null = null;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
     agentLoop: AgentLoop,
-    context: vscode.ExtensionContext
+    context: vscode.ExtensionContext,
+    llmClient: LLMClient,
+    authManager: AuthManager
   ) {
     this.agentLoop = agentLoop;
     this.context = context;
+    this.llmClient = llmClient;
+    this.authManager = authManager;
   }
 
   // ============================================================
@@ -144,6 +157,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     await this.persistCurrent();
     this.currentConversationId = `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     this.currentMessages = [];
+    this.directHistory = [];
+    this.lastOptionsMessageId = null;
     await this.context.globalState.update(
       CURRENT_ID_KEY,
       this.currentConversationId
@@ -167,16 +182,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.currentMessages = [...conv.messages];
     await this.setCurrentIdForWorkspace(id);
 
-    // 에이전트 히스토리에도 반영
+    // 에이전트 + directChat 히스토리에도 반영
     this.agentLoop.clearHistory();
-    this.agentLoop.restoreHistory(
-      conv.messages
-        .filter((m) => m.role === "user" || m.role === "assistant")
-        .map((m) => ({
-          role: m.role as "user" | "assistant",
-          content: m.content,
-        }))
-    );
+    const userAssistantMsgs = conv.messages
+      .filter((m) => m.role === "user" || m.role === "assistant")
+      .map((m) => ({
+        role: m.role as "user" | "assistant",
+        content: m.content,
+      }));
+    this.agentLoop.restoreHistory(userAssistantMsgs);
+    this.directHistory = userAssistantMsgs;
 
     // 웹뷰에 복원 메시지 전송
     if (this.webviewView) {
@@ -374,7 +389,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     webviewView.webview.onDidReceiveMessage(async (message) => {
       switch (message.type) {
         case "sendMessage":
-          await this.handleUserMessage(message.text);
+          // 일반 텍스트(또는 첨부 이미지) — 옵션/이미지 파라미터 포함이면 directChat,
+          // 없으면 기존 AgentLoop 흐름.
+          if (message.images?.length || message.model || message.safety) {
+            await this.handleDirectMessage(message);
+          } else {
+            await this.handleUserMessage(message.text);
+          }
+          break;
+        case "selectOption":
+          await this.handleSelectOption(message);
+          break;
+        case "fetchUsage":
+          await this.sendUsageToWebview();
           break;
         case "newChat":
           await this.newChat();
@@ -384,6 +411,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           break;
         case "stopGeneration":
           this.agentLoop.abort();
+          this.llmClient.abort();
           break;
         case "insertCode":
           this.insertCodeToEditor(message.code);
@@ -410,8 +438,162 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       name: this.getWorkspaceName(),
     });
 
+    // 사용량 초기 전송 + 30 초 주기 갱신
+    this.sendUsageToWebview();
+    this.startUsageRefresh();
+
     // 이전 세션 복원
     this.restorePreviousSession();
+  }
+
+  // ============================================================
+  // 사용량 표시 (webview 갱신)
+  // ============================================================
+
+  private async sendUsageToWebview() {
+    if (!this.webviewView) return;
+    try {
+      const usage = await this.authManager.fetchUsage();
+      this.webviewView.webview.postMessage({ type: "usageUpdate", usage });
+    } catch {
+      this.webviewView.webview.postMessage({ type: "usageUpdate", usage: null });
+    }
+  }
+
+  private startUsageRefresh() {
+    if (this.usageRefreshTimer) return;
+    this.usageRefreshTimer = setInterval(() => {
+      this.sendUsageToWebview();
+    }, 30_000);
+  }
+
+  // ============================================================
+  // Direct chat (옵션 / 이미지 / 사용량) — webview 가 직접 호출
+  // ============================================================
+
+  private async handleDirectMessage(msg: {
+    text: string;
+    images?: { base64: string; name: string; type: string }[];
+    model?: string;
+    safety?: string;
+  }) {
+    const webview = this.webviewView?.webview;
+    if (!webview) return;
+    const text = (msg.text || "").trim();
+    const images = msg.images || [];
+    if (!text && images.length === 0) return;
+
+    if (!this.currentConversationId) {
+      this.currentConversationId = `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      await this.context.globalState.update(
+        CURRENT_ID_KEY,
+        this.currentConversationId
+      );
+    }
+
+    // user 메시지 기록 + UI
+    this.currentMessages.push({
+      role: "user",
+      content: text || "(이미지)",
+      timestamp: Date.now(),
+    });
+    this.directHistory.push({ role: "user", content: text });
+
+    webview.postMessage({ type: "startResponse" });
+
+    try {
+      const resp = await this.llmClient.chatDirect({
+        text,
+        images: images.map((i) => i.base64),
+        model: msg.model || undefined,
+        safety: msg.safety,
+        conversationId: this.currentConversationId || undefined,
+        history: this.directHistory.slice(0, -1), // 마지막 user 는 chatDirect 내부에서 추가
+      });
+
+      if (resp.type === "options") {
+        const messageId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        this.lastOptionsMessageId = messageId;
+        // 옵션 인트로는 directHistory 에 assistant 로 남김
+        this.directHistory.push({ role: "assistant", content: resp.intro });
+        this.currentMessages.push({
+          role: "assistant",
+          content: resp.intro,
+          timestamp: Date.now(),
+        });
+        webview.postMessage({
+          type: "options",
+          messageId,
+          intro: resp.intro,
+          options: resp.options,
+        });
+      } else {
+        this.directHistory.push({ role: "assistant", content: resp.content });
+        this.currentMessages.push({
+          role: "assistant",
+          content: resp.content,
+          timestamp: Date.now(),
+        });
+        webview.postMessage({
+          type: "assistantChunk",
+          text: resp.content,
+        });
+        webview.postMessage({
+          type: "answerMeta",
+          model: resp.model,
+          chargedTokens: resp.chargedTokens,
+          latencyMs: resp.latencyMs,
+        });
+      }
+
+      webview.postMessage({ type: "endResponse" });
+      await this.persistCurrent();
+      // 응답 직후 사용량 즉시 갱신
+      this.sendUsageToWebview();
+    } catch (e: any) {
+      webview.postMessage({ type: "error", text: e.message });
+      webview.postMessage({ type: "endResponse" });
+    }
+  }
+
+  private async handleSelectOption(msg: {
+    messageId: string;
+    optionId: string;
+    optionTitle: string;
+    keywords: string[];
+  }) {
+    const webview = this.webviewView?.webview;
+    if (!webview) return;
+
+    webview.postMessage({ type: "startResponse" });
+    try {
+      const resp = await this.llmClient.continueMessage({
+        optionId: msg.optionId,
+        optionTitle: msg.optionTitle,
+        keywords: msg.keywords || [],
+        messageId: msg.messageId,
+        conversationId: this.currentConversationId || undefined,
+        history: this.directHistory,
+      });
+
+      this.directHistory.push({ role: "assistant", content: resp.content });
+      this.currentMessages.push({
+        role: "assistant",
+        content: resp.content,
+        timestamp: Date.now(),
+      });
+      webview.postMessage({
+        type: "appendToOptions",
+        messageId: msg.messageId,
+        content: resp.content,
+      });
+      webview.postMessage({ type: "endResponse" });
+      await this.persistCurrent();
+      this.sendUsageToWebview();
+    } catch (e: any) {
+      webview.postMessage({ type: "error", text: e.message });
+      webview.postMessage({ type: "endResponse" });
+    }
   }
 
   private async restorePreviousSession() {
@@ -426,14 +608,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.currentMessages = [...conv.messages];
 
     this.agentLoop.clearHistory();
-    this.agentLoop.restoreHistory(
-      conv.messages
-        .filter((m) => m.role === "user" || m.role === "assistant")
-        .map((m) => ({
-          role: m.role as "user" | "assistant",
-          content: m.content,
-        }))
-    );
+    const userAssistantMsgs = conv.messages
+      .filter((m) => m.role === "user" || m.role === "assistant")
+      .map((m) => ({
+        role: m.role as "user" | "assistant",
+        content: m.content,
+      }));
+    this.agentLoop.restoreHistory(userAssistantMsgs);
+    // directChat history 도 동일하게 복원
+    this.directHistory = userAssistantMsgs;
 
     // 웹뷰에 복원 메시지 전송 (약간의 지연 후)
     setTimeout(() => {
@@ -1080,6 +1263,142 @@ textarea::placeholder {
   text-align: center;
   margin-top: 6px;
 }
+
+/* === 옵션 바 (이미지/모델/안전/사용량) === */
+.option-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 0 8px;
+  font-size: 11px;
+}
+.option-bar button,
+.option-bar select {
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.03);
+  color: var(--vscode-foreground);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 11px;
+  outline: none;
+}
+.option-bar button:hover,
+.option-bar select:hover {
+  background: rgba(255,255,255,0.07);
+  border-color: rgba(192,132,252,0.3);
+}
+.option-bar .spacer { flex: 1; }
+.usage-chip {
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 10px;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(255,255,255,0.04);
+}
+.usage-chip.empty { display: none; }
+
+/* === 이미지 미리보기 === */
+#image-preview {
+  display: none;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 0;
+}
+#image-preview.show { display: flex; }
+.image-thumb {
+  position: relative;
+  display: inline-block;
+}
+.image-thumb img {
+  height: 60px;
+  width: 60px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid rgba(255,255,255,0.08);
+}
+.image-thumb button.remove {
+  position: absolute;
+  top: -6px; right: -6px;
+  width: 18px; height: 18px;
+  background: #dc2626; color: #fff;
+  border: none; border-radius: 50%;
+  font-size: 11px; line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+
+/* === 옵션 카드 (continue 모드) === */
+.options-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+.option-card {
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.02);
+  color: var(--vscode-foreground);
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: inherit;
+}
+.option-card:hover:not(:disabled) {
+  border-color: rgba(192,132,252,0.5);
+  background: rgba(192,132,252,0.05);
+  transform: translateY(-1px);
+}
+.option-card:disabled { cursor: default; }
+.option-card.dimmed { opacity: 0.35; }
+.option-card.selected {
+  border-color: #c084fc;
+  background: rgba(192,132,252,0.08);
+  box-shadow: 0 0 0 1px rgba(192,132,252,0.3);
+}
+.option-card .emoji { font-size: 18px; margin-bottom: 4px; }
+.option-card .title {
+  font-weight: 600;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+.option-card .desc {
+  font-size: 11px;
+  opacity: 0.65;
+  line-height: 1.4;
+  margin-bottom: 6px;
+}
+.option-card .keywords {
+  display: flex; flex-wrap: wrap; gap: 3px;
+}
+.option-card .keywords span {
+  font-size: 9px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(255,255,255,0.06);
+  color: rgba(255,255,255,0.55);
+}
+
+.options-separator {
+  text-align: center;
+  font-size: 10px;
+  opacity: 0.4;
+  margin: 12px 0 6px;
+  letter-spacing: 1px;
+}
+
+.answer-meta {
+  font-size: 10px;
+  opacity: 0.4;
+  margin-top: 6px;
+  font-family: "SF Mono", Menlo, monospace;
+}
 </style>
 </head>
 <body>
@@ -1143,11 +1462,14 @@ textarea::placeholder {
         <span class="slash-desc">코드 리뷰</span>
       </div>
     </div>
+    <!-- 이미지 미리보기 -->
+    <div id="image-preview"></div>
+
     <div class="input-box">
       <textarea
         id="input"
         rows="1"
-        placeholder="화랑에게 물어보세요... (/ 로 명령어)"
+        placeholder="화랑에게 물어보세요... (/ 로 명령어, 이미지 붙여넣기 가능)"
         onkeydown="onKey(event)"
         oninput="onInput(this)"
         oncompositionstart="onCompositionStart()"
@@ -1156,7 +1478,28 @@ textarea::placeholder {
       <button class="btn-send" id="btnSend" onclick="send()">전송</button>
       <button class="btn-stop" id="btnStop" onclick="stop()">중지</button>
     </div>
-    <div class="input-hint">Enter 전송 · Shift+Enter 줄바꿈</div>
+
+    <!-- 옵션 바: 이미지 / 모델 / 안전 / 사용량 -->
+    <div class="option-bar">
+      <button id="image-btn" title="이미지 첨부" onclick="document.getElementById('image-input').click()">📎 이미지</button>
+      <select id="model-select" title="모델 선택">
+        <option value="">⚡ Auto</option>
+        <option value="hwarang-default">화랑 기본</option>
+        <option value="hwarang-coder">코더</option>
+        <option value="hwarang-vision">비전</option>
+      </select>
+      <select id="safety-select" title="안전 모드">
+        <option value="loose">🆓 관대</option>
+        <option value="standard" selected>🛡️ 표준</option>
+        <option value="strict">🔒 엄격</option>
+      </select>
+      <span class="spacer"></span>
+      <span id="usage-display" class="usage-chip empty" title="잔여 / 일일 한도"></span>
+    </div>
+
+    <input type="file" id="image-input" accept="image/*" multiple style="display:none;">
+
+    <div class="input-hint">Enter 전송 · Shift+Enter 줄바꿈 · 이미지 붙여넣기/드래그 지원</div>
   </div>
 
 <script>
@@ -1167,10 +1510,17 @@ const $send = document.getElementById('btnSend');
 const $stop = document.getElementById('btnStop');
 const $welcome = document.getElementById('welcome');
 const $slash = document.getElementById('slashPopup');
+const $imageInput = document.getElementById('image-input');
+const $imagePreview = document.getElementById('image-preview');
+const $modelSelect = document.getElementById('model-select');
+const $safetySelect = document.getElementById('safety-select');
+const $usageDisplay = document.getElementById('usage-display');
 
 let busy = false;
 let curAI = null;       // 현재 AI 메시지의 .msg-text
 let curTool = null;     // 현재 tool-block
+let attachedImages = []; // [{base64, name, type}]
+const MAX_IMAGES = 4;
 
 // ======== 전송 ========
 
@@ -1179,20 +1529,37 @@ function send() {
   if (isComposing) return;
 
   const t = $input.value.trim();
-  if (!t || busy) return;
+  const hasImages = attachedImages.length > 0;
+  if ((!t && !hasImages) || busy) return;
   $input.value = '';
   $input.style.height = 'auto';
   $slash.classList.remove('show');
 
+  // 옵션바 값
+  const model = $modelSelect.value;
+  const safety = $safetySelect.value;
+  // 이미지 동봉 또는 모델/안전 명시 시 → directChat (옵션 모드/비전)
+  const useDirect =
+    hasImages || (model && model.length > 0) || (safety && safety !== 'standard');
+
   const slashRe = /^\\/([a-z]+)(?:\\s+(.*))?$/;
-  const m = t.match(slashRe);
-  if (m) {
+  const slashMatch = t.match(slashRe);
+  if (slashMatch && !useDirect) {
     addUser(t);
-    vscode.postMessage({ type: 'slashCommand', command: m[1], args: m[2] || '' });
+    vscode.postMessage({ type: 'slashCommand', command: slashMatch[1], args: slashMatch[2] || '' });
     return;
   }
-  addUser(t);
-  vscode.postMessage({ type: 'sendMessage', text: t });
+
+  addUser(t || '(이미지)', attachedImages);
+  vscode.postMessage({
+    type: 'sendMessage',
+    text: t,
+    images: attachedImages,
+    model: useDirect ? model : '',
+    safety: useDirect ? safety : '',
+  });
+  attachedImages = [];
+  renderImagePreview();
 }
 
 function quickSend(t) { $input.value = t; send(); }
@@ -1255,16 +1622,142 @@ function scroll() {
   $msgs.scrollTop = $msgs.scrollHeight;
 }
 
-function addUser(text) {
+function addUser(text, imgs) {
   hideWelcome();
   const d = document.createElement('div');
   d.className = 'msg user-msg';
+  let imgHtml = '';
+  if (imgs && imgs.length) {
+    imgHtml = '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px;">' +
+      imgs.map(function(i){
+        return '<img src="' + i.base64 + '" alt="' + esc(i.name || '') +
+          '" style="height:80px;border-radius:6px;border:1px solid rgba(255,255,255,0.08);">';
+      }).join('') + '</div>';
+  }
   d.innerHTML =
     '<div class="msg-label"><span class="dot"></span>나</div>' +
+    imgHtml +
     '<div class="msg-text">' + esc(text) + '</div>';
   $msgs.appendChild(d);
   scroll();
 }
+
+// ======== 이미지 첨부 ========
+
+function fileToDataUrl(file) {
+  return new Promise(function(resolve, reject) {
+    const r = new FileReader();
+    r.onload = function() { resolve(r.result); };
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+}
+
+async function addFiles(files) {
+  for (let i = 0; i < files.length; i++) {
+    if (attachedImages.length >= MAX_IMAGES) break;
+    const f = files[i];
+    if (!f.type || !f.type.startsWith('image/')) continue;
+    try {
+      const base64 = await fileToDataUrl(f);
+      attachedImages.push({ base64: base64, name: f.name || 'image', type: f.type });
+    } catch (e) { /* skip */ }
+  }
+  renderImagePreview();
+}
+
+function renderImagePreview() {
+  if (!$imagePreview) return;
+  if (attachedImages.length === 0) {
+    $imagePreview.classList.remove('show');
+    $imagePreview.innerHTML = '';
+    return;
+  }
+  $imagePreview.classList.add('show');
+  $imagePreview.innerHTML = attachedImages.map(function(img, idx) {
+    return '<div class="image-thumb">' +
+      '<img src="' + img.base64 + '" alt="' + esc(img.name || '') + '">' +
+      '<button class="remove" data-idx="' + idx + '" title="삭제">&times;</button>' +
+    '</div>';
+  }).join('');
+  $imagePreview.querySelectorAll('button.remove').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      const idx = parseInt(btn.dataset.idx, 10);
+      attachedImages.splice(idx, 1);
+      renderImagePreview();
+    });
+  });
+}
+
+// 1) 파일 선택
+$imageInput.addEventListener('change', function(e) {
+  addFiles(Array.from(e.target.files || []));
+  $imageInput.value = '';
+});
+
+// 2) 클립보드 붙여넣기
+$input.addEventListener('paste', function(e) {
+  const items = e.clipboardData ? e.clipboardData.items : null;
+  if (!items) return;
+  const files = [];
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].type && items[i].type.startsWith('image/')) {
+      const f = items[i].getAsFile();
+      if (f) files.push(f);
+    }
+  }
+  if (files.length) {
+    e.preventDefault();
+    addFiles(files);
+  }
+});
+
+// 3) 드래그 앤 드롭
+document.body.addEventListener('dragover', function(e) {
+  if (e.dataTransfer && Array.from(e.dataTransfer.types || []).indexOf('Files') !== -1) {
+    e.preventDefault();
+  }
+});
+document.body.addEventListener('drop', function(e) {
+  if (!e.dataTransfer) return;
+  const files = Array.from(e.dataTransfer.files || []).filter(function(f) {
+    return f.type && f.type.startsWith('image/');
+  });
+  if (files.length) {
+    e.preventDefault();
+    addFiles(files);
+  }
+});
+
+// ======== 사용량 표시 ========
+
+function updateUsageDisplay(usage) {
+  if (!usage || !$usageDisplay) {
+    if ($usageDisplay) $usageDisplay.classList.add('empty');
+    return;
+  }
+  $usageDisplay.classList.remove('empty');
+  const dailyLimit = usage.dailyLimit || 0;
+  const dailyUsed = usage.dailyUsed || 0;
+  const remaining = Math.max(0, dailyLimit - dailyUsed);
+  const fmt = function(n) {
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+    if (n >= 1_000) return (n / 1_000).toFixed(0) + 'K';
+    return String(n);
+  };
+  if (dailyLimit > 0) {
+    const pct = (remaining / dailyLimit) * 100;
+    const color = pct < 10 ? '#ef4444' : pct < 30 ? '#f59e0b' : '#10b981';
+    $usageDisplay.innerHTML =
+      '<span style="color:' + color + ';">' + fmt(remaining) + '</span>' +
+      '<span style="opacity:0.5;margin-left:3px;"> / ' + fmt(dailyLimit) + '</span>';
+  } else {
+    $usageDisplay.innerHTML = '<span style="opacity:0.7;">' + fmt(usage.balance || 0) + '</span>';
+  }
+}
+
+// 첫 진입 시 사용량 요청
+vscode.postMessage({ type: 'fetchUsage' });
 
 function startAI() {
   hideWelcome();
@@ -1397,11 +1890,110 @@ function doApply(btn, lang) { vscode.postMessage({ type: 'applyDiff', code: getC
 
 // ======== 메시지 수신 ========
 
+// ======== 옵션 카드 렌더링 ========
+
+function renderOptions(messageId, intro, options) {
+  hideWelcome();
+  removeThinking();
+  curAI = null;
+
+  const d = document.createElement('div');
+  d.className = 'msg ai-msg';
+  d.dataset.id = messageId;
+
+  const introHtml = '<div class="msg-text">' + md(intro) + '</div>';
+  const cardsHtml = '<div class="options-grid">' + options.map(function(opt, i) {
+    const kw = (opt.keywords || []).slice(0, 3).map(function(k) {
+      return '<span>' + esc(String(k)) + '</span>';
+    }).join('');
+    return '<button class="option-card" data-msg-id="' + messageId + '" data-idx="' + i + '">' +
+      '<div class="emoji">' + esc(opt.preview_emoji || '✨') + '</div>' +
+      '<div class="title">' + esc(opt.title || '') + '</div>' +
+      '<div class="desc">' + esc(opt.description || '') + '</div>' +
+      '<div class="keywords">' + kw + '</div>' +
+    '</button>';
+  }).join('') + '</div>';
+
+  d.innerHTML =
+    '<div class="msg-label"><span class="dot"></span>화랑</div>' +
+    introHtml + cardsHtml;
+  $msgs.appendChild(d);
+
+  // 카드 클릭
+  d.querySelectorAll('.option-card').forEach(function(card) {
+    card.addEventListener('click', function() {
+      const idx = parseInt(card.dataset.idx, 10);
+      const opt = options[idx];
+      if (!opt) return;
+      d.querySelectorAll('.option-card').forEach(function(c) {
+        c.disabled = true;
+        if (c === card) c.classList.add('selected');
+        else c.classList.add('dimmed');
+      });
+      vscode.postMessage({
+        type: 'selectOption',
+        messageId: messageId,
+        optionId: opt.id,
+        optionTitle: opt.title,
+        keywords: opt.keywords || [],
+      });
+    });
+  });
+
+  scroll();
+}
+
+function appendAnswerToOptions(messageId, content) {
+  const d = $msgs.querySelector('[data-id="' + messageId + '"]');
+  if (!d) {
+    // 옵션 메시지 못 찾으면 일반 답변으로 표시
+    startAI();
+    if (curAI) curAI.innerHTML = md(content);
+    return;
+  }
+  let answer = d.querySelector('.answer-content');
+  if (!answer) {
+    answer = document.createElement('div');
+    answer.className = 'answer-content';
+    answer.innerHTML =
+      '<div class="options-separator">─── ✨ 답변 ───</div>' +
+      '<div class="msg-text answer-text"></div>';
+    d.appendChild(answer);
+  }
+  const t = answer.querySelector('.answer-text');
+  t.innerHTML = md(content);
+  scroll();
+}
+
 window.addEventListener('message', e => {
   const m = e.data;
   switch (m.type) {
     case 'addUserMessage':
       addUser(m.text);
+      break;
+    case 'options':
+      removeThinking();
+      renderOptions(m.messageId, m.intro, m.options || []);
+      break;
+    case 'appendToOptions':
+      appendAnswerToOptions(m.messageId, m.content);
+      break;
+    case 'usageUpdate':
+      updateUsageDisplay(m.usage);
+      break;
+    case 'answerMeta':
+      if (curAI) {
+        const meta = [];
+        if (m.model) meta.push(m.model);
+        if (m.chargedTokens != null) meta.push(m.chargedTokens + ' 토큰');
+        if (m.latencyMs != null) meta.push(m.latencyMs + 'ms');
+        if (meta.length) {
+          const mdiv = document.createElement('div');
+          mdiv.className = 'answer-meta';
+          mdiv.textContent = meta.join(' · ');
+          curAI.parentElement.appendChild(mdiv);
+        }
+      }
       break;
 
     case 'startResponse':

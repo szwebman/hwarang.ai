@@ -1,0 +1,27 @@
+#!/bin/bash
+# ─────────────────────────────────────────────────────────────────────────────
+# 화랑 Grid Agent — .deb prerm (제거 전)
+#
+# hwarang-agent CLI symlink 정리.
+# systemd user service 정지는 build_deb.sh 의 기존 prerm 에서 처리됨.
+# ─────────────────────────────────────────────────────────────────────────────
+
+set -e
+
+SYMLINK="/usr/local/bin/hwarang-agent"
+
+# symlink 만 제거 (실제 파일이면 건드리지 않음)
+if [ -L "$SYMLINK" ]; then
+    rm -f "$SYMLINK" || true
+    echo "[ OK ] $SYMLINK 제거"
+fi
+
+# systemd user service 정지 시도 (best-effort)
+if command -v systemctl >/dev/null 2>&1; then
+    LOGNAME_USER="$(logname 2>/dev/null || true)"
+    if [ -n "$LOGNAME_USER" ]; then
+        systemctl --user --machine="${LOGNAME_USER}@.host" stop hwarang-grid.service 2>/dev/null || true
+    fi
+fi
+
+exit 0

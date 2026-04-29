@@ -67,6 +67,97 @@ def _load_httpx():
         return None
 
 
+def _load_gpu_detector():
+    try:
+        from modules import gpu_detector  # type: ignore
+        return gpu_detector
+    except Exception:
+        try:
+            from agent.modules import gpu_detector  # type: ignore
+            return gpu_detector
+        except Exception as exc:
+            logger.debug("gpu_detector 로드 실패: %s", exc)
+            return None
+
+
+def _collect_device_info() -> dict[str, str]:
+    """CLI 기기 식별 정보 수집. nvidia-smi/sysctl/rocm-smi 우선순위."""
+    import platform
+    import socket
+    import subprocess
+    import hashlib
+
+    hostname = socket.gethostname()
+    os_name = platform.system().lower()  # "linux" / "darwin" / "windows"
+    arch = platform.machine().lower()    # "x86_64" / "arm64" / "aarch64"
+
+    # GPU 감지: 1) gpu_detector 모듈 우선 시도
+    gpu = "Unknown"
+    gpu_mod = _load_gpu_detector()
+    if gpu_mod is not None:
+        try:
+            info = gpu_mod.detect_gpu()
+            if isinstance(info, dict):
+                name = info.get("name") or ""
+                vendor = info.get("vendor") or ""
+                if name and name.lower() != "none":
+                    gpu = name
+                elif vendor and vendor.lower() != "none":
+                    gpu = vendor
+        except Exception as exc:
+            logger.debug("gpu_detector.detect_gpu 실패: %s", exc)
+
+    # 2) nvidia-smi
+    if gpu == "Unknown":
+        try:
+            out = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if out.returncode == 0 and out.stdout.strip():
+                gpu = out.stdout.strip().splitlines()[0].strip()
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        except Exception:
+            pass
+
+    # 3) macOS Apple Silicon
+    if gpu == "Unknown" and os_name == "darwin":
+        try:
+            out = subprocess.run(
+                ["sysctl", "-n", "machdep.cpu.brand_string"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if out.returncode == 0:
+                gpu = out.stdout.strip()
+        except Exception:
+            pass
+
+    # 4) AMD rocm
+    if gpu == "Unknown":
+        try:
+            out = subprocess.run(
+                ["rocm-smi", "--showproductname"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if out.returncode == 0 and "GPU" in out.stdout:
+                gpu = "AMD GPU"
+        except Exception:
+            pass
+
+    fingerprint = hashlib.sha256(
+        f"{hostname}|{os_name}|{arch}".encode()
+    ).hexdigest()
+
+    return {
+        "deviceHostname": hostname,
+        "deviceOs": os_name,
+        "deviceArch": arch,
+        "deviceGpu": gpu,
+        "deviceFingerprint": fingerprint,
+    }
+
+
 def _load_domain_spec():
     try:
         from modules import domain_specialization as ds  # type: ignore
@@ -478,6 +569,77 @@ def cmd_version(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_crawl_only(args: argparse.Namespace) -> int:
+    """크롤링 워커만 단독 실행 (학습/추론 없이).
+
+    분산 크롤 워커를 foreground 로 띄워 마스터 큐에서 작업을 임대하고
+    URL fetch → 결과 제출만 수행한다.
+
+    환경변수:
+      HWARANG_AGENT_KEY  — 에이전트 API 키
+      HWARANG_AGENT_ID   — 에이전트 ID
+      HWARANG_MASTER_URL — 마스터 URL
+    """
+    # 설정 로드
+    try:
+        sys.path.insert(0, str(Path(__file__).parent))
+        from config.agent_config import AgentConfig  # type: ignore
+    except Exception as exc:
+        print(f"[ERROR] agent_config 로드 실패: {exc}", file=sys.stderr)
+        return 2
+
+    cfg = AgentConfig.load()
+    agent_id, api_key = _get_agent_creds()
+    if cfg.agent_id:
+        agent_id = cfg.agent_id
+
+    master_url = args.master or cfg.network.master_url
+
+    try:
+        from modules.crawler_agent import CrawlerAgent, CrawlerConfig  # type: ignore
+    except Exception as exc:
+        print(f"[ERROR] crawler_agent 임포트 실패: {exc}", file=sys.stderr)
+        return 2
+
+    crawl_cfg = cfg.modules.crawling
+    domain_filter = list(getattr(crawl_cfg, "domain_filter", []) or []) or None
+    if args.domain:
+        domain_filter = [d.strip() for d in args.domain.split(",") if d.strip()]
+
+    cc = CrawlerConfig(
+        master_url=master_url,
+        api_key=api_key,
+        agent_id=agent_id,
+        domain_filter=domain_filter,
+        max_concurrent=args.concurrent or getattr(crawl_cfg, "max_concurrent", 3),
+        poll_interval_seconds=getattr(crawl_cfg, "poll_interval_seconds", 30),
+        request_timeout_sec=getattr(crawl_cfg, "request_timeout", 15),
+        respect_robots=getattr(crawl_cfg, "respect_robots", True),
+    )
+
+    crawler = CrawlerAgent(cc)
+
+    # SIGTERM/SIGINT → graceful stop
+    def _sig_handler(_sig, _frame):
+        crawler.stop()
+
+    try:
+        signal.signal(signal.SIGINT, _sig_handler)
+        signal.signal(signal.SIGTERM, _sig_handler)
+    except Exception:
+        pass
+
+    print(
+        f"[CRAWL] agent={agent_id} master={master_url} "
+        f"concurrent={cc.max_concurrent} domain_filter={cc.domain_filter}"
+    )
+    try:
+        asyncio.run(crawler.run())
+    except KeyboardInterrupt:
+        crawler.stop()
+    return 0
+
+
 # ────────────────────────────────────────────────────────────────────────
 # daemon / stop
 # ────────────────────────────────────────────────────────────────────────
@@ -644,6 +806,40 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def cmd_decide_test(args: argparse.Namespace) -> int:
+    """가상 RoundOffer 로 인지(자율 결정) 모듈 테스트.
+
+    예:
+        hwarang-agent decide-test --domain legal --minutes 25 --hwr 120 --vram 12
+        hwarang-agent decide-test --llm   # 로컬 LLM 사용
+    """
+    try:
+        from modules.cognitive.decision_engine import (  # type: ignore
+            decide_about_round,
+            RoundOffer,
+        )
+    except Exception as exc:
+        print(f"[ERROR] cognitive 모듈 로드 실패: {exc}", file=sys.stderr)
+        return 2
+
+    offer = RoundOffer(
+        round_id="test_001",
+        domain=args.domain or "code",
+        estimated_minutes=int(args.minutes or 30),
+        estimated_hwr=float(args.hwr or 100),
+        min_vram_gb=float(args.vram or 8),
+        sample_count=int(args.samples or 1000),
+    )
+
+    decision = asyncio.run(decide_about_round(offer, use_llm=bool(args.llm)))
+    print(f"행동: {decision.action}")
+    print(f"신뢰도: {decision.confidence:.2f}")
+    print(f"이유: {decision.reasoning}")
+    if decision.suggested_alternatives:
+        print(f"대안: {', '.join(decision.suggested_alternatives)}")
+    return 0
+
+
 def cmd_stop(args: argparse.Namespace) -> int:
     """실행 중인 데몬을 PID 파일로 종료."""
     pid_mgr = _load_pid_manager()
@@ -656,6 +852,303 @@ def cmd_stop(args: argparse.Namespace) -> int:
         return 0
     print("[ERROR] 에이전트 종료 실패", file=sys.stderr)
     return 1
+
+
+# ────────────────────────────────────────────────────────────────────────
+# 다중 기기 로그인 (cli-init / cli-poll)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def cmd_login(args: argparse.Namespace) -> int:
+    """헤드리스 기기에서 다중 기기 로그인.
+
+    흐름:
+        1. cli-init 호출 (device meta 전달)
+        2. URL + QR 출력
+        3. 자동으로 브라우저 열기 (--no-browser 면 skip)
+        4. cli-poll 폴링 (3초 간격, 최대 10분)
+        5. approved → ~/.hwarang/account.json 저장
+    """
+    httpx = _load_httpx()
+    if httpx is None:
+        print("[ERROR] httpx 미설치. pip install httpx", file=sys.stderr)
+        return 2
+
+    api_url = args.api_url or os.getenv("HWARANG_API_URL", "https://hwarang.ai")
+    api_url = api_url.rstrip("/")
+
+    # 1. 기존 로그인 확인
+    existing = _load_account()
+    if existing.get("api_key") and not args.force:
+        print(f"[INFO] 이미 로그인 됨: {existing.get('email', '?')}")
+        print("       다시 로그인하려면 --force 또는 hwarang-agent logout 후 시도")
+        return 0
+
+    # 2. device info 수집
+    device = _collect_device_info()
+
+    # 3. cli-init
+    print(f"[1/3] {api_url}/api/auth/agent/cli-init 호출 중...")
+    try:
+        resp = httpx.post(
+            f"{api_url}/api/auth/agent/cli-init",
+            json=device,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        print(f"[ERROR] cli-init 실패: {exc}", file=sys.stderr)
+        return 1
+
+    nonce = data["nonce"]
+    login_url = data["login_url"]
+    poll_url = data.get("poll_url") or f"{api_url}/api/auth/agent/cli-poll?nonce={nonce}"
+    expires_in = data.get("expires_in", 600)
+    interval = data.get("interval", 3)
+
+    # 4. URL 출력
+    print()
+    print("=" * 60)
+    print(" 화랑 그리드 - CLI 로그인")
+    print("=" * 60)
+    print(f"  기기명     : {device['deviceHostname']}")
+    print(f"  OS / 아키텍처: {device['deviceOs']} / {device['deviceArch']}")
+    print(f"  GPU       : {device['deviceGpu']}")
+    print()
+    print("  다음 URL 을 브라우저에서 열어 인증을 승인하세요:")
+    print()
+    print(f"    {login_url}")
+    print()
+    print(f"  ({expires_in // 60}분 안에 완료해주세요)")
+    print("=" * 60)
+
+    # 5. 자동 브라우저 열기
+    if not args.no_browser:
+        try:
+            import webbrowser
+            if webbrowser.open(login_url):
+                print("\n[INFO] 브라우저가 열렸습니다.")
+            else:
+                print("\n[INFO] 브라우저 자동 열기 실패 — URL 을 수동으로 복사하세요.")
+        except Exception:
+            pass
+
+    # 6. 폴링
+    print("\n[2/3] 인증 대기 중", end="", flush=True)
+
+    deadline = time.monotonic() + expires_in
+    while time.monotonic() < deadline:
+        time.sleep(interval)
+        print(".", end="", flush=True)
+        try:
+            resp = httpx.get(poll_url, timeout=10)
+        except Exception as exc:
+            logger.debug("poll 실패 (재시도): %s", exc)
+            continue
+
+        if resp.status_code == 410:
+            print()
+            try:
+                body = resp.json()
+                status = body.get("status", "?")
+            except Exception:
+                status = "expired"
+            print(f"[ERROR] 로그인 요청 만료/소비됨: {status}", file=sys.stderr)
+            print("        다시 hwarang-agent login 을 실행하세요.", file=sys.stderr)
+            return 1
+
+        if resp.status_code != 200:
+            continue
+
+        try:
+            body = resp.json()
+        except Exception:
+            continue
+        status = body.get("status")
+
+        if status == "pending":
+            continue
+
+        if status == "approved":
+            print(" 완료!")
+            # 7. account.json 저장
+            account = {
+                "email": body.get("email"),
+                "user_id": body.get("user_id"),
+                "api_key": body.get("api_key"),
+                "device_id": body.get("device_id"),
+                "device_name": body.get("device_name"),
+                "device_fingerprint": device["deviceFingerprint"],
+                "tier": body.get("tier", "BRONZE"),
+                "kyc_verified": body.get("kyc_verified", False),
+                "last_synced_at": datetime.utcnow().isoformat(),
+                "master_url": api_url,
+            }
+            _save_account(account)
+            print()
+            print("[3/3] 로그인 완료")
+            print(f"    email      : {account['email']}")
+            print(f"    device     : {account['device_name']} ({account['device_id']})")
+            print(f"    tier       : {account['tier']}")
+            print(f"    KYC        : {'✓' if account['kyc_verified'] else '미인증'}")
+            print(f"    저장 위치   : {ACCOUNT_PATH}")
+            return 0
+
+        # 알 수 없는 상태 → 그냥 계속 폴링
+        continue
+
+    print()
+    print("[ERROR] 시간 초과 — 인증을 받지 못했습니다.", file=sys.stderr)
+    return 1
+
+
+def cmd_logout(args: argparse.Namespace) -> int:
+    """현재 기기 로그아웃. --all-devices 면 모든 기기 폐기."""
+    acc = _load_account()
+    api_key = acc.get("api_key")
+    device_id = acc.get("device_id")
+    api_url = acc.get("master_url") or os.getenv("HWARANG_API_URL", "https://hwarang.ai")
+    api_url = api_url.rstrip("/")
+
+    httpx = _load_httpx()
+
+    # 서버측 폐기 (실패해도 로컬은 삭제)
+    if httpx is not None and api_key:
+        try:
+            if args.all_devices:
+                # 전체 기기 목록 받아서 차례로 DELETE
+                devices_resp = httpx.get(
+                    f"{api_url}/api/auth/agent/devices",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    timeout=10,
+                )
+                if devices_resp.status_code == 200:
+                    body = devices_resp.json()
+                    devices = body.get("devices", body) if isinstance(body, dict) else body
+                    for d in devices:
+                        try:
+                            httpx.delete(
+                                f"{api_url}/api/auth/agent/devices/{d.get('id') or d.get('device_id')}",
+                                headers={"Authorization": f"Bearer {api_key}"},
+                                timeout=10,
+                            )
+                        except Exception:
+                            pass
+                    print(f"[OK] {len(devices)}개 기기 폐기")
+            elif device_id:
+                resp = httpx.delete(
+                    f"{api_url}/api/auth/agent/devices/{device_id}",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    timeout=10,
+                )
+                if resp.status_code < 400:
+                    print(f"[OK] 서버측 기기 폐기: {device_id}")
+                else:
+                    print(f"[WARN] 서버 폐기 실패: HTTP {resp.status_code}")
+        except Exception as exc:
+            print(f"[WARN] 서버 폐기 실패 (로컬은 정리됨): {exc}")
+
+    # 로컬 삭제
+    if ACCOUNT_PATH.exists():
+        ACCOUNT_PATH.unlink()
+        print(f"[OK] 로컬 계정 삭제: {ACCOUNT_PATH}")
+    else:
+        print("[INFO] 로컬 계정 없음")
+    return 0
+
+
+def cmd_devices(args: argparse.Namespace) -> int:
+    """등록된 기기 목록 조회 (서버에서)."""
+    acc = _load_account()
+    api_key = acc.get("api_key")
+    if not api_key:
+        print("[ERROR] 로그인 필요 (hwarang-agent login)", file=sys.stderr)
+        return 2
+
+    api_url = acc.get("master_url") or os.getenv("HWARANG_API_URL", "https://hwarang.ai")
+    api_url = api_url.rstrip("/")
+
+    httpx = _load_httpx()
+    if httpx is None:
+        print("[ERROR] httpx 미설치", file=sys.stderr)
+        return 2
+
+    try:
+        resp = httpx.get(
+            f"{api_url}/api/auth/agent/devices",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        devices = body.get("devices", body) if isinstance(body, dict) else body
+    except Exception as exc:
+        print(f"[ERROR] 기기 목록 조회 실패: {exc}", file=sys.stderr)
+        return 1
+
+    if not devices:
+        print("등록된 기기 없음")
+        return 0
+
+    print(f"등록된 기기 ({len(devices)}개):")
+    print()
+    for d in devices:
+        marker = "★" if d.get("isCurrent") else " "
+        active = "🟢" if d.get("isActive", True) else "○"
+        name = d.get("deviceName") or d.get("device_name") or "(이름 없음)"
+        os_str = d.get("deviceOs") or d.get("device_os") or "?"
+        gpu = d.get("deviceGpu") or d.get("device_gpu") or "?"
+        last = d.get("lastSeenAt") or d.get("lastUsedAt") or d.get("last_seen_at") or "-"
+        print(f"  {marker} {active} {name:30s} | {os_str:8s} | {gpu:25s} | {last}")
+    return 0
+
+
+def cmd_whoami(args: argparse.Namespace) -> int:
+    """현재 로그인 상태 + 사용자 정보 조회."""
+    acc = _load_account()
+    api_key = acc.get("api_key")
+
+    if not api_key:
+        print("[INFO] 로그인 안 됨")
+        print("       hwarang-agent login 으로 시작하세요.")
+        return 0
+
+    api_url = acc.get("master_url") or os.getenv("HWARANG_API_URL", "https://hwarang.ai")
+    api_url = api_url.rstrip("/")
+
+    httpx = _load_httpx()
+    if httpx is not None:
+        try:
+            resp = httpx.get(
+                f"{api_url}/api/auth/whoami",
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=8,
+            )
+            if resp.status_code == 200:
+                body = resp.json()
+                print(f"email      : {body.get('email')}")
+                print(f"user_id    : {body.get('user_id')}")
+                print(f"device_id  : {body.get('device_id')}")
+                print(f"device_name: {body.get('device_name')}")
+                print(f"tier       : {body.get('tier')}")
+                print(f"KYC        : {'✓' if body.get('kyc_verified') else '미인증'}")
+                print(f"권한       : {body.get('permissions')}")
+                return 0
+            elif resp.status_code == 401:
+                print("[ERROR] 토큰 만료/무효 — hwarang-agent login 재시도", file=sys.stderr)
+                return 1
+        except Exception as exc:
+            print(f"[WARN] 서버 조회 실패, 로컬 정보 표시: {exc}")
+
+    # 로컬 fallback
+    print("(로컬 캐시)")
+    print(f"email      : {acc.get('email')}")
+    print(f"device_id  : {acc.get('device_id')}")
+    print(f"device_name: {acc.get('device_name')}")
+    print(f"tier       : {acc.get('tier')}")
+    print(f"KYC        : {'✓' if acc.get('kyc_verified') else '미인증'}")
+    return 0
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -766,6 +1259,19 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("version", help="버전 정보")
     p.set_defaults(func=cmd_version)
 
+    # crawl-only (분산 크롤 워커만 단독 실행)
+    p = sub.add_parser(
+        "crawl-only",
+        help="분산 크롤 워커만 단독 실행 (학습/추론 없음)",
+    )
+    p.add_argument("--master", help="master_url override")
+    p.add_argument("--concurrent", type=int, default=0, help="동시 작업 수 (0=설정값 사용)")
+    p.add_argument(
+        "--domain",
+        help="도메인 필터 (콤마 구분, 예: legal,medical). 미지정 시 설정값/전체",
+    )
+    p.set_defaults(func=cmd_crawl_only)
+
     # daemon (Tauri 사이드카에서 호출)
     p = sub.add_parser(
         "daemon",
@@ -784,6 +1290,19 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.set_defaults(func=cmd_daemon)
 
+    # decide-test (인지 결정 모듈 테스트)
+    p = sub.add_parser(
+        "decide-test",
+        help="가상 RoundOffer 로 인지(자율 결정) 모듈 테스트",
+    )
+    p.add_argument("--domain", help="도메인 (예: legal, medical, code, general)")
+    p.add_argument("--minutes", type=int, help="예상 학습 시간 (분)")
+    p.add_argument("--hwr", type=float, help="예상 보상 (HWR)")
+    p.add_argument("--vram", type=float, help="필요 VRAM (GB)")
+    p.add_argument("--samples", type=int, help="샘플 수")
+    p.add_argument("--llm", action="store_true", help="LLM 사용 (없으면 규칙 폴백)")
+    p.set_defaults(func=cmd_decide_test)
+
     # stop (실행 중인 데몬 종료)
     p = sub.add_parser("stop", help="실행 중인 데몬 종료 (PID 파일 사용)")
     p.add_argument(
@@ -793,6 +1312,27 @@ def _build_parser() -> argparse.ArgumentParser:
         help="SIGTERM 후 SIGKILL 까지 대기 초 (기본 10)",
     )
     p.set_defaults(func=cmd_stop)
+
+    # ─── 다중 기기 로그인 ───────────────────────────────────────────────
+    # login
+    p = sub.add_parser("login", help="다중 기기 로그인 (브라우저 인증)")
+    p.add_argument("--no-browser", action="store_true", help="브라우저 자동 열기 비활성화")
+    p.add_argument("--api-url", help="API 서버 URL override")
+    p.add_argument("--force", action="store_true", help="이미 로그인 돼 있어도 재인증")
+    p.set_defaults(func=cmd_login)
+
+    # logout
+    p = sub.add_parser("logout", help="현재 기기 로그아웃")
+    p.add_argument("--all-devices", action="store_true", help="모든 기기 폐기")
+    p.set_defaults(func=cmd_logout)
+
+    # devices
+    p = sub.add_parser("devices", help="등록된 기기 목록")
+    p.set_defaults(func=cmd_devices)
+
+    # whoami
+    p = sub.add_parser("whoami", help="현재 사용자/기기 정보")
+    p.set_defaults(func=cmd_whoami)
 
     return parser
 

@@ -33,10 +33,14 @@ setup(
     include_package_data=True,
     python_requires=">=3.10",
     install_requires=[
-        "httpx>=0.25.0",
+        "httpx>=0.27",
         "websockets>=12.0",
+        "beautifulsoup4>=4.12",   # 분산 크롤러 HTML 파싱
     ],
     extras_require={
+        "crawler": [
+            "pypdf>=4.0",          # 분산 크롤러 PDF 파싱 (선택)
+        ],
         "gpu": [
             "torch>=2.0",
             "transformers>=4.40",

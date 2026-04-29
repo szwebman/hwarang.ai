@@ -52,13 +52,28 @@ class LearningConfig:
 
 @dataclass
 class CrawlingConfig:
-    """데이터 크롤링 설정."""
+    """데이터 크롤링 설정.
+
+    두 종류의 크롤러를 함께 제어:
+      1) 로컬 RSS/HTML 스크래퍼 (`data_crawler.DataCrawlerModule`):
+         - sources / interval_hours / max_items_per_run / storage_limit_mb
+      2) 분산 크롤 워커 (`crawler_agent.CrawlerAgent`):
+         - max_concurrent / poll_interval_seconds / domain_filter / respect_robots / request_timeout
+    """
     enabled: bool = False
     sources: list[str] = field(default_factory=lambda: ["news", "law", "code"])
-    interval_hours: int = 24         # 크롤링 주기
+    interval_hours: int = 24         # 크롤링 주기 (로컬 스크래퍼)
     max_items_per_run: int = 100
     storage_limit_mb: int = 500      # 로컬 저장 상한
     priority: int = 5
+
+    # 분산 크롤 워커 (crawler_agent) 옵션
+    distributed_enabled: bool = True             # 분산 워커 활성화 (마스터 큐)
+    max_concurrent: int = 3                      # 동시 작업 수
+    poll_interval_seconds: int = 30              # 빈 큐 시 대기
+    domain_filter: list[str] = field(default_factory=list)  # 빈 = 전 도메인
+    respect_robots: bool = True                  # robots.txt 존중
+    request_timeout: int = 15                    # URL fetch 타임아웃 (초)
 
 @dataclass
 class BenchmarkConfig:

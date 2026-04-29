@@ -60,10 +60,19 @@
         "minimumSystemVersion": "11.0",
         "exceptionDomain": "hwarang.ai"
       },
+      "deb": {
+        "scripts": {
+          "postinst": "../installer/linux/postinst",
+          "prerm": "../installer/linux/prerm"
+        }
+      },
       "windows": {
         "certificateThumbprint": null,
         "digestAlgorithm": "sha256",
-        "timestampUrl": ""
+        "timestampUrl": "",
+        "nsis": {
+          "installerHooks": "../installer/windows/postinstall.nsh"
+        }
       }
     },
     "systemTray": {

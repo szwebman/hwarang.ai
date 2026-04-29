@@ -1,5 +1,6 @@
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
 }
 
 generator pyclient {
@@ -9,8 +10,9 @@ generator pyclient {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
 }
 
 // ============================================================
@@ -37,6 +39,7 @@ model User {
   conversations Conversation[]
   usageRecords  UsageRecord[]
   payments      Payment[]
+  rlhfFeedback  RLHFFeedback[]
 
   // 상태
   isActive      Boolean   @default(true)
@@ -268,10 +271,22 @@ model ApiKey {
   // 사용 기록
   usageRecords UsageRecord[]
 
+  // 다중 기기 지원 (Hwarang Grid 데스크탑 에이전트 / VS Code 등)
+  // nullable — 기존 ApiKey 호환 (디바이스 메타가 없는 키도 그대로 유효)
+  deviceName        String? // 사용자 지정 또는 hostname (예: "Jin's MacBook Pro")
+  deviceOs          String? // "darwin" / "windows" / "linux"
+  deviceArch        String? // "x86_64" / "aarch64"
+  deviceGpu         String? // "RTX 5090" / "Apple M2 Max" / "RTX 3090"
+  deviceFingerprint String? // hostname + MAC 조합 SHA256 (선택)
+  deviceKind        String? // "agent_grid" / "vscode" / "cli" — 분류용
+  lastSeenAt        DateTime? // 하트비트 갱신 시각
+
   createdAt DateTime @default(now())
 
   @@index([userId])
   @@index([keyHash])
+  @@index([userId, deviceKind])
+  @@index([deviceFingerprint])
 }
 
 // ============================================================
@@ -499,6 +514,11 @@ model KnowledgeFact {
   uncertaintyMethod     String? // 'bayesian', 'bootstrap', 'monte_carlo', 'ensemble'
   credibleIntervalWidth Float? // upper - lower, 작을수록 확실
   mediaFact             MediaFact? @relation("KnowledgeFactMedia")
+
+  // v3.3: 코드 도메인 품질 평가 (research/quality/code_quality_filter.py)
+  qualityScore   Float? // 0~1, 6 요소 가중 합 (source/length/code/syntax/...)
+  qualityFactors Json? // {"source_trust":0.8,"syntax":1.0,...}
+  isHighQuality  Boolean @default(false) // qualityScore >= 0.7
 
   @@index([domain, validTo])
   @@index([entity, validFrom])
@@ -1368,6 +1388,11 @@ model Round {
   startedAt          DateTime?
   completedAt        DateTime?
 
+  // 라운드 종료 후 hold-out 평가 (code_round_quality.validate_completed_round)
+  qualityScore  Float? // 새 LoRA 평가 점수 (0~1)
+  baselineScore Float? // 직전 라운드 LoRA 점수 (롤백 판단용)
+  accepted      Boolean? // qualityScore > baselineScore 면 true, 아니면 롤백
+
   participants RoundParticipant[]
   shards       DataShard[]
   votes        PeerVote[]
@@ -1375,6 +1400,7 @@ model Round {
 
   @@index([status, createdAt(sort: Desc)])
   @@index([domain, status])
+  @@index([domain, status, qualityScore])
 }
 
 enum RoundStatus {
@@ -1462,6 +1488,50 @@ model DataShard {
   @@index([roundId, isValidation])
 }
 
+// ============================================================
+// HSEE Phase 1 — Compounding Loop (자기개선 복리 루프)
+// ============================================================
+
+// 채팅 응답 1 회당 1 행. 명시(rating) + 암묵(followup_msg, edit_distance) 신호를
+// 합쳐서 isSatisfied 로 정규화. HFL 라운드 자동 트리거 입력.
+model RLHFFeedback {
+  id             String    @id @default(cuid())
+  conversationId String?
+  userId         String
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messageId      String?   @unique
+  domain         String? // 라우팅된 도메인 (law/code/medical/general …)
+  modelName      String? // 실제 사용된 모델
+  loraName       String? // LoRA 사용 여부 (없으면 NULL)
+  rating         Int? // -1, 0, 1 (👎 / 없음 / 👍)
+  ratedAt        DateTime? // 명시 피드백이 들어온 시각
+  editDistance   Float? // 사용자가 응답을 수정해서 다시 보냈으면 정규화 거리
+  followupMsg    String?   @db.Text // 같은 대화의 다음 user 메시지 (암묵 신호 추출용)
+  isSatisfied    Boolean? // 종합 점수 → 이진 (positive: true, negative: false, 미정: null)
+  createdAt      DateTime  @default(now())
+
+  @@index([userId, createdAt])
+  @@index([domain, isSatisfied])
+  @@index([domain, createdAt])
+}
+
+// 도메인×모델 단위 1 시간 윈도우 누적. HNTL 라우터가 도메인 가중치 조정 시 입력.
+model RoutingStats {
+  id                String    @id @default(cuid())
+  domain            String
+  modelName         String
+  totalRequests     Int       @default(0)
+  totalLatencyMs    BigInt    @default(0)
+  satisfactionSum   Float     @default(0) // -1 ~ 1 누적합
+  satisfactionCount Int       @default(0) // 만족도 신호가 있었던 요청 수
+  windowStart       DateTime  @default(now()) // 1 시간 단위 floor
+  windowEnd         DateTime?
+
+  @@unique([domain, modelName, windowStart])
+  @@index([domain, windowStart(sort: Desc)])
+  @@index([modelName, windowStart(sort: Desc)])
+}
+
 // GDPR 삭제 요청 (⑩ Right-to-be-Forgotten)
 model ForgetRequest {
   id            String    @id @default(cuid())
@@ -1476,5 +1546,719 @@ model ForgetRequest {
   reportUrl     String? // 처리 완료 리포트 (감사 목적)
 
   @@index([userId, requestedAt])
+  @@index([status])
+}
+
+// ============================================================
+// Trusted Source Network — 화이트리스트 출처 + Cross-Verification
+// ============================================================
+//
+// 화랑은 무차별 크롤링 대신, 관리자 승인 화이트리스트만 크롤링하고
+// 출처별 신뢰도(trustLevel)로 가중 합산해 사실 검증 점수를 낸다.
+// 1차 출처(law.go.kr 등)는 isPrimarySource 로 표시되어, 이들이 반박하면
+// confidence 가 강제로 떨어진다.
+model TrustedSource {
+  id          String  @id @default(cuid())
+  domain      String  @unique
+  displayName String
+  type        String // government, academic, news_major, news_minor, fact_checker, medical, financial
+
+  // 관리자 평가
+  trustLevel      Int // 0~100
+  isWhitelisted   Boolean @default(true)
+  isPrimarySource Boolean @default(false)
+  isActive        Boolean @default(true)
+
+  // 도메인 전문성 — 매칭에 쓰이는 태그들
+  domains String[]
+
+  // 크롤링 설정
+  crawlSchedule String  @default("0 */6 * * *")
+  crawlMethod   String  @default("rss") // rss | sitemap | api | scraper | none
+  rssUrl        String?
+  apiEndpoint   String?
+  apiKey        String?
+  selectorJson  Json?
+
+  // 통계
+  totalCrawled       Int       @default(0)
+  totalFacts         Int       @default(0)
+  successRate        Float     @default(1.0)
+  lastCrawledAt      DateTime?
+  contradictionCount Int       @default(0)
+
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  facts     SourceCitation[]
+  crawlJobs CrawlJob[]
+
+  @@index([trustLevel, isWhitelisted])
+  @@index([type, isWhitelisted])
+}
+
+model SourceCitation {
+  id          String        @id @default(cuid())
+  factId      String? // KnowledgeFact 와 연결 (옵션)
+  sourceId    String
+  source      TrustedSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  url         String
+  title       String?
+  excerpt     String?       @db.Text
+  publishedAt DateTime?
+  crawledAt   DateTime      @default(now())
+
+  @@index([factId])
+  @@index([sourceId, crawledAt])
+  @@index([url])
+}
+
+// ============================================================
+// HSEE Phase 2 — Online Continual Learning (EWC + Replay)
+// ============================================================
+
+// 학습 잡 큐 — auto_trainer.maybe_enqueue_training 가 push, process_queue 가 pop
+model TrainingJob {
+  id        String @id @default(cuid())
+  domain    String
+  loraName  String // 학습 대상 LoRA
+  baseModel String // 베이스 모델 (vLLM backendId)
+
+  // 데이터 / 하이퍼파라미터
+  sampleCount Int   @default(0)
+  ewcLambda   Float @default(1000.0) // EWC 정규화 강도
+  replayRatio Float @default(0.3) // 신규:리플레이 비율 (replay 비중)
+
+  // 상태
+  status       String    @default("queued") // queued|running|done|failed
+  startedAt    DateTime?
+  completedAt  DateTime?
+  errorMessage String?
+
+  // 결과
+  newAdapterPath  String?
+  forgettingScore Float? // 0~1, 낮을수록 좋음
+  qualityScore    Float? // 새 도메인 품질 (0~1)
+
+  // 메타
+  triggeredBy String? // "auto" | "manual" | userId
+  createdAt   DateTime @default(now())
+
+  @@index([domain, status])
+  @@index([status, createdAt])
+}
+
+// EWC 의 핵심 — 옛 task 의 Fisher 정보 행렬 + 최적 가중치 스냅샷
+model FisherSnapshot {
+  id       String @id @default(cuid())
+  loraName String
+  domain   String
+
+  // 디스크에 저장 (큰 텐서이므로 path 만 DB)
+  fisherPath  String // Fisher 정보 행렬 (대각 근사) .pt
+  optimalPath String // 최적 LoRA 가중치 스냅샷 .pt
+
+  // 메타
+  taskCount  Int // 누적 학습 task 수
+  computedAt DateTime @default(now())
+
+  @@unique([loraName, domain])
+}
+
+// Priority Replay Buffer — 학습 시 옛 샘플 재사용
+model ReplaySample {
+  id             String @id @default(cuid())
+  domain         String
+  prompt         String @db.Text
+  expectedOutput String @db.Text
+
+  // 우선순위 신호
+  priority   Float @default(1.0) // EWC 중요도 + RLHF 평점 + 다양성
+  difficulty Float? // 모델이 틀렸는지 (0=쉬움, 1=어려움)
+  rlhfRating Int? // -1, 0, 1
+
+  // 샘플링 추적
+  sampledCount  Int       @default(0)
+  lastSampledAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([domain, priority])
+  @@index([domain, lastSampledAt])
+}
+
+// ============================================================
+// HSEE Phase 3 — Self-Growing Architecture
+// ============================================================
+// 도메인별 능력 측정 — capability_monitor 가 매일 1 회 기록
+model CapabilityMetric {
+  id       String  @id @default(cuid())
+  domain   String
+  loraName String?
+
+  // 측정 시점 / 윈도우
+  measuredAt  DateTime @default(now())
+  windowStart DateTime
+  windowEnd   DateTime
+
+  // 메트릭
+  benchmarkScore    Float? // 0~1, 자체 벤치마크 정확도
+  satisfactionAvg   Float? // RLHFFeedback.isSatisfied 평균 (0~1)
+  factualAccuracy   Float? // SourceCitation 결합 confidence
+  responseLatencyMs Float?
+
+  // 한계 신호
+  failureRate   Float @default(0.0) // 답변 거부 / 폴백 비율
+  unmatchedRate Float @default(0.0) // 도메인 미매칭 (general 폴백) 비율
+
+  sampleCount Int @default(0)
+
+  @@index([domain, measuredAt])
+}
+
+// 성장 결정 큐 — auto_spawn / scale_decision 가 제안, 관리자가 승인
+model GrowthDecision {
+  id String @id @default(cuid())
+
+  // "spawn_lora" | "scale_base" | "expand_lora_rank" | "split_domain"
+  decisionType String
+
+  // 트리거 신호
+  triggerDomain String?
+  // "low_satisfaction" | "high_unmatched" | "low_factual_accuracy" |
+  // "high_failure_rate" | "emergent_domain" | "global_quality_low"
+  triggerMetric String?
+  triggerValue  Float?
+
+  // 결정 상태 — proposed | approved | executing | done | rejected
+  status       String @default("proposed")
+  proposalJson Json // 구체 액션 (예: {domain, min_samples, target_rank ...})
+
+  // 사람 검토
+  reviewedBy   String?
+  reviewedAt   DateTime?
+  rejectReason String?
+
+  // 결과
+  executedAt DateTime?
+  resultJson Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([status, createdAt])
+  @@index([decisionType, status])
+  @@index([triggerDomain, status])
+}
+
+// 미분류 질문 클러스터링으로 발견된 새 도메인 후보
+model EmergentDomain {
+  id            String  @id @default(cuid())
+  candidateName String  @unique // "robotics", "philosophy" 등 영문 1단어
+  description   String?
+
+  // 클러스터링 결과
+  centroidEmbedding String? @db.Text // pgvector 도입 전 임시 (hex encoded)
+  exampleQueries    String[] @default([]) // 대표 질문 (5 개 내외)
+  sampleCount       Int      @default(0)
+
+  // 정식 도메인 승격
+  isPromoted  Boolean   @default(false)
+  promotedAt  DateTime?
+
+  firstSeenAt   DateTime @default(now())
+  lastUpdatedAt DateTime @updatedAt
+
+  @@index([isPromoted, sampleCount])
+}
+
+// ============================================================
+// 분산 크롤 잡 큐 (Phase 4.1)
+// 마스터=디스패처가 CrawlJob 을 생성하고, 에이전트가 lease 로 가져가서 처리.
+// 같은 (sourceId, url) 중복은 unique 제약으로 자동 방지.
+// 같은 URL 을 두 에이전트가 동시에 안 가져가도록 leasedBy/leaseExpiresAt 으로
+// atomic 임대 (status: pending → leased) 한다.
+// ============================================================
+
+model CrawlJob {
+  id       String        @id @default(cuid())
+  sourceId String
+  source   TrustedSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  // 작업 내용
+  url      String
+  jobType  String // "rss_item" | "sitemap_url" | "api_query" | "page_extract"
+  metadata Json? // RSS title/summary, sitemap lastmod, API params 등
+
+  // 상태
+  status String @default("pending") // pending | leased | completed | failed | expired
+
+  // Lease (분산 락)
+  leasedBy       String? // agent_id
+  leasedAt       DateTime?
+  leaseExpiresAt DateTime?
+
+  // 시도
+  attemptCount Int     @default(0)
+  maxAttempts  Int     @default(3)
+  lastError    String?
+
+  // 결과
+  resultJson Json? // 에이전트가 보낸 추출 결과 (title, content, publishedAt)
+  factId     String? // HLKM 에 ingest 된 fact id
+
+  // 메타
+  priority    Int       @default(0) // 높을수록 먼저
+  createdAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  @@unique([sourceId, url]) // 같은 source+url 중복 방지
+  @@index([status, priority, createdAt])
+  @@index([sourceId, status])
+  @@index([leasedBy, leaseExpiresAt])
+}
+
+// 에이전트별 크롤 통계 / 신뢰 가중치
+model CrawlAgentStats {
+  id      String @id @default(cuid())
+  agentId String @unique
+
+  // 누적
+  totalLeased    Int @default(0)
+  totalCompleted Int @default(0)
+  totalFailed    Int @default(0)
+  totalExpired   Int @default(0)
+
+  // 최근
+  lastLeasedAt    DateTime?
+  lastCompletedAt DateTime?
+  avgLatencyMs    Float     @default(0)
+
+  // 가중치
+  trustWeight Float   @default(1.0) // 1.0 기본, 신뢰도 높으면 우선 분배
+  isBlocked   Boolean @default(false)
+
+  @@index([trustWeight, isBlocked])
+}
+
+// ============================================================
+// Research Engine — arXiv / OpenReview / ACL Anthology 매일 수집
+// ============================================================
+
+model Paper {
+  id              String   @id @default(cuid())
+  arxivId         String?  @unique // "2404.16710"
+  doi             String?
+  source          String // "arxiv", "openreview", "aclanthology"
+
+  title           String
+  authors         String[]
+  affiliation     String?
+  abstract        String   @db.Text
+
+  // 구조화
+  contribution        String? @db.Text // 1줄 핵심 기여
+  methodSummary       String? @db.Text // 5줄 method 요약
+  experimentalResults Json?
+  codeUrl             String? // GitHub 링크
+
+  // 메타
+  categories  String[] // cs.AI, cs.CL 등
+  keywords    String[]
+  publishedAt DateTime
+  pdfUrl      String
+
+  // 평가
+  citationCount      Int      @default(0)
+  applicabilityScore Float? // 화랑 적용 가능성 0~1
+  applicableModules  String[] // ["HSEE Phase 2", "HNTL"]
+  difficulty         String? // easy/medium/hard
+  estimatedROI       String? // low/medium/high
+
+  // 한국어 요약
+  koreanSummary String? @db.Text
+
+  // 처리 상태
+  status        String    @default("pending") // pending|parsed|summarized|applied|rejected
+  parsedAt      DateTime?
+  summarizedAt  DateTime?
+
+  // HLKM 연결
+  factId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  applications PaperApplication[]
+
+  @@index([source, publishedAt])
+  @@index([status, applicabilityScore])
+  @@index([categories])
+}
+
+model PaperApplication {
+  id      String @id @default(cuid())
+  paperId String
+  paper   Paper  @relation(fields: [paperId], references: [id], onDelete: Cascade)
+
+  module      String // 적용할 화랑 모듈
+  description String @db.Text // 어떻게 적용할지
+
+  status           String  @default("proposed") // proposed|approved|implementing|done|rejected
+  growthDecisionId String? // GrowthDecision 과 연결
+
+  createdAt  DateTime  @default(now())
+  reviewedAt DateTime?
+  reviewedBy String?
+
+  @@index([status])
+}
+
+model PaperTrend {
+  id        String   @id @default(cuid())
+  weekStart DateTime
+
+  keyword     String
+  paperCount  Int
+  velocityPct Float // 전 주 대비 증가율 %
+  topPapers   String[] // top 5 paper IDs
+
+  isEmerging Boolean @default(false) // 30%+ 증가 시
+
+  createdAt DateTime @default(now())
+
+  @@unique([weekStart, keyword])
+  @@index([weekStart, velocityPct])
+}
+
+// ============================================================
+// Code Engine — 블로그/SO 글에서 추출한 재사용 가능 코드 패턴
+// ============================================================
+//
+// 카테고리 enum (string):
+//   - hook            : React/Vue/Svelte 등 hook 패턴
+//   - utility         : 범용 유틸리티 함수 (debounce, retry, ...)
+//   - architecture    : 시스템/모듈 구조 (event-sourcing, CQRS, ...)
+//   - antipattern     : 피해야 할 패턴
+//   - optimization    : 성능 최적화 기법
+//   - design_pattern  : 전통적 GoF 등 디자인 패턴
+//
+// 출처: code_pattern_extractor.py 가 dev_source_crawler 가 수집한
+// KnowledgeFact(domain="code") 들을 LLM 으로 분류해서 채움.
+model CodePattern {
+  id          String  @id @default(cuid())
+  patternName String
+  category    String // hook | utility | architecture | antipattern | optimization | design_pattern
+  language    String?
+  framework   String?
+
+  summary String  @db.Text
+  useCase String? @db.Text
+
+  // 원본 KnowledgeFact 와 약하게 연결 (FK 아님 — fact 가 archive 돼도 패턴은 유지)
+  sourceFactId String?
+  sourceUrl    String?
+
+  // 평판
+  popularity   Int    @default(0) // 다른 글에서 인용된 횟수
+  qualityScore Float?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([category, language])
+  @@index([popularity])
+}
+
+// ============================================================
+// Code Quality Pipeline — KnowledgeFact → 학습용 Q&A 페어
+// ============================================================
+//
+// research/quality/code_pair_builder.py 가 high_quality 인 KnowledgeFact 를
+// 자연어 질문 + 정답 코드 페어로 변환해서 저장. code_executor 가 실행 검증
+// 후 executionStatus 를 채운다. LoRA 학습 시 isUsedInLora 가 false 이고
+// executionStatus 가 passed/syntax_only 인 페어만 골라 데이터셋으로 export.
+model CodePair {
+  id String @id @default(cuid())
+
+  instruction String  @db.Text // 사용자 질문 (자연어)
+  response    String  @db.Text // 정답 코드 (마크다운 fence 포함)
+  language    String?
+  framework   String?
+  category    String? // hook|utility|api|component|algorithm|test
+
+  // 출처 (KnowledgeFact 와 느슨한 연결)
+  sourceFactId String?
+
+  // 검증
+  executionStatus    String  @default("untested") // untested|passed|failed|timeout|syntax_only|no_code|error|sandbox_unavailable
+  executionLog       String? @db.Text
+  executionRuntime   String? // docker | firejail | subprocess | none
+  executionElapsedMs Int?
+
+  // 학습 메타
+  qualityScore Float?
+  isUsedInLora Boolean @default(false)
+  loraRound    Int?
+
+  // 평가셋 전용 — 학습에 안 씀. eval_set_builder.py 가 주기적으로 마킹.
+  // True 인 페어는 라운드 간 변경되지 않아 LoRA 비교 평가의 기준이 된다.
+  isEvaluation Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([executionStatus, qualityScore])
+  @@index([language, framework])
+  @@index([isUsedInLora])
+  @@index([isEvaluation])
+}
+
+// ============================================================
+// Design Engine — 디자인 글/사이트에서 추출한 시각 패턴
+// ============================================================
+//
+// 분류 차원:
+//   - trendKeywords   : minimalism / brutalism / glassmorphism …
+//   - layoutCategory  : hero / grid / split / asymmetric / magazine / fullscreen
+//   - colorMood       : warm / cool / monochrome / vibrant / muted
+//   - typographyStyle : serif / sans / display / monospace / mixed
+//   - applicableTo    : landing / dashboard / mobile_app / marketing …
+//
+// 출처: design_pattern_extractor.py 가 design_source_crawler 가 수집한
+// KnowledgeFact(domain="design") 들을 LLM 으로 분류해서 채움.
+model DesignPattern {
+  id String @id @default(cuid())
+
+  trendKeywords   String[] // minimalism, brutalism 등
+  layoutCategory  String // hero | grid | split | asymmetric | magazine | fullscreen
+  colorMood       String? // warm | cool | monochrome | vibrant | muted
+  typographyStyle String? // serif | sans | display | monospace | mixed
+
+  summary      String   @db.Text
+  applicableTo String[] // landing, dashboard, mobile_app
+
+  // 원본 KnowledgeFact 와 약하게 연결 (FK 아님)
+  sourceFactId String?
+  sourceUrl    String?
+
+  popularity Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([layoutCategory])
+  @@index([popularity])
+}
+
+// ============================================================
+// Tech Trend — 주간 코드/디자인 키워드 빈도 + emerging 감지
+// ============================================================
+//
+// PaperTrend 와 별도 모델 — 도메인 (code | design) 이 다르고
+// 키워드 추출 로직 (KNOWN_TECH_KEYWORDS / DesignPattern.trendKeywords) 도 다름.
+//
+// 매주 일요일 22:00 KST cron (tech_trend_tracker.weekly_tech_trends_full_cycle):
+//   1. 지난 주 vs 4주 baseline 비교
+//   2. velocity 30%+ + 임계 건수 (code=3, design=2) → isEmerging
+//   3. emerging 5+ (code) / 3+ (design) → GrowthDecision 자동 생성
+model TechTrend {
+  id          String   @id @default(cuid())
+  weekStart   DateTime
+  domain      String // "code" | "design"
+  keyword     String
+  occurrences Int
+  velocityPct Float
+  isEmerging  Boolean  @default(false)
+
+  createdAt DateTime @default(now())
+
+  @@unique([weekStart, keyword, domain])
+  @@index([weekStart, isEmerging])
+  @@index([domain, weekStart])
+}
+
+// ============================================================
+// Cognitive Memory — Phase 6 Master Cognitive Loop
+// ============================================================
+//
+// 매 15 분 마스터(또는 에이전트)가 (관찰, 추론, 결정, 결과) 사이클을 한 번
+// 돌리고 그 트레이스를 여기에 기록한다. 다음 사이클의 reason_about_state
+// 는 최근 lesson 들을 컨텍스트로 받아 과거 후회를 반복하지 않는다.
+//
+// 필드
+//   actor        : "master" | "agent_<id>"
+//   observed     : observe() 가 만든 메트릭 dict (json)
+//   reasoning    : LLM chain-of-thought
+//   decision     : 결정 JSON (decisions 배열 직렬화)
+//   actionTaken  : "trigger_curious_crawl=executed; no_action=executed" 같은 요약
+//   outcome      : reflect_on_recent 가 채우는 결과 텍스트
+//   outcomeScore : -1.0 ~ +1.0 (음수=후회)
+//   lesson       : 다음 사이클 LLM 프롬프트로 들어갈 1 줄 교훈
+//
+// 인덱스 두 개:
+//   actor + timestamp(desc) — 최근 lesson 조회 / find_similar_past_decisions
+//   actor + outcomeScore     — 정렬된 후회/성공 사례 검색
+model CognitiveMemory {
+  id String @id @default(cuid())
+
+  actor String // "master" | "agent_<id>"
+
+  timestamp   DateTime @default(now())
+  observed    Json
+  reasoning   String   @db.Text
+  decision    String   @db.Text
+  actionTaken String?
+
+  outcome      String? @db.Text
+  outcomeScore Float?
+  lesson       String? @db.Text
+
+  // pgvector 임베딩 — observation/reasoning 의미 검색 (find_similar_past_decisions)
+  // bge-m3 / SHA fallback 출력에서 384 차원으로 fit. Unsupported 라 raw SQL 로만 접근.
+  // HNSW 인덱스는 scripts/setup_pgvector.sh 또는 alembic 마이그레이션에서 별도 생성.
+  observedEmbedding  Unsupported("vector(384)")?
+  reasoningEmbedding Unsupported("vector(384)")?
+
+  createdAt DateTime @default(now())
+
+  @@index([actor, timestamp(sort: Desc)])
+  @@index([actor, outcomeScore])
+}
+
+// CognitiveAudit — Cognitive 결정의 환각 검증 / 감사 로그.
+// 매 사이클의 결정마다 1 건. master_loop.cognitive_cycle 이 직접 기록.
+model CognitiveAudit {
+  id String @id @default(cuid())
+
+  memoryId String // CognitiveMemory.id (FK 미지정 — 사이클 차단 시 memory 가 없을 수 있음)
+
+  cycleType String // "scheduled" | "free_will" | "interrupt"
+
+  // 환각 검증
+  hallucinationScore Float? // 0~1, 1 = 확실히 환각
+  consistencyScore   Float? // 0~1, 1 = 완전 일치
+  schemaValid        Boolean  @default(true)
+  riskyKeywords      String[] // delete / drop / shutdown 등
+
+  // 차단 / 승인
+  blockedActions   String[] // 환각으로 차단된 액션 이름 목록
+  requiresApproval Boolean  @default(false)
+
+  auditedAt DateTime @default(now())
+
+  @@index([auditedAt(sort: Desc)])
+  @@index([cycleType])
+}
+
+// ============================================================
+// Phase 8 — Social Agent Network
+// 에이전트 평판/신뢰 점수. agentId 는 별도 Agent 테이블이 없어 String 으로만
+// 보관 (Grid heartbeat / Round 등에서 참조). 추후 Agent 테이블이 생기면
+// `agent` relation 을 붙일 것.
+// ============================================================
+model AgentReputation {
+  id            String   @id @default(cuid())
+  agentId       String   @unique
+  successCount  Int      @default(0)
+  failureCount  Int      @default(0)
+  avgQuality    Float    @default(0.5)
+  trustScore    Float    @default(0.5)
+  disputesWon   Int      @default(0)
+  disputesLost  Int      @default(0)
+  lastUpdated   DateTime @default(now())
+
+  @@index([trustScore(sort: Desc)])
+  @@index([lastUpdated(sort: Desc)])
+}
+
+// ============================================================
+// Phase 9.ι — Sleep Cycle / Memory Consolidation
+// MemoryConsolidator 가 episodic CognitiveMemory 들을 묶어 추출한
+// 일반화 규칙(semantic rule). 같은 topic 이 다시 추출되면 sourceCount 증가
+// + confidence 평균 + lastReinforced 갱신 (강화). DreamGenerator 가
+// 생성한 규칙은 fromDream=true 로 표시되며 confidence 가 낮음.
+// 마이그레이션:
+//   prisma migrate dev --name add_semantic_rule
+//   (또는) prisma db push  --schema=modules/hwarang-web/prisma/schema.prisma
+// ============================================================
+model SemanticRule {
+  id             String   @id @default(cuid())
+  topic          String
+  rule           String   @db.Text
+  confidence     Float    @default(0.5)
+  exceptions     Json     @default("[]")
+  sourceCount    Int      @default(1)
+  lastReinforced DateTime @default(now())
+  fromDream      Boolean  @default(false)
+  createdAt      DateTime @default(now())
+
+  @@index([topic])
+  @@index([lastReinforced(sort: Desc)])
+  @@index([fromDream, confidence])
+}
+
+// ============================================================
+// Phase 9.ζ — Meta-cognition + Theory of Mind
+// 사용자별 멘탈 모델. 전문성/관심사/대화 스타일/믿음/오개념을 누적 추적.
+// expertise:    {도메인: 0~1 숙련도}
+// interests:    [string]
+// communicationStyle: formal | casual | technical | neutral
+// knownBeliefs:    [{topic, belief, confidence}]
+// misconceptions:  [{topic, false_belief}]
+// 마이그레이션 필요: `pnpm prisma migrate dev --name add_user_mental_model`
+// ============================================================
+model UserMentalModel {
+  id                 String   @id @default(cuid())
+  userId             String   @unique
+  expertise          Json     @default("{}")
+  interests          Json     @default("[]")
+  communicationStyle String   @default("neutral")
+  knownBeliefs       Json     @default("[]")
+  misconceptions     Json     @default("[]")
+  lastUpdated        DateTime @default(now())
+
+  @@index([lastUpdated(sort: Desc)])
+}
+
+// ============================================================
+// CLI 다중 기기 로그인 — Device Authorization Flow (RFC 8628 패턴)
+//
+// 흐름:
+//   1) CLI → cli-init → nonce + login_url 발급 (10분 TTL)
+//   2) 사용자가 다른 기기 브라우저로 login_url 접속 → /agent-login?nonce=...&cli=1
+//   3) 브라우저에서 로그인 후 cli-approve → ApiKey 생성 + rawKey 저장
+//   4) CLI 가 cli-poll 폴링 → status=approved 시 rawKey 1회 수령
+//
+// 보안:
+//   - rawKey 는 cli-poll 응답에서 단 1회만 노출 (응답 직후 null 처리)
+//   - nonce 만료 시 status=expired 로 lazy cleanup
+//   - cli-init / cli-poll 은 nonce 가 인증 매개체 (세션 불필요)
+//   - cli-approve 는 NextAuth 세션 필수
+//
+// 마이그레이션: `pnpm prisma migrate dev --name add_cli_login_request`
+// ============================================================
+model CliLoginRequest {
+  id    String @id @default(cuid())
+  nonce String @unique // base64url 32 bytes
+
+  // CLI 가 cli-init 시 보내는 device 메타
+  deviceName        String?
+  deviceOs          String?
+  deviceArch        String?
+  deviceGpu         String?
+  deviceHostname    String?
+  deviceFingerprint String?
+
+  status            String  @default("pending") // pending / approved / denied / expired
+  apiKeyId          String? // 승인 후 발급된 ApiKey.id
+  rawKey            String? // cli-poll 응답으로 단 1회 전달, 전달 후 null
+  approvedByUserId  String?
+
+  createdAt DateTime @default(now())
+  expiresAt DateTime // createdAt + 10분
+
+  @@index([nonce])
+  @@index([expiresAt])
   @@index([status])
 }

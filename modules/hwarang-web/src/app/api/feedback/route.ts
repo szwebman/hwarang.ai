@@ -35,6 +35,31 @@ export async function POST(request: NextRequest) {
 
     const result = await submitGRPOFeedback(feedback);
 
+    // HSEE Phase 1: RLHFFeedback 풀에도 반영 (fire-and-forget)
+    try {
+      const HWARANG_API_URL = process.env.HWARANG_API_URL || "http://localhost:8000";
+      const INTERNAL_KEY = process.env.HWARANG_INTERNAL_KEY || "";
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (INTERNAL_KEY) headers.Authorization = `Bearer ${INTERNAL_KEY}`;
+
+      // GRPO rating: "good"|"bad"|"neutral" (lib/alignment/grpo) → -1/0/1 매핑
+      let numericRating = 0;
+      const r = String(body.rating).toLowerCase();
+      if (["good", "positive", "up", "1"].includes(r)) numericRating = 1;
+      else if (["bad", "negative", "down", "-1"].includes(r)) numericRating = -1;
+
+      fetch(`${HWARANG_API_URL}/api/learning/feedback`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          message_id: body.messageId,
+          user_id: session.user.id,
+          rating: numericRating,
+          comment: body.reason || body.betterResponse || null,
+        }),
+      }).catch(() => {});
+    } catch {}
+
     return Response.json({
       success: true,
       feedbackId: result.feedbackId,

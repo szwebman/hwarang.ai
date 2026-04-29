@@ -1404,6 +1404,131 @@ async def api_hypotheses_auto_accept(
 
 
 # ---------------------------------------------------------------------------
+# HSEE Phase 5 — Causal Extractor / Hypothesis Engine
+# ---------------------------------------------------------------------------
+class CausalExtractBody(BaseModel):
+    text: str
+    source_fact_id: str | None = None
+
+
+@router.post(
+    "/causal-extract",
+    summary="텍스트 → 인과 관계 추출",
+    description="LLM 으로 cause/effect 후보 추출 후 KnowledgeFact 매칭, 새 KnowledgeEdge 적재.",
+)
+async def api_causal_extract(
+    body: CausalExtractBody, _: str = Depends(require_user)
+) -> dict:
+    from hwarang_api.knowledge.causal_extractor import extract_causal_edges_from_text
+
+    if not body.text or len(body.text.strip()) < 10:
+        raise HTTPException(status_code=400, detail="text too short")
+    try:
+        edges = await extract_causal_edges_from_text(
+            body.text, source_fact_id=body.source_fact_id
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("causal_extract failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"count": len(edges), "edges": edges}
+
+
+class CausalExplainBody(BaseModel):
+    question: str
+
+
+@router.post(
+    "/causal-explain",
+    summary="자연어 질문 → 인과 사슬 설명",
+    description='"왜?" 류 질문에 대해 의미 검색 → BFS → 자연어 사슬 반환.',
+)
+async def api_causal_explain(body: CausalExplainBody) -> dict:
+    from hwarang_api.knowledge.causal_extractor import explain_with_causal_chain
+
+    if not body.question or len(body.question.strip()) < 2:
+        raise HTTPException(status_code=400, detail="question empty")
+    try:
+        return await explain_with_causal_chain(body.question)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get(
+    "/causal-chain/{fact_id}",
+    summary="인과 사슬 시각화 (CAUSES + ENABLES BFS)",
+    description="단일 fact 에서 출발해 max_depth 까지 인과 사슬을 BFS 로 펼친다.",
+)
+async def api_causal_chain(
+    fact_id: str,
+    depth: int = Query(3, ge=1, le=10),
+    max_paths: int = Query(20, ge=1, le=100),
+) -> dict:
+    from hwarang_api.knowledge.causal_extractor import trace_causal_chain
+
+    try:
+        return await trace_causal_chain(fact_id, max_depth=depth, max_paths=max_paths)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post(
+    "/hypotheses/auto-generate",
+    summary="패턴 기반 가설 자동 생성 (관리자)",
+    description="반복 인과 패턴(min 3회)을 LLM 일반화로 가설화. /hypotheses/generate(2-hop) 와 별도.",
+)
+async def api_hypotheses_auto_generate(
+    max_patterns: int = Query(20, ge=1, le=200),
+    _: str = Depends(require_admin),
+) -> dict:
+    from hwarang_api.knowledge.hypothesis_engine import (
+        generate_hypotheses_from_patterns,
+    )
+
+    try:
+        return await generate_hypotheses_from_patterns(max_patterns=max_patterns)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("auto_generate hypotheses failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post(
+    "/hypotheses/{hypothesis_id}/verify",
+    summary="가설 재검증",
+    description="새 사실들로 LLM 분류 → confidence + 상태 업데이트.",
+)
+async def api_hypothesis_verify(
+    hypothesis_id: str, _: str = Depends(require_admin)
+) -> dict:
+    from hwarang_api.knowledge.hypothesis_engine import verify_hypothesis
+
+    try:
+        result = await verify_hypothesis(hypothesis_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if result.get("error") == "not_found":
+        raise HTTPException(status_code=404, detail="hypothesis not found")
+    return result
+
+
+@router.post(
+    "/hypotheses/promote",
+    summary="validated 가설 → 사실로 일괄 승격 (관리자)",
+    description="status='validated' 인 가설들을 KnowledgeFact 로 승격, 가설은 'promoted' 마킹.",
+)
+async def api_hypotheses_promote(
+    limit: int = Query(50, ge=1, le=500),
+    _: str = Depends(require_admin),
+) -> dict:
+    from hwarang_api.knowledge.hypothesis_engine import promote_validated_hypotheses
+
+    try:
+        return await promote_validated_hypotheses(limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("promote_validated_hypotheses failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
 # Active Learning (⑥) — admin
 # ---------------------------------------------------------------------------
 @router.post(
@@ -6306,6 +6431,127 @@ async def api_market_manipulation(
         return await _pm_.detect_manipulation(market_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# 진짜 인과 추론 (causal/) — do-calculus / counterfactual / chain
+# ---------------------------------------------------------------------------
+class _CausalPairBody(BaseModel):
+    cause_id: str
+    effect_id: str
+
+
+class _WhatIfBody(BaseModel):
+    question: str
+
+
+@router.post(
+    "/causal/intervention",
+    summary="do-calculus 개입 추정 — P(Y|X) vs P(Y|do(X))",
+    description=(
+        "관찰 확률(P(Y|X)) 과 개입 확률(P(Y|do(X))) 을 구분 추정한다. "
+        "혼란 변수가 있으면 backdoor adjustment 휴리스틱으로 영향을 일부 차감한다."
+    ),
+)
+async def api_causal_intervention(body: _CausalPairBody) -> dict:
+    from hwarang_api.knowledge.causal.do_calculus import estimate_intervention
+
+    try:
+        result = await estimate_intervention(
+            cause_id=body.cause_id,
+            effect_id=body.effect_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("intervention estimation failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {
+        "cause_id": result.cause_id,
+        "effect_id": result.effect_id,
+        "observed_prob": result.observed_prob,
+        "intervention_prob": result.intervention_prob,
+        "blocked_confounders": result.blocked_confounders,
+        "mediators": result.mediators,
+        "explanation": result.explanation,
+        "confidence": result.confidence,
+    }
+
+
+@router.post(
+    "/causal/counterfactual",
+    summary="반사실 추론 — '만약 X 가 다르게 일어났으면?'",
+    description="cause/effect fact id 한 쌍에 대해 LLM 기반 반사실 시나리오를 추론한다.",
+)
+async def api_causal_counterfactual(body: _CausalPairBody) -> dict:
+    from hwarang_api.knowledge.causal.counterfactual import reason_counterfactual
+
+    try:
+        result = await reason_counterfactual(
+            cause_id=body.cause_id,
+            effect_id=body.effect_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("counterfactual reasoning failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {
+        "cause_id": result.cause_id,
+        "effect_id": result.effect_id,
+        "would_y_happen": result.would_y_happen,
+        "alternative_outcome": result.alternative_outcome,
+        "reasoning": result.reasoning,
+        "cascading_changes": result.cascading_changes,
+        "confidence": result.confidence,
+    }
+
+
+@router.post(
+    "/causal/explain-what-if",
+    summary="자연어 '만약~' 질문 → 자동 반사실",
+    description="사용자 자연어 질문에서 X/Y 를 추출 → 시맨틱 검색 → 반사실 추론.",
+)
+async def api_causal_what_if(body: _WhatIfBody) -> dict:
+    from hwarang_api.knowledge.causal.counterfactual import explain_what_if
+
+    if not body.question or len(body.question.strip()) < 2:
+        raise HTTPException(status_code=400, detail="question empty")
+    try:
+        return await explain_what_if(body.question)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("what_if reasoning failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get(
+    "/causal/chain",
+    summary="다단계 인과 체인 (A → B → C → D) + 누적 확률",
+    description="두 fact 사이 가장 강한 인과 경로를 BFS 로 탐색해 cumulative_prob 과 weakest_link 를 반환한다.",
+)
+async def api_causal_chain_pair(
+    start_id: str = Query(..., description="시작 fact id (cause)"),
+    end_id: str = Query(..., description="도착 fact id (effect)"),
+    max_depth: int = Query(5, ge=1, le=10),
+) -> dict:
+    from hwarang_api.knowledge.causal.causal_chain import trace_chain
+
+    try:
+        chain = await trace_chain(start_id, end_id, max_depth=max_depth)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("causal chain trace failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    if chain is None:
+        return {"error": "no_chain_found", "start_id": start_id, "end_id": end_id}
+
+    return {
+        "nodes": chain.nodes,
+        "edges": chain.edges,
+        "contents": chain.contents,
+        "depth": chain.depth,
+        "cumulative_prob": chain.cumulative_prob,
+        "weakest_link": chain.weakest_link,
+        "confidence": chain.confidence,
+    }
 
 
 # v3.3 lint keepalive

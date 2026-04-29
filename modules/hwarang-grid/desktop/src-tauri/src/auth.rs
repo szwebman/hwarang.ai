@@ -16,11 +16,16 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+use crate::device::DeviceInfo;
+
 const PENDING_NONCE_FILE: &str = ".pending_nonce";
 const ACCOUNT_FILE: &str = "account.json";
 const NONCE_TTL_SECS: i64 = 600; // 10 분
 
 /// 계정 정보 (~/.hwarang/account.json).
+///
+/// 다중 기기 지원: 동일 사용자가 여러 PC 에서 동시 로그인 가능.
+/// 서버는 ApiKey 1:N User 구조이므로 device_id (= ApiKey.id) 로 기기 분리.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AccountInfo {
     pub email: Option<String>,
@@ -33,6 +38,17 @@ pub struct AccountInfo {
     #[serde(default)]
     pub expert_credentials: Vec<String>,
     pub last_synced_at: Option<String>,
+
+    // ───── 다중 기기 식별 필드 ─────
+    /// 서버에서 발급한 ApiKey.id (기기마다 고유).
+    #[serde(default)]
+    pub device_id: Option<String>,
+    /// 사용자가 지정한 기기 이름 (예: "Jin's MacBook Pro").
+    #[serde(default)]
+    pub device_name: Option<String>,
+    /// SHA256(hostname + os + arch) — 같은 PC 에서는 항상 같은 값.
+    #[serde(default)]
+    pub device_fingerprint: Option<String>,
 }
 
 impl Default for AccountInfo {
@@ -45,6 +61,9 @@ impl Default for AccountInfo {
             tier: default_tier(),
             expert_credentials: vec![],
             last_synced_at: None,
+            device_id: None,
+            device_name: None,
+            device_fingerprint: None,
         }
     }
 }
@@ -117,14 +136,22 @@ fn clear_pending_nonce() {
 /// 로그인 플로우 시작 — 외부 브라우저를 연다.
 ///
 /// `api_url` 예: "https://hwarang.ai"
-pub fn open_login_flow(api_url: &str) -> Result<String, String> {
+/// `device` 가 있으면 hostname/os/arch/gpu/fingerprint 도 query string 에 추가
+/// (서버는 fingerprint 로 기존 기기 인식 + 새 ApiKey 발급 결정).
+pub fn open_login_flow(api_url: &str, device: Option<&DeviceInfo>) -> Result<String, String> {
     let nonce = generate_nonce();
-    let url = format!(
-        "{}/agent-login?nonce={}&os={}",
+    let mut url = format!(
+        "{}/agent-login?nonce={}",
         api_url.trim_end_matches('/'),
         nonce,
-        std::env::consts::OS,
     );
+    if let Some(d) = device {
+        url.push('&');
+        url.push_str(&d.to_query_string());
+    } else {
+        // device 정보 없으면 최소한 OS 만이라도
+        url.push_str(&format!("&os={}", std::env::consts::OS));
+    }
     save_pending_nonce(&nonce)?;
     open::that(&url).map_err(|e| format!("브라우저 열기 실패: {}", e))?;
     log::info!("로그인 플로우 시작: nonce={}", &nonce[..8]);
@@ -239,6 +266,9 @@ pub async fn handle_deep_link(url: &str, api_url: &str) -> Result<AccountInfo, S
                 tier: params.get("tier").cloned().unwrap_or_else(default_tier),
                 expert_credentials: vec![],
                 last_synced_at: None,
+                device_id: None,
+                device_name: None,
+                device_fingerprint: None,
             }
         }
     };
@@ -249,9 +279,28 @@ pub async fn handle_deep_link(url: &str, api_url: &str) -> Result<AccountInfo, S
     }
     info.last_synced_at = Some(chrono_now_iso());
 
+    // ───── device 메타데이터 (deep link query string 에서 추출) ─────
+    // 서버는 device_id / device_name 을 발급/응답으로 돌려주는데,
+    // 쿼리스트링에 들어왔다면 그 값을 우선 사용.
+    if let Some(id) = params.get("device_id").cloned() {
+        info.device_id = Some(id);
+    }
+    if let Some(name) = params.get("device_name").cloned() {
+        info.device_name = Some(name);
+    }
+    if let Some(fp) = params.get("fingerprint").cloned() {
+        // deep link 의 fingerprint 가 비어 있으면 무시
+        if !fp.is_empty() {
+            info.device_fingerprint = Some(fp);
+        }
+    }
+
     save_account(&info)?;
     clear_pending_nonce();
-    log::info!("로그인 완료: email={:?}, kyc={}", info.email, info.kyc_verified);
+    log::info!(
+        "로그인 완료: email={:?}, kyc={}, device_id={:?}",
+        info.email, info.kyc_verified, info.device_id
+    );
     Ok(info)
 }
 
@@ -304,7 +353,54 @@ pub async fn verify_token_with_server(token: &str, api_url: &str) -> Result<Acco
             })
             .unwrap_or_default(),
         last_synced_at: Some(chrono_now_iso()),
+        device_id: body["device_id"].as_str().map(String::from),
+        device_name: body["device_name"].as_str().map(String::from),
+        device_fingerprint: body["device_fingerprint"].as_str().map(String::from),
     })
+}
+
+/// 주기적 heartbeat — 서버에 기기가 살아 있음을 알린다.
+///
+/// `POST {api_url}/api/auth/agent/heartbeat`
+/// Authorization: Bearer {api_key}
+/// Body: { gpu_usage, gpu_temp, status }
+///
+/// 호출 주기: 60초. 실패해도 panic 하지 않고 로그만 남김.
+pub async fn send_heartbeat(
+    api_key: &str,
+    api_url: &str,
+    gpu_usage: f32,
+    gpu_temp: i32,
+    status: &str,
+) -> Result<(), String> {
+    let url = format!(
+        "{}/api/auth/agent/heartbeat",
+        api_url.trim_end_matches('/'),
+    );
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let body = serde_json::json!({
+        "gpu_usage": gpu_usage,
+        "gpu_temp": gpu_temp,
+        "status": status,
+    });
+
+    let resp = client
+        .post(&url)
+        .bearer_auth(api_key)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("heartbeat 요청 실패: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("heartbeat HTTP {}", resp.status()));
+    }
+    log::debug!("heartbeat 성공");
+    Ok(())
 }
 
 pub fn load_account() -> Option<AccountInfo> {

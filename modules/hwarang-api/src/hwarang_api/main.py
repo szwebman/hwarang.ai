@@ -16,7 +16,29 @@ from fastapi.staticfiles import StaticFiles
 
 from hwarang_api.config import Settings
 from hwarang_api.grid.sharder import SHARD_DIR
-from hwarang_api.routers import admin, chat, cluster, grid, health, knowledge, models
+from hwarang_api.routers import (
+    active_inference,
+    admin,
+    chat,
+    cluster,
+    cognitive,
+    crawl,
+    grid,
+    health,
+    knowledge,
+    learning,
+    models,
+    options,
+    realtime,
+    research,
+    self_modify,
+    self_play,
+    sleep,
+    social,
+    trust,
+    trusted_sources,
+    vision,
+)
 from hwarang_api.services.model_manager import ModelManager
 
 logger = logging.getLogger(__name__)
@@ -41,6 +63,14 @@ async def lifespan(app: FastAPI):
         logger.info("HLKM scheduler started, Prisma connected")
     except Exception as e:
         logger.warning(f"HLKM 초기화 실패(계속 진행): {e}")
+
+    # Online RLHF 워커 — 매 피드백마다 즉시 1 step gradient
+    try:
+        from hwarang_api.learning.online.continuous_lora import init_worker as _online_init
+
+        await _online_init()
+    except Exception as e:
+        logger.warning(f"Online LoRA worker 초기화 실패(계속 진행): {e}")
 
     if settings.distributed:
         # ===== Distributed mode: connect to Redis, workers handle models =====
@@ -133,5 +163,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(cluster.router, prefix="/admin", tags=["Cluster"])
     app.include_router(grid.router, tags=["Grid/HFL"])
     app.include_router(knowledge.router, tags=["Knowledge/HLKM"])
+    app.include_router(learning.router, tags=["Learning/HSEE"])
+    app.include_router(trusted_sources.router, tags=["TrustedSources"])
+    app.include_router(crawl.router, tags=["DistributedCrawl"])
+    app.include_router(research.router, tags=["Research"])
+    app.include_router(research.feedback_router, tags=["CodeFeedback"])
+    app.include_router(realtime.router, tags=["Realtime"])
+    app.include_router(vision.router, tags=["Vision/VLM"])
+    app.include_router(options.router, tags=["Options"])
+    app.include_router(cognitive.router, tags=["Cognitive"])
+    app.include_router(self_modify.router, tags=["SelfModify"])
+    app.include_router(social.router, tags=["Social"])
+    # Unified Trust facade — Agent/Source 평판 통합 조회 (저장은 각 도메인 그대로)
+    app.include_router(trust.router, tags=["Trust"])
+    # Active Inference (Phase 9.η) — prefix 는 라우터 자체에 정의됨
+    app.include_router(active_inference.router, tags=["ActiveInference"])
+    # Adversarial Self-Play (Phase 9.θ) — prefix /api/self-play 는 라우터 자체에 정의됨
+    app.include_router(self_play.router, tags=["SelfPlay"])
+    # Sleep Cycle / Memory Consolidation (Phase 9.ι) — prefix /api/sleep 는 라우터 자체에 정의됨
+    app.include_router(sleep.router, tags=["Sleep"])
 
     return app

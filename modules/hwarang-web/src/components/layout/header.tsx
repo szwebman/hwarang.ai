@@ -69,6 +69,12 @@ export function Header({ sidebarOpen, onToggleSidebar }: HeaderProps) {
         {/* 로그인/유저 */}
         {session ? (
           <div className="flex items-center gap-2">
+            <Link href="/account/devices"
+              className="hidden md:inline-block text-xs px-2 py-1 rounded-lg hover:bg-[var(--muted)] transition-all"
+              style={{ color: "var(--muted-foreground)" }}
+              title="화랑 그리드 등록 기기 관리">
+              내 기기
+            </Link>
             <Link href="/dashboard"
               className="flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-[var(--muted)] transition-all text-sm">
               {session.user?.image ? (

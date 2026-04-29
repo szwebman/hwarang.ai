@@ -1,0 +1,65 @@
+#!/bin/bash
+# ─────────────────────────────────────────────────────────────────────────────
+# 화랑 Grid Agent — Debian/Ubuntu .deb postinst 훅
+#
+# 목적: PyInstaller 사이드카 (hwarang-agent) 를 /usr/local/bin 에 symlink 하여
+#       사용자가 터미널에서 `hwarang-agent` 호출 가능하도록 PATH 노출.
+#
+# Tauri .deb 번들은 사이드카를 일반적으로 다음 위치에 배치:
+#   /usr/lib/hwarang-grid-agent/binaries/hwarang-agent-x86_64-unknown-linux-gnu
+# 또는
+#   /usr/bin/hwarang-agent-x86_64-unknown-linux-gnu
+#
+# 모든 후보를 탐색하여 첫 매칭에 symlink 생성 (idempotent).
+# 실패해도 패키지 설치 자체는 성공해야 하므로 graceful 처리.
+# ─────────────────────────────────────────────────────────────────────────────
+
+set -e
+
+SYMLINK="/usr/local/bin/hwarang-agent"
+
+# 후보 경로 (Tauri 빌드 산출물 가능한 위치 모두 탐색)
+CANDIDATES=(
+    "/opt/hwarang-grid/binaries/hwarang-agent-x86_64-unknown-linux-gnu"
+    "/opt/hwarang-grid-agent/binaries/hwarang-agent-x86_64-unknown-linux-gnu"
+    "/usr/lib/hwarang-grid-agent/binaries/hwarang-agent-x86_64-unknown-linux-gnu"
+    "/usr/lib/hwarang-grid/binaries/hwarang-agent-x86_64-unknown-linux-gnu"
+    "/usr/bin/hwarang-agent-x86_64-unknown-linux-gnu"
+    "/usr/bin/hwarang-agent"
+    "/usr/local/bin/hwarang-agent-x86_64-unknown-linux-gnu"
+)
+
+BINARY=""
+for c in "${CANDIDATES[@]}"; do
+    if [ -f "$c" ]; then
+        BINARY="$c"
+        break
+    fi
+done
+
+if [ -z "$BINARY" ]; then
+    # find 로 한 번 더 시도 (위치가 다른 배포에서)
+    BINARY="$(find /opt /usr/lib /usr/bin -maxdepth 5 -name 'hwarang-agent*' -type f 2>/dev/null \
+              | grep -v 'grid-agent$' | head -1 || true)"
+fi
+
+if [ -n "$BINARY" ] && [ -f "$BINARY" ]; then
+    mkdir -p /usr/local/bin
+    chmod +x "$BINARY" 2>/dev/null || true
+    ln -sf "$BINARY" "$SYMLINK"
+    echo "[ OK ] hwarang-agent CLI → $SYMLINK"
+    echo "       사용 예: hwarang-agent login / hwarang-agent status"
+else
+    echo "[WARN] hwarang-agent 사이드카를 찾지 못함 — PATH 등록 건너뜀"
+fi
+
+# desktop 데이터베이스 갱신
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database -q || true
+fi
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
+fi
+
+echo "Hwarang Grid Agent 설치 완료"
+exit 0

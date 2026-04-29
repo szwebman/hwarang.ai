@@ -28,6 +28,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod auth;
+mod device;
 mod logging;
 mod notifications;
 
@@ -43,10 +44,15 @@ use tauri::{
 };
 use tauri_plugin_autostart::{ManagerExt, MacosLauncher};
 
+use device::DeviceInfo;
 use notifications::NotificationTracker;
 
 const API_BASE_URL: &str = "https://hwarang.ai";
 const DEEP_LINK_SCHEME: &str = "hwarang-grid";
+
+/// 시작 시 1회 수집되는 기기 정보 (캐싱).
+/// 같은 PC 에서는 항상 같은 fingerprint 를 내도록 결정성 유지.
+static DEVICE_INFO: Lazy<DeviceInfo> = Lazy::new(device::collect_device_info);
 
 /// PyInstaller 사이드카 자식 프로세스 핸들 (트레이/스레드 간 공유).
 type SidecarHandle = Arc<Mutex<Option<CommandChild>>>;
@@ -129,6 +135,13 @@ struct AgentState {
     current_round_name: String,
     kyc_verified: bool,
     last_error: Option<String>,
+    // 로그인 상태 — 트레이 메뉴 표시용
+    logged_in: bool,
+    user_email: Option<String>,
+    user_tier: String,
+    // 다중 기기 식별 — 트레이 메뉴 표시 + heartbeat 용
+    device_id: Option<String>,
+    device_name: Option<String>,
 }
 
 impl Default for AgentState {
@@ -147,6 +160,36 @@ impl Default for AgentState {
             current_round_name: String::new(),
             kyc_verified: false,
             last_error: None,
+            logged_in: false,
+            user_email: None,
+            user_tier: "BRONZE".into(),
+            device_id: None,
+            device_name: None,
+        }
+    }
+}
+
+/// `~/.hwarang/account.json` 을 읽어 AgentState 의 로그인 필드를 갱신.
+/// 백그라운드 스레드와 deep link 콜백 양쪽에서 호출된다.
+fn refresh_account_into_state(state: &mut AgentState) {
+    match auth::load_account() {
+        Some(info) => {
+            state.logged_in = info.api_key.is_some();
+            state.user_email = info.email.clone();
+            state.user_tier = info.tier.clone();
+            state.kyc_verified = info.kyc_verified;
+            state.device_id = info.device_id.clone();
+            // 서버가 device_name 을 안 줬으면 hostname 으로 fallback
+            state.device_name = info
+                .device_name
+                .clone()
+                .or_else(|| Some(DEVICE_INFO.hostname.clone()));
+        }
+        None => {
+            state.logged_in = false;
+            state.user_email = None;
+            state.device_id = None;
+            state.device_name = None;
         }
     }
 }
@@ -322,7 +365,7 @@ async fn clear_account_status() -> Result<(), String> {
 
 #[tauri::command]
 async fn open_login_flow() -> Result<String, String> {
-    auth::open_login_flow(API_BASE_URL)
+    auth::open_login_flow(API_BASE_URL, Some(&*DEVICE_INFO))
 }
 
 #[tauri::command]
@@ -451,8 +494,11 @@ fn main() {
         eprintln!("로그 초기화 실패: {}", e);
     }
 
-    let state = Arc::new(Mutex::new(AgentState::default()));
+    let mut initial_state = AgentState::default();
+    refresh_account_into_state(&mut initial_state);
+    let state = Arc::new(Mutex::new(initial_state));
     let state_clone = state.clone();
+    let state_for_deep_link = state.clone();
 
     // PyInstaller 사이드카 자식 프로세스 핸들 (Mutex 로 트레이/quit 양쪽에서 공유)
     let sidecar: SidecarHandle = Arc::new(Mutex::new(None));
@@ -583,6 +629,41 @@ fn main() {
                         "preset_tax" => set_preset("tax_specialist"),
                         "preset_general" => set_preset("general"),
 
+                        // 로그인 — 외부 브라우저로 nonce 기반 플로우 시작 (device 정보 포함)
+                        "login" => {
+                            match auth::open_login_flow(API_BASE_URL, Some(&*DEVICE_INFO)) {
+                                Ok(nonce) => {
+                                    log::info!("로그인 플로우 시작 (nonce={})", &nonce[..8]);
+                                }
+                                Err(e) => {
+                                    log::error!("로그인 시작 실패: {}", e);
+                                    state.last_error = Some(format!("로그인 실패: {}", e));
+                                }
+                            }
+                        }
+
+                        // 기기 관리 — 외부 브라우저로 기기 목록 페이지 열기
+                        "manage_devices" => {
+                            let _ = open::that("https://hwarang.ai/account/devices");
+                        }
+
+                        // 로그아웃 — 로컬 account.json 삭제
+                        "logout" => {
+                            if let Err(e) = auth::clear_account() {
+                                log::error!("로그아웃 실패: {}", e);
+                            } else {
+                                log::info!("로그아웃 완료");
+                            }
+                            refresh_account_into_state(&mut state);
+                        }
+
+                        // KYC 인증 — 이미 로그인된 상태에서 KYC 페이지 열기
+                        "kyc_open" => {
+                            if let Err(e) = auth::open_kyc_flow(API_BASE_URL) {
+                                log::error!("KYC 시작 실패: {}", e);
+                            }
+                        }
+
                         // hwarang.ai 열기
                         "website" => {
                             let _ = open::that("https://hwarang.ai");
@@ -605,10 +686,26 @@ fn main() {
                     update_tray_icon(app, &state);
                 }
 
-                // 트레이 아이콘 클릭 (Mac에서는 왼쪽 클릭)
+                // 트레이 아이콘 좌클릭.
+                // - 미로그인: 즉시 로그인 플로우 트리거 (가장 흔한 첫 액션)
+                // - 로그인됨: 플랫폼 기본 동작 (Mac/Windows 모두 메뉴 자동 표시)
                 SystemTrayEvent::LeftClick { .. } => {
-                    // 상태 패널 표시 또는 메뉴 열기
+                    let logged_in = {
+                        let s = state_clone.lock().unwrap();
+                        s.logged_in
+                    };
+                    if !logged_in {
+                        if let Err(e) = auth::open_login_flow(API_BASE_URL, Some(&*DEVICE_INFO)) {
+                            log::error!("좌클릭 로그인 트리거 실패: {}", e);
+                        } else {
+                            log::info!("좌클릭으로 로그인 플로우 시작");
+                        }
+                    }
+                    // 로그인 상태에서는 OS 가 자동으로 메뉴 표시
                 }
+
+                // 우클릭은 OS 가 자동으로 메뉴 표시 — 별도 처리 불필요
+                SystemTrayEvent::RightClick { .. } => {}
 
                 _ => {}
             }
@@ -628,11 +725,13 @@ fn main() {
             // ───── Deep link 등록 ─────
             // hwarang-grid://auth?... 콜백을 받아 로그인/KYC 결과를 처리한다.
             let dl_handle = app.handle();
+            let dl_state = state_for_deep_link.clone();
             if let Err(e) = tauri_plugin_deep_link::register(
                 DEEP_LINK_SCHEME,
                 move |request| {
                     log::info!("deep link 수신: {}", request);
                     let h = dl_handle.clone();
+                    let s = dl_state.clone();
                     tauri::async_runtime::spawn(async move {
                         match auth::handle_deep_link(&request, API_BASE_URL).await {
                             Ok(info) => {
@@ -640,6 +739,15 @@ fn main() {
                                     "로그인 처리 완료: email={:?}, kyc={}",
                                     info.email, info.kyc_verified
                                 );
+                                // 트레이 메뉴 즉시 갱신 (로그인 완료 → 메뉴에 이메일 표시)
+                                {
+                                    let mut state = s.lock().unwrap();
+                                    refresh_account_into_state(&mut state);
+                                    let prefs = load_desktop_prefs();
+                                    let new_menu = build_tray_menu(&state, &prefs);
+                                    let _ = h.tray_handle().set_menu(new_menu);
+                                    update_tray_icon(&h, &state);
+                                }
                                 notifications::notify_login_completed(
                                     &h,
                                     info.email.as_deref().unwrap_or(""),
@@ -685,9 +793,12 @@ fn main() {
             thread::spawn(move || {
                 let mut prev_tokens: i64 = 0;
                 let mut prev_round_id: Option<String> = None;
+                // 10초마다 도는 루프에서 heartbeat 는 6틱(=60초)마다 1회.
+                let mut heartbeat_tick: u32 = 0;
 
                 loop {
                     thread::sleep(Duration::from_secs(10));
+                    heartbeat_tick = heartbeat_tick.wrapping_add(1);
 
                     let mut state = bg_state.lock().unwrap();
 
@@ -879,6 +990,32 @@ fn main() {
                         let new_menu = build_tray_menu(&state, &prefs);
                         let _ = app_handle.tray_handle().set_menu(new_menu);
                         update_tray_icon(&app_handle, &state);
+
+                        // ───── heartbeat: 60초마다 1회 ─────
+                        // 로그인된 + status != stopped 일 때만.
+                        // 실패해도 panic 없이 다음 회차에 재시도.
+                        if heartbeat_tick % 6 == 0 && state.logged_in {
+                            if let Some(account) = auth::load_account() {
+                                if let Some(api_key) = account.api_key.clone() {
+                                    let usage = state.gpu_usage_percent;
+                                    let temp = state.gpu_temp;
+                                    let status = state.status.clone();
+                                    tauri::async_runtime::spawn(async move {
+                                        if let Err(e) = auth::send_heartbeat(
+                                            &api_key,
+                                            API_BASE_URL,
+                                            usage,
+                                            temp,
+                                            &status,
+                                        )
+                                        .await
+                                        {
+                                            log::debug!("heartbeat 실패 (다음 회 재시도): {}", e);
+                                        }
+                                    });
+                                }
+                            }
+                        }
                     }
                 }
             });
@@ -925,6 +1062,45 @@ fn build_tray_menu(state: &AgentState, prefs: &serde_json::Value) -> SystemTrayM
         .and_then(|v| v.as_str()).unwrap_or("general");
 
     let mut menu = SystemTrayMenu::new();
+
+    // ───── 계정 섹션 (최상단) ─────
+    if state.logged_in {
+        // 로그인된 상태: 이메일 + 등급 표시 (disabled)
+        let account_label = match state.user_email.as_deref() {
+            Some(email) => format!("👤 {} ({})", email, state.user_tier),
+            None => format!("👤 로그인됨 ({})", state.user_tier),
+        };
+        menu = menu.add_item(CustomMenuItem::new("account_info", account_label).disabled());
+
+        // 현재 기기 이름 (서버 등록 이름 → hostname 순으로 fallback)
+        if let Some(name) = state.device_name.as_deref() {
+            menu = menu.add_item(
+                CustomMenuItem::new("device_info", format!("  💻 {}", name)).disabled(),
+            );
+        }
+
+        // KYC 상태
+        if state.kyc_verified {
+            menu = menu
+                .add_item(CustomMenuItem::new("kyc_status", "  ✅ KYC 인증 완료").disabled());
+        } else {
+            menu = menu.add_item(CustomMenuItem::new("kyc_open", "  🛡️ KYC 인증하기"));
+        }
+
+        // 기기 관리 — 다중 기기 로그인 사용자를 위해
+        menu = menu.add_item(CustomMenuItem::new("manage_devices", "🖥️ 내 기기 관리"));
+
+        menu = menu.add_item(CustomMenuItem::new("logout", "🚪 로그아웃"));
+    } else {
+        // 미로그인: 클릭 가능한 로그인 버튼 (강조)
+        menu = menu.add_item(CustomMenuItem::new("login", "👤 로그인 / 회원가입"));
+        menu = menu.add_item(
+            CustomMenuItem::new("login_help", "  로그인 후 토큰 보상 적립")
+                .disabled(),
+        );
+    }
+
+    menu = menu.add_native_item(SystemTrayMenuItem::Separator);
 
     // 상태 표시 (클릭 불가)
     menu = menu.add_item(
