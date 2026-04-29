@@ -1162,7 +1162,7 @@ export async function POST(request: NextRequest) {
           model_name: aiModel.name,
           lora_name: (aiModel as any).loraName ?? null,
           latency_ms: latencyMs,
-          quality_score: responseWeight?.score ?? null,
+          quality_score: responseWeight?.totalScore ?? null,
           is_kyc_verified: !!(user as any).kycVerified,
         }),
       }).catch(() => {});
