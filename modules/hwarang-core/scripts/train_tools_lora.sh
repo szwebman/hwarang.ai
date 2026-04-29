@@ -16,11 +16,27 @@ LORA_ALPHA=${LORA_ALPHA:-128}
 MAX_LEN=${MAX_LEN:-4096}
 VLLM_URL=${VLLM_URL:-http://localhost:8001}
 
+# Python 자동 감지 (poetry → python3 → python 순)
+if [ -n "${PYTHON:-}" ]; then
+    : # 사용자 지정 PYTHON 우선
+elif command -v poetry >/dev/null 2>&1 && [ -f pyproject.toml ]; then
+    PYTHON="poetry run python"
+elif command -v python3 >/dev/null 2>&1; then
+    PYTHON="python3"
+elif command -v python >/dev/null 2>&1; then
+    PYTHON="python"
+else
+    echo "[ERROR] python / python3 / poetry 모두 없음. PYTHON 환경변수로 명시하세요." >&2
+    exit 1
+fi
+echo "[화랑] Python: $PYTHON"
+
 # ============================================================
 # 1. 데이터 생성
 # ============================================================
 echo "[1/5] multi-turn 데이터 생성"
-python scripts/data/build_tools_multiturn.py --output "$DATA_DIR/tools_multiturn.jsonl"
+mkdir -p "$DATA_DIR"
+$PYTHON scripts/data/build_tools_multiturn.py --output "$DATA_DIR/tools_multiturn.jsonl"
 
 # ============================================================
 # 2. 기존 데이터와 합치기
@@ -55,7 +71,7 @@ echo "  최종: $(wc -l < "$COMBINED") 샘플 → $COMBINED"
 # 4. LoRA 학습
 # ============================================================
 echo "[4/5] LoRA 학습 시작"
-python scripts/lora_train.py \
+$PYTHON scripts/lora_train.py \
     --checkpoint "$BASE" \
     --data "$COMBINED" \
     --output "$OUTPUT" \
@@ -81,4 +97,4 @@ echo "    -H 'Content-Type: application/json' \\"
 echo "    -d '{\"lora_name\":\"hwarang-v2\",\"lora_path\":\"$OUTPUT\"}'"
 echo ""
 echo "  # 평가 스크립트 (10건 multi-turn 시나리오):"
-echo "  python scripts/eval_tool_calling.py --model hwarang-v2 --url $VLLM_URL"
+echo "  $PYTHON scripts/eval_tool_calling.py --model hwarang-v2 --url $VLLM_URL"

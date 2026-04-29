@@ -41,6 +41,219 @@ function isLikelyActionPromise(text: string): boolean {
 }
 
 /**
+ * LLM 응답에서 첫 큰 코드 블록 + 컨텍스트의 활성 파일을 매칭하여
+ * write_file 인자를 합성한다. 매칭 실패 시 null.
+ *
+ * 코드 블록과 파일 확장자가 합리적으로 매칭될 때만 동작 (안전성):
+ *   - ```html```  → .html / .htm
+ *   - ```typescript / ts``` → .ts / .tsx
+ *   - ```javascript / js``` → .js / .jsx
+ *   - ```python / py``` → .py
+ *   - ```css```   → .css
+ *   - ```json```  → .json
+ *   - ```bash / sh``` → .sh
+ *   - 언어 미지정 단일 큰 블록 → 활성 파일 확장자 무관 적용 (200자 이상일 때)
+ */
+function trySynthesizeWriteFile(
+  llmResponse: string,
+  history: ChatMessage[]
+): { path: string; content: string } | null {
+  if (!llmResponse) return null;
+
+  // 1. 코드 블록 추출 — 가장 큰 것 1개
+  const blocks = extractFencedCodeBlocks(llmResponse);
+  if (blocks.length === 0) return null;
+
+  const biggest = blocks.reduce((a, b) =>
+    b.code.length > a.code.length ? b : a
+  );
+  if (biggest.code.length < 50) return null; // 너무 작으면 합성 안 함
+
+  // 2. 컨텍스트에서 활성 파일 추출 — buildContext() 가 user 메시지에 prepend 한 형식:
+  //    "[Active file: src/index.html (html, 120 lines)]"
+  const userMsgs = history.filter((m) => m.role === "user");
+  let activeFile: string | null = null;
+  for (let i = userMsgs.length - 1; i >= 0; i--) {
+    const m = userMsgs[i].content;
+    const match = m.match(/\[Active file:\s*([^\s\(\]]+)/);
+    if (match) {
+      activeFile = match[1];
+      break;
+    }
+  }
+  if (!activeFile) return null;
+
+  // 3. 언어/확장자 매칭 검사 (안전 가드)
+  const extLangMap: Record<string, string[]> = {
+    html: [".html", ".htm"],
+    htm: [".html", ".htm"],
+    typescript: [".ts", ".tsx"],
+    ts: [".ts", ".tsx"],
+    tsx: [".tsx"],
+    javascript: [".js", ".jsx", ".mjs"],
+    js: [".js", ".jsx", ".mjs"],
+    jsx: [".jsx"],
+    python: [".py"],
+    py: [".py"],
+    css: [".css"],
+    scss: [".scss"],
+    json: [".json"],
+    bash: [".sh"],
+    sh: [".sh"],
+    yaml: [".yml", ".yaml"],
+    yml: [".yml", ".yaml"],
+    md: [".md"],
+    markdown: [".md"],
+    rust: [".rs"],
+    rs: [".rs"],
+    go: [".go"],
+    java: [".java"],
+  };
+
+  const lang = (biggest.lang || "").toLowerCase();
+  if (lang && extLangMap[lang]) {
+    const ok = extLangMap[lang].some((ext) =>
+      activeFile!.toLowerCase().endsWith(ext)
+    );
+    if (!ok) return null; // 언어/확장자 불일치 → 합성 안 함
+  } else if (lang) {
+    // 알 수 없는 언어 → 합성 안 함 (안전)
+    return null;
+  } else if (biggest.code.length < 200) {
+    // 언어 미지정 + 작은 블록 → 합성 안 함
+    return null;
+  }
+
+  return { path: activeFile, content: biggest.code };
+}
+
+interface FencedBlock {
+  lang: string;
+  code: string;
+}
+
+function extractFencedCodeBlocks(text: string): FencedBlock[] {
+  const out: FencedBlock[] = [];
+  // ```lang\n ... \n```  (lang 옵션)
+  const re = /```([a-zA-Z0-9_+-]*)\n([\s\S]*?)\n```/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    out.push({ lang: m[1] || "", code: m[2] });
+  }
+  return out;
+}
+
+/**
+ * 사용자 메시지에서 "읽기/탐색" 의도 감지.
+ * - "list" : 디렉토리 둘러보기 (프로젝트 파악, 구조 보기)
+ * - "read" : 특정 파일 내용 읽기 (이 파일 분석, 이거 뭐임)
+ * - null  : read 의도 아님
+ */
+function detectReadIntent(text: string): "list" | "read" | "list-deep" | null {
+  if (!text) return null;
+  const cleaned = text.replace(/^\[[^\]]+\]\s*/g, "").trim();
+
+  // 더 깊이/자세히/recursive 탐색 (assistant 후속 약속 패턴 포함)
+  const deepKo = /(더 깊이|더 자세히|조금 더|recursive|하위|내부|세부|subdirectory)/;
+  const deepEn = /\b(deeper|more detail|recursive|drill down|inside|subdir)/i;
+  if (deepKo.test(cleaned) || deepEn.test(cleaned)) return "list-deep";
+
+  // 프로젝트/디렉토리 탐색 의도
+  const listKo =
+    /(파악|구조|살펴|훑어|개요|전체.*보|뭐가.*있|어떤.*있|디렉토리|폴더|프로젝트.*보)/;
+  const listEn =
+    /\b(explore|overview|structure|list|walk through|what('?s| is)\s+in|whats in)\b/i;
+  if (listKo.test(cleaned) || listEn.test(cleaned)) return "list";
+
+  // 단일 파일 읽기 의도 (활성 파일 컨텍스트 있을 때)
+  // "확인/검토/체크/보겠/다음으로" 등 어시스턴트 후속 약속 패턴도 포함
+  const readKo =
+    /(이 파일|이 코드|분석|리뷰|이해|읽어|봐줘|뭐.*하는|확인하|검토|체크|살펴보|보겠|읽어서|먼저.*확인|다음.*확인)/;
+  const readEn =
+    /\b(analyze|review|read|understand|what does this|explain this file|check|inspect|look at|examine)\b/i;
+  if (readKo.test(cleaned) || readEn.test(cleaned)) return "read";
+
+  return null;
+}
+
+/**
+ * 텍스트에서 파일 경로 패턴 추출 (확장자 있는 것).
+ * 예: "style.css", "src/index.html", "package.json"
+ *
+ * 발견 순서대로 반환. 같은 파일이 여러 번이면 첫 등장만.
+ */
+function extractMentionedFiles(text: string): string[] {
+  if (!text) return [];
+  // 확장자 화이트리스트 (안전 가드 — 임의 문자열 .test 같은 거 잡지 않게)
+  const exts =
+    "(html|htm|css|scss|sass|less|js|jsx|mjs|cjs|ts|tsx|json|json5|md|mdx|py|go|rs|java|kt|swift|c|cpp|h|hpp|yml|yaml|sh|bash|zsh|toml|env|ini|cfg|conf|sql|graphql|prisma|vue|svelte|astro)";
+  const re = new RegExp(`(?:^|[\\s"'\`(<\\[])([\\w./\\-]+\\.${exts})(?=[\\s"'\`):>\\],.!?]|$)`, "gi");
+  const seen = new Set<string>();
+  const out: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    let p = m[1];
+    // 절대 경로 / 상위 ../ 는 제외 (안전)
+    if (p.startsWith("/") || p.startsWith("../")) continue;
+    if (!seen.has(p)) {
+      seen.add(p);
+      out.push(p);
+    }
+  }
+  return out;
+}
+
+/**
+ * read 의도 → list_directory 또는 read_file tool_call 합성.
+ * - list : 활성 파일 디렉토리 또는 "."
+ * - read : 활성 파일 (없으면 null)
+ */
+function synthesizeReadCall(
+  intent: "list" | "read" | "list-deep",
+  history: ChatMessage[]
+): ToolCall | null {
+  // 활성 파일 추출
+  let activeFile: string | null = null;
+  const userMsgs = history.filter((m) => m.role === "user");
+  for (let i = userMsgs.length - 1; i >= 0; i--) {
+    const m = userMsgs[i].content;
+    const match = m.match(/\[Active file:\s*([^\s\(\]]+)/);
+    if (match) {
+      activeFile = match[1];
+      break;
+    }
+  }
+
+  if (intent === "read") {
+    if (!activeFile) return null;
+    return {
+      id: `auto-read-${Date.now()}`,
+      type: "function",
+      function: {
+        name: "read_file",
+        arguments: JSON.stringify({ path: activeFile }),
+      },
+    };
+  }
+
+  // list / list-deep — 활성 파일의 부모 디렉토리, 없으면 워크스페이스 루트
+  let listPath = ".";
+  if (activeFile) {
+    const idx = activeFile.lastIndexOf("/");
+    if (idx > 0) listPath = activeFile.slice(0, idx);
+  }
+  const recursive = intent === "list-deep";
+  return {
+    id: `auto-list-${Date.now()}`,
+    type: "function",
+    function: {
+      name: "list_directory",
+      arguments: JSON.stringify({ path: listPath, recursive }),
+    },
+  };
+}
+
+/**
  * 사용자 메시지가 "실제 작업 요청" 인지 판단.
  * 단순 질문 (어떻게 하면 좋을까?) 은 false.
  */
@@ -256,7 +469,7 @@ export class AgentLoop {
           this.conversationHistory.filter((m) => m.role === "user").slice(-1)[0]?.content || ""
         );
 
-        if (isActionPromise && userAskedForAction && i < 2) {
+        if (isActionPromise && userAskedForAction && i < 4) {
           // 한 번 더 강제로 tool call 유도.
           //
           // 핵심: 행위 약속 응답은 conversationHistory 에 절대 푸시하지 않는다.
@@ -284,6 +497,205 @@ export class AgentLoop {
           // 단 history 에는 추가하지 않음 — 다음 호출에서 LLM 이 깨끗한 컨텍스트 받게.
           yield { role: "assistant", content: finalContent };
           continue;
+        }
+
+        // Fallback A: read 의도 감지 시 list_directory / read_file 자동 합성.
+        // 사용자의 마지막 메시지 OR LLM 의 약속 메시지 ("더 깊이 보겠습니다" 등) 둘 다 검사.
+        // 같은 합성 무한 반복 방지 — 같은 의도+경로 조합은 라운드당 1회만.
+        const lastUserText =
+          this.conversationHistory.filter((m) => m.role === "user").slice(-1)[0]?.content || "";
+        const readIntent =
+          detectReadIntent(lastUserText) || detectReadIntent(finalContent);
+
+        if (readIntent && !response.toolCalls?.length) {
+          const readCall = synthesizeReadCall(readIntent, this.conversationHistory);
+          // 직전에 같은 tool 을 같은 인자로 합성했다면 스킵 (반복 방지)
+          const lastSynth = this.conversationHistory
+            .filter((m: any) => m.role === "assistant" && m.tool_calls?.length)
+            .slice(-1)[0] as any;
+          const dup =
+            lastSynth?.tool_calls?.[0]?.function?.name === readCall?.function.name &&
+            lastSynth?.tool_calls?.[0]?.function?.arguments === readCall?.function.arguments;
+          if (readCall && !dup) {
+            console.log(
+              `[AgentLoop] read 의도 감지 + tool_call 누락 → ${readCall.function.name} 자동 합성`
+            );
+
+            yield { role: "assistant", content: finalContent };
+            yield {
+              role: "tool_call",
+              content: `${readCall.function.name}(${this.formatToolArgs(readCall)})`,
+              toolName: readCall.function.name,
+              toolCallId: readCall.id,
+            };
+
+            const result = await this.tools.execute(
+              readCall.function.name,
+              readCall.function.arguments
+            );
+
+            const output =
+              result.output.length > 8000
+                ? result.output.slice(0, 8000) + "\n... (truncated)"
+                : result.output;
+
+            yield {
+              role: "tool_result",
+              content: output,
+              toolName: readCall.function.name,
+              toolCallId: readCall.id,
+            };
+
+            this.conversationHistory.push({
+              role: "assistant",
+              content: finalContent,
+              tool_calls: [readCall],
+            });
+            this.conversationHistory.push({
+              role: "tool",
+              content: output,
+              tool_call_id: readCall.id,
+            });
+            continue;
+          }
+        }
+
+        // Fallback C: LLM 응답에 명시적 파일명이 있고 tool_call 은 없을 때
+        // (예: "style.css 의 현재 규칙을 확인하겠습니다" → style.css read_file 자동)
+        if (!response.toolCalls?.length) {
+          const mentioned = extractMentionedFiles(finalContent);
+          // 같은 라운드에서 이미 합성한 파일 제외 (반복 방지)
+          const recentSynthFiles = new Set<string>();
+          for (const m of this.conversationHistory.slice(-6) as any[]) {
+            if (m.role === "assistant" && m.tool_calls?.length) {
+              for (const tc of m.tool_calls) {
+                try {
+                  const args = JSON.parse(tc.function.arguments);
+                  if (args.path) recentSynthFiles.add(args.path);
+                } catch { /* ignore */ }
+              }
+            }
+          }
+          const target = mentioned.find((f) => !recentSynthFiles.has(f));
+
+          if (target) {
+            console.log(`[AgentLoop] 파일명 언급 + tool_call 누락 → read_file('${target}') 자동 합성`);
+            const synthCall: ToolCall = {
+              id: `auto-readfile-${Date.now()}`,
+              type: "function",
+              function: {
+                name: "read_file",
+                arguments: JSON.stringify({ path: target }),
+              },
+            };
+
+            yield { role: "assistant", content: finalContent };
+            yield {
+              role: "tool_call",
+              content: `read_file(path: "${target}")`,
+              toolName: "read_file",
+              toolCallId: synthCall.id,
+            };
+
+            const result = await this.tools.execute(
+              "read_file",
+              synthCall.function.arguments
+            );
+            const output =
+              result.output.length > 8000
+                ? result.output.slice(0, 8000) + "\n... (truncated)"
+                : result.output;
+
+            yield {
+              role: "tool_result",
+              content: output,
+              toolName: "read_file",
+              toolCallId: synthCall.id,
+            };
+
+            this.conversationHistory.push({
+              role: "assistant",
+              content: finalContent,
+              tool_calls: [synthCall],
+            });
+            this.conversationHistory.push({
+              role: "tool",
+              content: output,
+              tool_call_id: synthCall.id,
+            });
+            continue;
+          }
+        }
+
+        // Fallback B: LLM 이 코드 블록을 뱉었지만 tool_call 은 안 했을 때
+        // (LoRA 가 multi-turn tool calling 못하는 케이스 회피)
+        // → 활성 파일 컨텍스트가 있으면 write_file 자동 합성.
+        // ToolExecutor 의 승인 UI 가 한 번 더 사용자에게 확인 받음.
+        if (userAskedForAction) {
+          const synthesized = trySynthesizeWriteFile(
+            finalContent,
+            this.conversationHistory
+          );
+          if (synthesized) {
+            console.log(
+              "[AgentLoop] tool_call 누락 — 코드블록 → write_file 자동 합성:",
+              synthesized.path
+            );
+
+            const synthesizedCall: ToolCall = {
+              id: `auto-${Date.now()}`,
+              type: "function",
+              function: {
+                name: "write_file",
+                arguments: JSON.stringify({
+                  path: synthesized.path,
+                  content: synthesized.content,
+                }),
+              },
+            };
+
+            yield {
+              role: "assistant",
+              content:
+                finalContent +
+                `\n\n_(자동 감지: ${synthesized.path} 에 위 코드를 적용 시도)_`,
+            };
+            yield {
+              role: "tool_call",
+              content: `write_file(path: "${synthesized.path}", content: "...${synthesized.content.length} chars")`,
+              toolName: "write_file",
+              toolCallId: synthesizedCall.id,
+            };
+
+            const result = await this.tools.execute(
+              "write_file",
+              synthesizedCall.function.arguments
+            );
+
+            const output =
+              result.output.length > 8000
+                ? result.output.slice(0, 8000) + "\n... (truncated)"
+                : result.output;
+
+            yield {
+              role: "tool_result",
+              content: output,
+              toolName: "write_file",
+              toolCallId: synthesizedCall.id,
+            };
+
+            this.conversationHistory.push({
+              role: "assistant",
+              content: finalContent,
+              tool_calls: [synthesizedCall],
+            });
+            this.conversationHistory.push({
+              role: "tool",
+              content: output,
+              tool_call_id: synthesizedCall.id,
+            });
+            continue;
+          }
         }
 
         this.conversationHistory.push({ role: "assistant", content: finalContent });
