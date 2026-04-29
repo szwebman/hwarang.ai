@@ -193,24 +193,47 @@ export async function POST(request: NextRequest) {
       const originalName = aiModel.name;
       const originalMinPlan = aiModel.minPlan;
 
-      // 같은 category 의 plan-호환 모델 찾기
-      const compatible = await prisma.aIModel.findFirst({
-        where: {
-          isActive: true,
-          isPublic: true,
-          category: aiModel.category,
-          OR: [{ minPlan: null }, { minPlan: "free" }],
-        },
-        orderBy: [{ isDomainDefault: "desc" }, { sortOrder: "asc" }],
-      }) || await prisma.aIModel.findFirst({
-        // category 안에 호환 모델이 없으면 전체에서 default 우선
-        where: {
-          isActive: true,
-          isPublic: true,
-          OR: [{ minPlan: null }, { minPlan: "free" }],
-        },
-        orderBy: [{ isDefault: "desc" }, { sortOrder: "asc" }],
-      });
+      // 클라이언트가 tools 를 보냈으면 tool calling 지원 모델 (tags 에 'supports-tools') 우선
+      const wantsTools = !!body.tools?.length;
+
+      // 1순위: 같은 category + tools 지원 (사용자가 tools 요청 시)
+      let compatible = wantsTools
+        ? await prisma.aIModel.findFirst({
+            where: {
+              isActive: true,
+              isPublic: true,
+              category: aiModel.category,
+              tags: { has: "supports-tools" },
+              OR: [{ minPlan: null }, { minPlan: "free" }],
+            },
+            orderBy: [{ isDomainDefault: "desc" }, { sortOrder: "asc" }],
+          })
+        : null;
+
+      // 2순위: 같은 category 의 free-tier 모델 (tools 무관)
+      if (!compatible) {
+        compatible = await prisma.aIModel.findFirst({
+          where: {
+            isActive: true,
+            isPublic: true,
+            category: aiModel.category,
+            OR: [{ minPlan: null }, { minPlan: "free" }],
+          },
+          orderBy: [{ isDomainDefault: "desc" }, { sortOrder: "asc" }],
+        });
+      }
+
+      // 3순위: 전체 free-tier 중 default
+      if (!compatible) {
+        compatible = await prisma.aIModel.findFirst({
+          where: {
+            isActive: true,
+            isPublic: true,
+            OR: [{ minPlan: null }, { minPlan: "free" }],
+          },
+          orderBy: [{ isDefault: "desc" }, { sortOrder: "asc" }],
+        });
+      }
 
       if (!compatible) {
         // 정말로 free 호환 모델이 하나도 없을 때만 403
@@ -225,8 +248,9 @@ export async function POST(request: NextRequest) {
         );
       }
 
+      const fallbackSupportsTools = compatible.tags?.includes("supports-tools") ?? false;
       console.log(
-        `[plan-fallback] ${originalName} (${originalMinPlan}) → ${compatible.name} (free) for user ${userId}`
+        `[plan-fallback] ${originalName} (${originalMinPlan}) → ${compatible.name} (free, tools=${fallbackSupportsTools}) for user ${userId}`
       );
       aiModel = compatible;
       planFallbackInfo = {
@@ -234,6 +258,26 @@ export async function POST(request: NextRequest) {
         to: compatible.name,
         reason: `plan_mismatch (${user.plan?.name || "free"} < ${originalMinPlan})`,
       };
+
+      // 사용자가 tools 보냈는데 폴백 모델이 미지원이면 시스템 메시지로 명확히 안내
+      // (LLM 이 행위 약속만 하고 끝나는 도돌이표 방지)
+      if (wantsTools && !fallbackSupportsTools) {
+        console.warn(
+          `[plan-fallback] tools requested but ${compatible.name} doesn't support tools — appending guidance to system prompt`
+        );
+        // body.messages 의 system 메시지 끝에 안내 추가
+        const sysIdx = body.messages?.findIndex((m: any) => m.role === "system") ?? -1;
+        const guidance =
+          "\n\n[중요] 이 모델은 도구 (write_file/edit_file 등) 자동 실행을 지원하지 않습니다. " +
+          "파일 수정/생성이 필요하면 코드 블록 + 정확한 파일 경로 + 변경 내용을 텍스트로 명확히 제시하세요. " +
+          "사용자에게 '도구 자동 실행은 STARTER 이상 플랜에서 가능합니다' 라고 1줄 안내하세요.";
+        if (sysIdx >= 0 && body.messages) {
+          body.messages[sysIdx].content = (body.messages[sysIdx].content || "") + guidance;
+        } else if (body.messages) {
+          body.messages.unshift({ role: "system", content: guidance.trimStart() });
+        }
+        // tools 자체는 그대로 유지 (모델이 못 쓰면 알아서 무시)
+      }
     }
   }
 
@@ -356,8 +400,13 @@ export async function POST(request: NextRequest) {
   // ─── 4.-0.5 옵션 제시 모드 (Claude-style) ──
   // 사용자가 "만들어줘" / "디자인해줘" 류 모호한 요청 → vLLM 호출 전에 2~4 옵션 카드 표시.
   // body.skipOptions === true 이면 우회 (옵션 클릭 후 후속 메시지). body.stream === false 도 지원.
+  //
+  // ⚠️ 중요: tools 를 보낸 클라이언트(VS Code 확장, CLI 등 agent-loop) 는 옵션 모드 자동 우회.
+  // 이런 클라이언트는 도구로 직접 작업을 수행하므로 옵션 카드가 무의미하고
+  // 옵션 응답을 받으면 _meta.options 를 처리 못 해서 도돌이표에 빠짐.
+  const _isToolUsingClient = !!body.tools?.length;
   let optionsResponse: { deliverable: string; options: any[] } | null = null;
-  if (body.skipOptions !== true && !isOptionContinuation) {
+  if (body.skipOptions !== true && !isOptionContinuation && !_isToolUsingClient) {
     try {
       const HWARANG_API_URL_OPT =
         process.env.HWARANG_API_URL || "http://localhost:8000";
@@ -1050,6 +1099,7 @@ export async function POST(request: NextRequest) {
               "X-Plan-Fallback-Reason": planFallbackInfo.reason,
             }
           : {}),
+        "X-Tools-Supported": (aiModel.tags?.includes("supports-tools") ?? false) ? "1" : "0",
       },
     });
   }

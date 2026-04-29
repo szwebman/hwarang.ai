@@ -20,6 +20,43 @@ import { getMode, getSystemPromptAddition } from "./mode";
 
 const MAX_ITERATIONS = 25;
 
+/**
+ * "행위 약속만 한 응답" 감지 — 도돌이표 가드용.
+ *
+ * 예: "리팩토링하겠습니다", "수정하겠습니다", "I will refactor..."
+ * 짧고 (300자 미만), 미래형 약속만 있고 코드/구조적 출력이 없는 경우 true.
+ */
+function isLikelyActionPromise(text: string): boolean {
+  if (!text) return false;
+  const t = text.trim();
+  if (t.length === 0 || t.length > 400) return false;
+  // 코드 블록이 있으면 약속이 아니라 실제 결과물일 가능성
+  if (t.includes("```")) return false;
+
+  const ko = /(하겠습니다|할게요|진행하겠|만들겠|수정하겠|개선하겠|리팩토링하겠|시작하겠|작성하겠|업데이트하겠)/;
+  const en = /\b(I('ll| will)|let me|going to)\s+(refactor|create|modify|update|fix|implement|improve|write|edit)/i;
+  const apology = /(죄송|sorry)/i;
+
+  return ko.test(t) || en.test(t) || (apology.test(t) && t.length < 100);
+}
+
+/**
+ * 사용자 메시지가 "실제 작업 요청" 인지 판단.
+ * 단순 질문 (어떻게 하면 좋을까?) 은 false.
+ */
+function isActionRequest(text: string): boolean {
+  if (!text) return false;
+  const t = text.trim();
+  // 컨텍스트 prefix ([Active file: ...]) 제거 후 검사
+  const cleaned = t.replace(/^\[[^\]]+\]\s*/g, "").trim();
+
+  const ko =
+    /(해줘|해주세요|만들어|수정해|개선해|리팩토|고쳐|바꿔|추가해|삭제|업데이트|구현해|작성해|디자인좀)/;
+  const en =
+    /\b(create|make|add|modify|edit|fix|update|refactor|improve|implement|build|write|delete|remove)\b/i;
+  return ko.test(cleaned) || en.test(cleaned);
+}
+
 const SYSTEM_PROMPT = `You are Hwarang AI, an expert coding assistant running inside VS Code.
 You have DIRECT access to the user's workspace through tools. You MUST USE THOSE TOOLS.
 
@@ -210,6 +247,30 @@ export class AgentLoop {
 
         // No tool calls → final response
         const finalContent = response.content || "";
+
+        // 가드: 행위만 약속하고 tool call 안 한 경우 (도돌이표 방지)
+        // "리팩토링하겠습니다", "수정하겠습니다", "만들겠습니다", "I'll create/modify..." 등
+        // 사용자가 명시적 작업 (디자인 개선, 파일 수정 등) 을 요청한 후의 첫 응답에서만 동작
+        const isActionPromise = isLikelyActionPromise(finalContent);
+        const userAskedForAction = isActionRequest(
+          this.conversationHistory.filter((m) => m.role === "user").slice(-1)[0]?.content || ""
+        );
+
+        if (isActionPromise && userAskedForAction && i === 0) {
+          // 한 번 더 강제로 tool call 유도
+          console.log("[AgentLoop] 행위 약속만 감지 → tool call 강제 재시도");
+          this.conversationHistory.push({ role: "assistant", content: finalContent });
+          this.conversationHistory.push({
+            role: "user",
+            content:
+              "방금 답변에서 작업을 약속만 하고 실제로는 tool 을 호출하지 않았어요. " +
+              "지금 즉시 적절한 tool (read_file / edit_file / write_file 등) 을 호출해서 작업을 실제로 수행하세요. " +
+              "마크다운 코드 블록으로 명령어만 출력하지 말고, 반드시 tool call 을 사용하세요.",
+          });
+          yield { role: "assistant", content: finalContent };
+          continue;
+        }
+
         this.conversationHistory.push({ role: "assistant", content: finalContent });
         yield { role: "assistant", content: finalContent };
         return;
