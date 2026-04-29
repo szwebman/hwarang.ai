@@ -18,7 +18,46 @@ import { LLMClient, ChatMessage, ToolCall } from "../providers/llm-client";
 import { ToolExecutor, TOOL_DEFINITIONS } from "./executor";
 import { getMode, getSystemPromptAddition } from "./mode";
 
-const MAX_ITERATIONS = 25;
+const MAX_ITERATIONS = 12;
+const MAX_FALLBACK_SYNTH = 5; // run() 한 번에 fallback 합성 최대 횟수
+
+/**
+ * 응답 signature — 코드블록/특수문자/숫자 제거 후 단어 set 만 추출.
+ * jaccard 유사도 비교용.
+ */
+function makeResponseSignature(text: string): Set<string> {
+  if (!text) return new Set();
+  const cleaned = text
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/[`*_~#>\[\]()]/g, " ")
+    .replace(/[0-9]+/g, " ")
+    .toLowerCase();
+  const words = cleaned.split(/\s+/).filter((w) => w.length >= 2);
+  return new Set(words);
+}
+
+function jaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let intersect = 0;
+  for (const x of a) if (b.has(x)) intersect++;
+  const union = a.size + b.size - intersect;
+  return union === 0 ? 0 : intersect / union;
+}
+
+/**
+ * "결론/마무리 시그널" 감지 — LLM 이 명시적으로 답변을 마무리한 경우 즉시 종료.
+ *
+ * 매치 시 가드/fallback 모두 발동 안 하고 final 처리.
+ * 예: "최종 결론입니다", "이해하셨나요?", "더 궁금한 부분이 있으시면", "Hope this helps".
+ */
+function isConclusionSignal(text: string): boolean {
+  if (!text) return false;
+  const ko =
+    /(최종\s*(분석|결론|결과|정리|요약)|분석\s*완료|이해\s*(하|되)?셨나요|이해\s*하셨|이해\s*되셨|더\s*궁금|추가\s*질문|말씀해\s*주세요|도움이\s*되|물어보세요|언제든지|이상입니다|마치겠습니다|정리하면|요약하면)/;
+  const en =
+    /\b(final\s*(analysis|conclusion|summary|result)|let me know if|hope this helps|in conclusion|to summarize|that('s| is) all|in summary|feel free to ask)/i;
+  return ko.test(text) || en.test(text);
+}
 
 /**
  * "행위 약속만 한 응답" 감지 — 도돌이표 가드용.
@@ -29,15 +68,42 @@ const MAX_ITERATIONS = 25;
 function isLikelyActionPromise(text: string): boolean {
   if (!text) return false;
   const t = text.trim();
-  if (t.length === 0 || t.length > 400) return false;
-  // 코드 블록이 있으면 약속이 아니라 실제 결과물일 가능성
-  if (t.includes("```")) return false;
+  if (t.length === 0) return false;
 
-  const ko = /(하겠습니다|할게요|진행하겠|만들겠|수정하겠|개선하겠|리팩토링하겠|시작하겠|작성하겠|업데이트하겠)/;
-  const en = /\b(I('ll| will)|let me|going to)\s+(refactor|create|modify|update|fix|implement|improve|write|edit)/i;
+  // 코드블록 제거 후 plain text 만 추출 (약속 패턴 검사용)
+  const plain = t.replace(/```[\s\S]*?```/g, " ").trim();
+  if (plain.length === 0 || plain.length > 600) return false;
+
+  const ko =
+    /(하겠습니다|할게요|진행하겠|만들겠|수정하겠|개선하겠|리팩토링하겠|시작하겠|작성하겠|업데이트하겠|만들어드리겠|생성하겠|확인하겠|살펴보겠)/;
+  const en =
+    /\b(I('ll| will)|let me|going to)\s+(refactor|create|modify|update|fix|implement|improve|write|edit|generate|set up|configure)/i;
   const apology = /(죄송|sorry)/i;
 
-  return ko.test(t) || en.test(t) || (apology.test(t) && t.length < 100);
+  const hasPromise =
+    ko.test(plain) || en.test(plain) || (apology.test(plain) && plain.length < 150);
+  if (!hasPromise) return false;
+
+  // 코드블록 검사 — 진짜 결과물 코드면 약속 아님 (이미 작업 완료한 상태)
+  const codeBlocks = t.match(/```[\s\S]*?```/g);
+  if (codeBlocks && codeBlocks.length > 0) {
+    const allCode = codeBlocks.join("\n");
+    // 진짜 코드 패턴: 변수 할당, 함수 정의, import, HTML/JSX 태그 등
+    const realCodeIndicators =
+      /(\w+\s*=\s*['"`\d{[]|function\s+\w|class\s+\w+|import\s+\w|export\s+|def\s+\w|fn\s+\w|public\s+|private\s+|<\/?\w+[^>]*>|return\s+|<!DOCTYPE|@media|\$\w+\s*=)/;
+    // step/안내 패턴: "1. xxx", "Step 1:", "## 1)"
+    const stepIndicators = /^\s*(\d+[.)]\s|Step\s*\d|##\s*\d|---|====)/m;
+
+    const isRealCode = realCodeIndicators.test(allCode);
+    const isStepOnly = stepIndicators.test(allCode) && !isRealCode;
+
+    if (isRealCode && !isStepOnly) {
+      return false; // 진짜 결과물 코드 — 가드 안 발동
+    }
+    // step/설명만 있는 블록은 여전히 약속으로 간주 (가드 발동)
+  }
+
+  return true;
 }
 
 /**
@@ -69,8 +135,10 @@ function trySynthesizeWriteFile(
   );
   if (biggest.code.length < 50) return null; // 너무 작으면 합성 안 함
 
-  // 2. 컨텍스트에서 활성 파일 추출 — buildContext() 가 user 메시지에 prepend 한 형식:
-  //    "[Active file: src/index.html (html, 120 lines)]"
+  // 2. 컨텍스트에서 활성 파일 추출 — 3단계 fallback
+  //    a) buildContext() 의 "[Active file: src/index.html ...]" prepend
+  //    b) LLM 응답에서 명시된 파일명 (예: "style.css 를 보고 있습니다")
+  //    c) 사용자 메시지에서 명시된 파일명
   const userMsgs = history.filter((m) => m.role === "user");
   let activeFile: string | null = null;
   for (let i = userMsgs.length - 1; i >= 0; i--) {
@@ -81,6 +149,40 @@ function trySynthesizeWriteFile(
       break;
     }
   }
+
+  // (b) LLM 응답 자체에서 파일명 추출
+  if (!activeFile) {
+    const filesInLlm = extractMentionedFiles(llmResponse);
+    if (filesInLlm.length > 0) {
+      // 코드블록 언어와 매칭되는 첫 파일 선택 (안전성)
+      const lang = (biggest.lang || "").toLowerCase();
+      activeFile =
+        filesInLlm.find((f) => {
+          const fl = f.toLowerCase();
+          if (!lang) return true;
+          return (
+            (lang === "html" && (fl.endsWith(".html") || fl.endsWith(".htm"))) ||
+            (lang === "css" && fl.endsWith(".css")) ||
+            ((lang === "js" || lang === "javascript") && (fl.endsWith(".js") || fl.endsWith(".mjs"))) ||
+            ((lang === "ts" || lang === "typescript") && (fl.endsWith(".ts") || fl.endsWith(".tsx"))) ||
+            (lang === "py" || lang === "python") && fl.endsWith(".py") ||
+            (lang === "json" && fl.endsWith(".json"))
+          );
+        }) || filesInLlm[0];
+    }
+  }
+
+  // (c) 사용자 메시지에서 파일명 추출
+  if (!activeFile) {
+    for (let i = userMsgs.length - 1; i >= 0; i--) {
+      const filesInUser = extractMentionedFiles(userMsgs[i].content);
+      if (filesInUser.length > 0) {
+        activeFile = filesInUser[0];
+        break;
+      }
+    }
+  }
+
   if (!activeFile) return null;
 
   // 3. 언어/확장자 매칭 검사 (안전 가드)
@@ -188,18 +290,43 @@ function extractMentionedFiles(text: string): string[] {
   const exts =
     "(html|htm|css|scss|sass|less|js|jsx|mjs|cjs|ts|tsx|json|json5|md|mdx|py|go|rs|java|kt|swift|c|cpp|h|hpp|yml|yaml|sh|bash|zsh|toml|env|ini|cfg|conf|sql|graphql|prisma|vue|svelte|astro)";
   const re = new RegExp(`(?:^|[\\s"'\`(<\\[])([\\w./\\-]+\\.${exts})(?=[\\s"'\`):>\\],.!?]|$)`, "gi");
+
   const seen = new Set<string>();
   const out: string[] = [];
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
     let p = m[1];
-    // 절대 경로 / 상위 ../ 는 제외 (안전)
     if (p.startsWith("/") || p.startsWith("../")) continue;
     if (!seen.has(p)) {
       seen.add(p);
       out.push(p);
     }
   }
+
+  // 표준 dotfile (정확한 이름만 화이트리스트 — CSS 셀렉터 .user-list 같은 거 잘못 잡지 않게)
+  const knownDotfiles =
+    /(?:^|[\s"'`(<\[])(\.(?:env(?:\.[\w-]+)?|gitignore|gitattributes|gitmodules|dockerignore|npmignore|npmrc|nvmrc|node-version|python-version|ruby-version|prettierrc(?:\.\w+)?|eslintrc(?:\.\w+)?|babelrc(?:\.\w+)?|editorconfig|stylelintrc(?:\.\w+)?))(?=[\s"'`):>\],.!?]|$)/gi;
+
+  // 확장자 없는 표준 파일
+  const knownNoExt = [
+    /(?:^|[\s"'`(<\[])(Dockerfile)(?=[\s"'`):>\],.!?]|$)/g,
+    /(?:^|[\s"'`(<\[])(Makefile)(?=[\s"'`):>\],.!?]|$)/g,
+    /(?:^|[\s"'`(<\[])(Procfile|Jenkinsfile|Vagrantfile|Rakefile|Gemfile)(?=[\s"'`):>\],.!?]|$)/g,
+    /(?:^|[\s"'`(<\[])(README|LICENSE|CHANGELOG|CONTRIBUTING|AUTHORS|NOTICE)(?=[\s"'`):>\],.!?]|$)/g,
+  ];
+
+  for (const dpat of [knownDotfiles, ...knownNoExt]) {
+    let dm: RegExpExecArray | null;
+    while ((dm = dpat.exec(text)) !== null) {
+      let p = dm[1];
+      if (p.startsWith("/") || p.startsWith("../")) continue;
+      if (!seen.has(p)) {
+        seen.add(p);
+        out.push(p);
+      }
+    }
+  }
+
   return out;
 }
 
@@ -385,6 +512,12 @@ export class AgentLoop {
     this._isRunning = true;
     this.abortController = new AbortController();
 
+    // run() 한 번에 fallback 합성 한도 (무한 루프 방지)
+    let fallbackSynthCount = 0;
+    // 응답 중복 감지 (LLM 이 같은 답 반복 시 즉시 종료)
+    let lastResponseSig: Set<string> = new Set();
+    let repeatedResponseCount = 0;
+
     try {
       const context = await this.buildContext();
       const fullMessage = context ? `${context}\n\n${userMessage}` : userMessage;
@@ -408,6 +541,27 @@ export class AgentLoop {
         if (this.abortController.signal.aborted) {
           yield { role: "assistant", content: "(Cancelled)" };
           return;
+        }
+
+        // 응답 중복 감지 — LLM 이 비슷한 답을 반복하면 (특히 plain text + tool_call 없음) 무한루프 방지.
+        // signature: 코드블록/특수문자/숫자 제거 후 핵심 단어만 비교 (약간 변형된 답도 감지)
+        if (!response.toolCalls?.length) {
+          const sig = makeResponseSignature(response.content || "");
+          if (sig && lastResponseSig && jaccard(sig, lastResponseSig) > 0.7) {
+            repeatedResponseCount++;
+            if (repeatedResponseCount >= 1) {
+              // 한 번만 반복돼도 종료 (이전 2회 → 1회로 더 빠르게 끊기)
+              console.warn(
+                `[AgentLoop] LLM 비슷한 응답 반복 감지 (similarity>0.7) → 종료 (iter=${i})`
+              );
+              this.conversationHistory.push({ role: "assistant", content: response.content || "" });
+              yield { role: "assistant", content: response.content || "" };
+              return;
+            }
+          } else {
+            repeatedResponseCount = 0;
+          }
+          if (sig) lastResponseSig = sig;
         }
 
         if (response.toolCalls?.length) {
@@ -460,6 +614,80 @@ export class AgentLoop {
 
         // No tool calls → final response
         const finalContent = response.content || "";
+        const userAskedForActionEarly = isActionRequest(
+          this.conversationHistory.filter((m) => m.role === "user").slice(-1)[0]?.content || ""
+        );
+
+        // 우선순위 1: write 의도 + 진짜 코드블록 → write_file 합성 (결론 시그널보다 우선)
+        // 이유: 사용자가 "X 만들어줘/수정해줘" 했고 LLM 이 코드 결과물을 코드블록으로 줬으면
+        // 마무리 멘트 ("적용할 부분이 있으면 알려주세요") 가 있어도 write_file 자동 적용해야
+        // 사용자가 직접 복붙 안 해도 됨.
+        if (
+          userAskedForActionEarly &&
+          !response.toolCalls?.length &&
+          fallbackSynthCount < MAX_FALLBACK_SYNTH
+        ) {
+          const synth = trySynthesizeWriteFile(finalContent, this.conversationHistory);
+          if (synth) {
+            fallbackSynthCount++;
+            console.log(
+              `[AgentLoop] write 의도 + 코드블록 → write_file('${synth.path}') 자동 합성 (#${fallbackSynthCount})`
+            );
+            const synthCall: ToolCall = {
+              id: `auto-write-${Date.now()}`,
+              type: "function",
+              function: {
+                name: "write_file",
+                arguments: JSON.stringify({ path: synth.path, content: synth.content }),
+              },
+            };
+            yield {
+              role: "assistant",
+              content: finalContent + `\n\n_(자동 적용 시도: ${synth.path})_`,
+            };
+            yield {
+              role: "tool_call",
+              content: `write_file(path: "${synth.path}", content: "...${synth.content.length} chars")`,
+              toolName: "write_file",
+              toolCallId: synthCall.id,
+            };
+            const result = await this.tools.execute(
+              "write_file",
+              synthCall.function.arguments
+            );
+            const output =
+              result.output.length > 8000
+                ? result.output.slice(0, 8000) + "\n... (truncated)"
+                : result.output;
+            yield {
+              role: "tool_result",
+              content: output,
+              toolName: "write_file",
+              toolCallId: synthCall.id,
+            };
+            this.conversationHistory.push({
+              role: "assistant",
+              content: finalContent,
+              tool_calls: [synthCall],
+            });
+            this.conversationHistory.push({
+              role: "tool",
+              content: output,
+              tool_call_id: synthCall.id,
+            });
+            continue;
+          }
+        }
+
+        // 우선순위 2: 결론 시그널 감지 → 즉시 final 처리
+        // LLM 이 "최종 결론", "이해하셨나요?", "더 궁금한 부분이..." 처럼 명시적으로
+        // 답변을 마무리하면 가드/fallback 발동 안 하고 그대로 종료.
+        if (isConclusionSignal(finalContent)) {
+          console.log(`[AgentLoop] 결론 시그널 감지 → final 처리 (iter=${i})`);
+          this.conversationHistory.push({ role: "assistant", content: finalContent });
+          yield { role: "assistant", content: finalContent };
+          return;
+        }
 
         // 가드: 행위만 약속하고 tool call 안 한 경우 (도돌이표 방지)
         // "리팩토링하겠습니다", "수정하겠습니다", "만들겠습니다", "I'll create/modify..." 등
@@ -507,7 +735,7 @@ export class AgentLoop {
         const readIntent =
           detectReadIntent(lastUserText) || detectReadIntent(finalContent);
 
-        if (readIntent && !response.toolCalls?.length) {
+        if (readIntent && !response.toolCalls?.length && fallbackSynthCount < MAX_FALLBACK_SYNTH) {
           const readCall = synthesizeReadCall(readIntent, this.conversationHistory);
           // 직전에 같은 tool 을 같은 인자로 합성했다면 스킵 (반복 방지)
           const lastSynth = this.conversationHistory
@@ -517,6 +745,7 @@ export class AgentLoop {
             lastSynth?.tool_calls?.[0]?.function?.name === readCall?.function.name &&
             lastSynth?.tool_calls?.[0]?.function?.arguments === readCall?.function.arguments;
           if (readCall && !dup) {
+            fallbackSynthCount++;
             console.log(
               `[AgentLoop] read 의도 감지 + tool_call 누락 → ${readCall.function.name} 자동 합성`
             );
@@ -562,7 +791,7 @@ export class AgentLoop {
 
         // Fallback C: LLM 응답에 명시적 파일명이 있고 tool_call 은 없을 때
         // (예: "style.css 의 현재 규칙을 확인하겠습니다" → style.css read_file 자동)
-        if (!response.toolCalls?.length) {
+        if (!response.toolCalls?.length && fallbackSynthCount < MAX_FALLBACK_SYNTH) {
           const mentioned = extractMentionedFiles(finalContent);
           // 같은 라운드에서 이미 합성한 파일 제외 (반복 방지)
           const recentSynthFiles = new Set<string>();
@@ -579,7 +808,8 @@ export class AgentLoop {
           const target = mentioned.find((f) => !recentSynthFiles.has(f));
 
           if (target) {
-            console.log(`[AgentLoop] 파일명 언급 + tool_call 누락 → read_file('${target}') 자동 합성`);
+            fallbackSynthCount++;
+            console.log(`[AgentLoop] 파일명 언급 + tool_call 누락 → read_file('${target}') 자동 합성 (#${fallbackSynthCount})`);
             const synthCall: ToolCall = {
               id: `auto-readfile-${Date.now()}`,
               type: "function",
@@ -631,12 +861,13 @@ export class AgentLoop {
         // (LoRA 가 multi-turn tool calling 못하는 케이스 회피)
         // → 활성 파일 컨텍스트가 있으면 write_file 자동 합성.
         // ToolExecutor 의 승인 UI 가 한 번 더 사용자에게 확인 받음.
-        if (userAskedForAction) {
+        if (userAskedForAction && fallbackSynthCount < MAX_FALLBACK_SYNTH) {
           const synthesized = trySynthesizeWriteFile(
             finalContent,
             this.conversationHistory
           );
           if (synthesized) {
+            fallbackSynthCount++;
             console.log(
               "[AgentLoop] tool_call 누락 — 코드블록 → write_file 자동 합성:",
               synthesized.path

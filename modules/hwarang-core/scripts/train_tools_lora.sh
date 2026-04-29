@@ -10,6 +10,9 @@ set -euo pipefail
 # ============================================================
 DATA_DIR=${DATA_DIR:-./data/sft}
 OUTPUT=${OUTPUT:-./lora_adapters/hwarang-general-v2}
+# vLLM 이 서빙 중인 base 와 동일해야 LoRA 호환됨.
+# hwarang-v5-awq 가 우리가 만든 base — 같은 weight 위에서 학습.
+# qlora_qwen.py 가 AWQ/GPTQ 자동 감지 (bnb 미적용).
 BASE=${BASE:-/mnt/nvme2/hwarang/models/hwarang-v5-awq}
 LORA_R=${LORA_R:-64}
 LORA_ALPHA=${LORA_ALPHA:-128}
@@ -46,7 +49,10 @@ echo "[2/5] 데이터 합치기"
 COMBINED="$DATA_DIR/lora_v2_combined.jsonl"
 > "$COMBINED"
 
+# 이전 학습 데이터 (catastrophic forgetting 방지용 핵심)
+# + 신규 tools/coding 데이터 + multi-turn
 for f in \
+    "$DATA_DIR/hwarang_all_v2.jsonl" \
     "$DATA_DIR/tools_filesystem.jsonl" \
     "$DATA_DIR/tools_complex.jsonl" \
     "$DATA_DIR/tools_shell_git.jsonl" \
@@ -59,6 +65,19 @@ for f in \
         echo "  스킵: $f (없음)"
     fi
 done
+
+# 사용자가 EXTRA_DATA 로 추가 파일 지정 가능 (콤마 구분)
+if [ -n "${EXTRA_DATA:-}" ]; then
+    IFS=',' read -ra EXTRA_FILES <<< "$EXTRA_DATA"
+    for f in "${EXTRA_FILES[@]}"; do
+        if [ -f "$f" ]; then
+            cat "$f" >> "$COMBINED"
+            echo "  추가 (EXTRA): $f ($(wc -l < "$f") 줄)"
+        else
+            echo "  스킵 (EXTRA): $f (없음)"
+        fi
+    done
+fi
 
 # ============================================================
 # 3. 셔플
