@@ -797,6 +797,28 @@ export async function POST(request: NextRequest) {
   const startedAt = Date.now();
   let apiResponse: Response;
 
+  // tools 가 있을 때: vLLM hermes parser + LoRA 가 multi-turn 에서 tool_call 누락하는
+  // 알려진 패턴이 있어 system prompt 마지막에 강제 enforcement 추가.
+  // 단 이미 추가된 경우 중복 방지.
+  if (body.tools?.length && Array.isArray(body.messages)) {
+    const ENFORCEMENT_TAG = "[CRITICAL_TOOL_USE_ENFORCEMENT]";
+    const enforcement =
+      `\n\n${ENFORCEMENT_TAG} You have function/tool access. ` +
+      "When the user requests ANY action (create/edit/read/run/list/search/...), you MUST emit a tool_call in your VERY FIRST response. " +
+      "Do NOT describe or promise — invoke the tool directly. " +
+      "Replies that only describe intent without tool_call will be rejected.";
+
+    const sysIdx = body.messages.findIndex((m: any) => m.role === "system");
+    if (sysIdx >= 0) {
+      const c = body.messages[sysIdx].content || "";
+      if (!c.includes(ENFORCEMENT_TAG)) {
+        body.messages[sysIdx].content = c + enforcement;
+      }
+    } else {
+      body.messages.unshift({ role: "system", content: enforcement.trimStart() });
+    }
+  }
+
   // 디버그: vLLM으로 가는 요청 로그
   console.log(`[chat] → vLLM ${servingEndpoint}`, {
     model: body.model,

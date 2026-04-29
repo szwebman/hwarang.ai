@@ -256,17 +256,32 @@ export class AgentLoop {
           this.conversationHistory.filter((m) => m.role === "user").slice(-1)[0]?.content || ""
         );
 
-        if (isActionPromise && userAskedForAction && i === 0) {
-          // 한 번 더 강제로 tool call 유도
-          console.log("[AgentLoop] 행위 약속만 감지 → tool call 강제 재시도");
-          this.conversationHistory.push({ role: "assistant", content: finalContent });
-          this.conversationHistory.push({
-            role: "user",
-            content:
-              "방금 답변에서 작업을 약속만 하고 실제로는 tool 을 호출하지 않았어요. " +
-              "지금 즉시 적절한 tool (read_file / edit_file / write_file 등) 을 호출해서 작업을 실제로 수행하세요. " +
-              "마크다운 코드 블록으로 명령어만 출력하지 말고, 반드시 tool call 을 사용하세요.",
-          });
+        if (isActionPromise && userAskedForAction && i < 2) {
+          // 한 번 더 강제로 tool call 유도.
+          //
+          // 핵심: 행위 약속 응답은 conversationHistory 에 절대 푸시하지 않는다.
+          // 이유: vLLM hermes parser + LoRA 조합에서 multi-turn 시 모델이
+          // "직전 assistant 가 plain text 였다 → 나도 plain text" 라고 in-context 학습해서
+          // 다음 응답도 tool_call 없이 plain text 만 생성하는 패턴이 관찰됨.
+          // 약속 응답을 history 에서 빼면 LLM 은 깨끗한 컨텍스트로 다시 시도함.
+          console.log(`[AgentLoop] 행위 약속만 감지 (iter=${i}) → history 미오염 후 강제 재시도`);
+
+          // 마지막 user 메시지에 강한 enforcement 추가 (1회만)
+          const lastIdx = this.conversationHistory.length - 1;
+          const ENFORCEMENT_TAG = "[CRITICAL_TOOL_USE]";
+          if (
+            lastIdx >= 0 &&
+            this.conversationHistory[lastIdx].role === "user" &&
+            !this.conversationHistory[lastIdx].content.includes(ENFORCEMENT_TAG)
+          ) {
+            this.conversationHistory[lastIdx].content +=
+              `\n\n${ENFORCEMENT_TAG} 위 요청은 반드시 tool 호출로 수행하세요. ` +
+              "설명/약속만 하지 말고 첫 응답 토큰부터 즉시 tool_call (read_file/write_file/edit_file/list_directory/run_command 등) 을 만드세요. " +
+              "도구 호출 없는 답변은 거부됩니다.";
+          }
+
+          // UX: 사용자에게는 약속 메시지를 한 번 보여줌 (작업 중이라는 시그널)
+          // 단 history 에는 추가하지 않음 — 다음 호출에서 LLM 이 깨끗한 컨텍스트 받게.
           yield { role: "assistant", content: finalContent };
           continue;
         }
