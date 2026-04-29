@@ -180,7 +180,9 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // 플랜 제한 체크
+  // 플랜 제한 체크 — 플랜 미달이면 같은 category 의 free-tier 모델로 자동 폴백
+  // (사용자가 명시적으로 선택한 모델이 plan 미달이어도 403 던지지 않고 답변은 줌)
+  let planFallbackInfo: { from: string; to: string; reason: string } | null = null;
   if (aiModel.minPlan) {
     const planTiers: Record<string, number> = {
       free: 0, starter: 1, pro: 2, business: 3, enterprise: 4,
@@ -188,15 +190,50 @@ export async function POST(request: NextRequest) {
     const userTier = planTiers[user.plan?.name || "free"] ?? 0;
     const requiredTier = planTiers[aiModel.minPlan] ?? 0;
     if (userTier < requiredTier) {
-      return Response.json(
-        {
-          error: `이 모델은 ${aiModel.minPlan.toUpperCase()} 이상 플랜에서만 사용 가능합니다. 플랜을 업그레이드해 주세요.`,
-          code: "PLAN_UPGRADE_REQUIRED",
-          upgradeRequired: aiModel.minPlan,
-          detail: `userTier=${user.plan?.name || "free"} required=${aiModel.minPlan}`,
+      const originalName = aiModel.name;
+      const originalMinPlan = aiModel.minPlan;
+
+      // 같은 category 의 plan-호환 모델 찾기
+      const compatible = await prisma.aIModel.findFirst({
+        where: {
+          isActive: true,
+          isPublic: true,
+          category: aiModel.category,
+          OR: [{ minPlan: null }, { minPlan: "free" }],
         },
-        { status: 403 }
+        orderBy: [{ isDomainDefault: "desc" }, { sortOrder: "asc" }],
+      }) || await prisma.aIModel.findFirst({
+        // category 안에 호환 모델이 없으면 전체에서 default 우선
+        where: {
+          isActive: true,
+          isPublic: true,
+          OR: [{ minPlan: null }, { minPlan: "free" }],
+        },
+        orderBy: [{ isDefault: "desc" }, { sortOrder: "asc" }],
+      });
+
+      if (!compatible) {
+        // 정말로 free 호환 모델이 하나도 없을 때만 403
+        return Response.json(
+          {
+            error: `이 모델은 ${originalMinPlan.toUpperCase()} 이상 플랜에서만 사용 가능합니다. 플랜을 업그레이드해 주세요.`,
+            code: "PLAN_UPGRADE_REQUIRED",
+            upgradeRequired: originalMinPlan,
+            detail: `userTier=${user.plan?.name || "free"} required=${originalMinPlan}`,
+          },
+          { status: 403 }
+        );
+      }
+
+      console.log(
+        `[plan-fallback] ${originalName} (${originalMinPlan}) → ${compatible.name} (free) for user ${userId}`
       );
+      aiModel = compatible;
+      planFallbackInfo = {
+        from: originalName,
+        to: compatible.name,
+        reason: `plan_mismatch (${user.plan?.name || "free"} < ${originalMinPlan})`,
+      };
     }
   }
 
@@ -1006,6 +1043,13 @@ export async function POST(request: NextRequest) {
         "X-Risk-Level": alignment.domainInfo.riskLevel,
         "X-Conversation-Id": conversationId || "",
         ...(visionMeta ? { "X-Vision-Used": "1" } : {}),
+        ...(planFallbackInfo
+          ? {
+              "X-Plan-Fallback-From": planFallbackInfo.from,
+              "X-Plan-Fallback-To": planFallbackInfo.to,
+              "X-Plan-Fallback-Reason": planFallbackInfo.reason,
+            }
+          : {}),
       },
     });
   }
