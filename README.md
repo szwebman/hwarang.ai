@@ -122,36 +122,52 @@ corepack enable && corepack prepare pnpm@latest --activate
 
 ## 빠른 시작
 
-### 1단계: 의존성 설치
+### 통합 배포 (권장)
 
 ```bash
 # 저장소 클론
 git clone <repo-url> hwarang && cd hwarang
 
-# Python 모듈 설치 (순서 중요)
-cd packages/hwarang-shared && poetry install && cd ../..
-cd modules/hwarang-core && poetry install && cd ../..
-cd modules/hwarang-api && poetry install && cd ../..
-cd modules/hwarang-cli && poetry install && cd ../..
+# .env 작성 (.env.example 복사 후 키 채움)
+cp modules/hwarang-api/.env.example modules/hwarang-api/.env
+nano modules/hwarang-api/.env  # DATABASE_URL + 1차 출처 API 키 등
 
-# 웹 UI 설치
-cd modules/hwarang-web && pnpm install && cd ../..
+# 통합 배포 (14 단계 자동)
+bash scripts/deploy.sh
 ```
 
-### 2단계: 테스트 실행
+자세한 단계별 가이드: **[docs/SETUP.md](docs/SETUP.md)**
+
+### 부분 실행
 
 ```bash
-# 코어 모듈 테스트 (모델, 토크나이저, 추론)
-cd modules/hwarang-core && poetry run pytest -v && cd ../..
-
-# API 서버 테스트
-cd modules/hwarang-api && poetry run pytest -v && cd ../..
-
-# CLI 도구 테스트
-cd modules/hwarang-cli && poetry run pytest -v && cd ../..
+bash scripts/deploy.sh --only 5,11    # DB 동기화 + FastAPI 시작만
+bash scripts/deploy.sh --from 9       # 9 단계 (vLLM) 부터
+bash scripts/deploy.sh --skip-vllm    # GPU 없는 환경
 ```
 
-### 3단계: 외부 API로 바로 사용하기 (학습 없이)
+### 14 배포 단계
+
+| # | 단계 | 소요 |
+|---|---|---|
+| 1 | 환경 검증 (GPU/Python/Docker) | 5초 |
+| 2 | 시스템 디렉토리 생성 | 5초 |
+| 3 | Python 의존성 (Poetry) | 2~5분 |
+| 4 | Node 의존성 + Prisma 클라이언트 | 1~3분 |
+| 5 | DB 스키마 동기화 | 30초 |
+| 6 | Docker 샌드박스 이미지 4종 | 3~5분 |
+| 7 | AI 모델 다운로드 (Qwen2.5-VL 등) | 10~30분 |
+| 8 | TrustedSource 시드 (한국 71개) | 30초 |
+| 9 | vLLM 코더 (RTX 5090, 포트 8001) | 90초 |
+| 10 | vLLM 비전 (RTX 3090, 포트 8002) | 60초 |
+| 11 | FastAPI + 자동 cron 16개 | 즉시 |
+| 12 | Next.js 빌드 + 시작 (웹 + 관리자) | 1~3분 |
+| 13 | 헬스체크 + 검증 | 10초 |
+| 14 | 초기 데이터 수집 트리거 | 즉시 |
+
+### 외부 API로 사용 (모델 안 띄우고)
+
+### 외부 API 사용 (학습 없이)
 
 모델을 직접 학습하지 않아도 OpenAI 또는 Claude API로 CLI와 웹 UI를 바로 사용할 수 있습니다.
 
@@ -165,6 +181,34 @@ poetry run hwarang chat --provider openai --model gpt-4o
 export ANTHROPIC_API_KEY="sk-ant-..."
 poetry run hwarang chat --provider anthropic --model claude-sonnet-4-6
 ```
+
+---
+
+## 자기진화 시스템 (HSEE)
+
+화랑은 사용할수록 똑똑해집니다 — 자동 cron 16개가 백그라운드에서:
+
+- **호기심 사이클** — 자기 약점 인식 → TrustedSource 표적 크롤 → 통합 학습
+- **인과/가설 엔진** — 사실 패턴 → 가설 → 검증 → 사실 승격
+- **Self-Adversarial** — 매일 자기 답변 공격 → 약점 학습 데이터로
+- **HFL Code Round** — 사용자 RLHF 1000건 누적 → 자동 라운드 → 품질 검증 → 채택/롤백
+- **arxiv 매일 수집** — 신규 AI 논문 → 한국어 요약 → 화랑 적용 GrowthDecision
+- **이미지 → 코드** — Qwen2.5-VL 분석 → React/Tailwind 코드 (별도 RTX 3090)
+
+자세한 동작: [docs/SETUP.md#자동-실행--16-cron-잡](docs/SETUP.md)
+
+## 핵심 차별화
+
+| 영역 | 화랑이 가진 것 |
+|---|---|
+| **한국 1차 출처** | 법제처/통계청/한국은행/식약처/기상청/국세청 6개 API 직접 통합 |
+| **신뢰 출처 71개** | 정부/언론/학술/코딩/디자인 화이트리스트 + 신뢰도 가중 |
+| **HFL 분산 학습** | 사용자 GPU 가 LoRA 학습 (특허) |
+| **HLKM 시간 인식** | 삭제 없는 누적 + valid_from/to + 모순 감지 (특허) |
+| **Vision-to-Code** | 이미지 → React 코드 (v0.dev 한국형) |
+| **자기진화** | cron 16개 자동 — 사용자 없어도 학습 |
+| **화이트리스트 크롤** | 무차별 크롤 X — 가짜뉴스 면역 |
+| **Docker 샌드박스** | 코드 실행 격리 (Python/JS/TS/Rust/Go) |
 
 ---
 
