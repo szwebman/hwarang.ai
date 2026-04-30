@@ -41,10 +41,14 @@ export function MessageInput({
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>([]);
   const [isComposing, setIsComposing] = useState(false);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
+  // 음성 입력 모드 — "prefill"(텍스트 채우기 후 사용자가 전송) | "auto"(즉시 전송)
+  const [voiceMode, setVoiceMode] = useState<"prefill" | "auto">("prefill");
+  const [voiceLoading, setVoiceLoading] = useState(false);
   const lastSendAtRef = useRef(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  const voiceInputRef = useRef<HTMLInputElement>(null);
 
   // 컴포넌트 unmount 시 ObjectURL 해제 (메모리 누수 방지)
   useEffect(() => {
@@ -116,6 +120,76 @@ export function MessageInput({
 
   const handleImageSelect = () => {
     imageInputRef.current?.click();
+  };
+
+  const handleVoiceSelect = () => {
+    if (voiceLoading) return;
+    voiceInputRef.current?.click();
+  };
+
+  const handleVoiceFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    // 50MB 제한
+    if (file.size > 50 * 1024 * 1024) {
+      alert("음성 파일이 너무 큽니다 (최대 50MB)");
+      e.target.value = "";
+      return;
+    }
+
+    setVoiceLoading(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("language", "ko");
+
+      // 화랑웹 API base 는 같은 origin (NextAuth 세션)
+      // 또는 process.env.NEXT_PUBLIC_HWARANG_API_URL 우선
+      const apiBase =
+        typeof window !== "undefined"
+          ? (process.env.NEXT_PUBLIC_HWARANG_API_URL || "")
+          : "";
+      const url = `${apiBase}/api/audio/transcribe`;
+
+      const resp = await fetch(url, {
+        method: "POST",
+        body: formData,
+        credentials: "include",
+      });
+
+      if (!resp.ok) {
+        const errText = await resp.text().catch(() => "");
+        let msg = `요청 실패 (HTTP ${resp.status})`;
+        try {
+          const j = JSON.parse(errText);
+          msg = j.error || j.detail || j.message || msg;
+        } catch { /* keep default */ }
+        alert("음성 변환 실패: " + msg);
+        return;
+      }
+
+      const data = await resp.json();
+      const text = (data.text || "").trim();
+      if (!text) {
+        alert("음성에서 텍스트를 인식하지 못했습니다.");
+        return;
+      }
+
+      if (voiceMode === "auto") {
+        // 자동 전송 — onSend 직접 호출
+        onSend(text, undefined, undefined);
+        setInput("");
+      } else {
+        // prefill — 입력창에 채우고 사용자 확인 대기
+        setInput(text);
+        setTimeout(() => textareaRef.current?.focus(), 0);
+      }
+    } catch (err: any) {
+      alert("음성 변환 실패: " + (err?.message || err));
+    } finally {
+      setVoiceLoading(false);
+      e.target.value = ""; // 같은 파일 다시 선택 가능
+    }
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -346,6 +420,55 @@ export function MessageInput({
             <circle cx="8.5" cy="8.5" r="1.5" />
             <polyline points="21 15 16 10 5 21" />
           </svg>
+        </button>
+
+        {/* 숨겨진 음성 파일 input */}
+        <input
+          ref={voiceInputRef}
+          type="file"
+          accept="audio/*,.mp3,.wav,.m4a,.webm,.ogg,.flac,.aac"
+          onChange={handleVoiceFile}
+          className="hidden"
+        />
+
+        {/* 음성 모드 셀렉트 + 음성 버튼 */}
+        <select
+          value={voiceMode}
+          onChange={(e) => setVoiceMode(e.target.value as "prefill" | "auto")}
+          disabled={disabled || voiceLoading}
+          title="음성 인식 모드"
+          className="text-xs rounded-md border px-1 py-0.5 self-end disabled:opacity-30 cursor-pointer"
+          style={{
+            borderColor: "var(--border)",
+            background: "var(--background)",
+            color: "var(--foreground)",
+            marginBottom: "2px",
+            outline: "none",
+          }}
+        >
+          <option value="prefill">🎤 채우기</option>
+          <option value="auto">🎤 자동전송</option>
+        </select>
+        <button
+          onClick={handleVoiceSelect}
+          disabled={disabled || voiceLoading}
+          className="p-1.5 rounded-lg hover:bg-[var(--muted)] transition-colors shrink-0 self-end disabled:opacity-30"
+          style={{ color: voiceLoading ? "var(--primary)" : "var(--muted-foreground)", marginBottom: "2px" }}
+          title="음성 파일 업로드 (mp3/wav/m4a/webm/ogg/flac, 최대 50MB)"
+          type="button"
+        >
+          {voiceLoading ? (
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="animate-spin">
+              <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+            </svg>
+          ) : (
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+              <line x1="12" y1="19" x2="12" y2="23" />
+              <line x1="8" y1="23" x2="16" y2="23" />
+            </svg>
+          )}
         </button>
 
         {/* Textarea */}

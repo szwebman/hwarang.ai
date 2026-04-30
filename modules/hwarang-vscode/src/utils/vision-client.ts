@@ -24,8 +24,29 @@ export interface VisionResponse {
   detectedComponents?: string[];
 }
 
-const DEFAULT_INSTRUCTION =
-  "이미지를 자세히 분석하고 코드/UI 컴포넌트로 변환할 수 있게 묘사해라.";
+const DEFAULT_INSTRUCTION = `이미지를 multimodal 로 정확히 분석해라. 다음 두 가지 모두 포함:
+
+1. 시각 요소 (Visual)
+   - UI 컴포넌트 (버튼/카드/입력창/목록 등)
+   - 레이아웃 (그리드/플렉스/위치)
+   - 색상 코드 (가능하면 hex)
+   - 폰트/타이포그래피
+   - 다이어그램/도형/차트 의미
+
+2. 텍스트 추출 (OCR — 정확하게 원문 그대로)
+   - 이미지 안 모든 글자
+   - 코드 스크린샷이면 정확한 들여쓰기 + 기호 (괄호, 콜론, 등) 보존
+   - 에러 메시지/스택 트레이스 원본 유지
+   - 한글/영문 혼용도 정확히
+
+출력 형식:
+[시각 분석]
+...
+
+[텍스트 추출]
+\`\`\`
+(이미지 안 텍스트 원문 그대로)
+\`\`\``;
 
 /**
  * 화랑 Vision API client. apiUrl 은 게이트웨이 base URL (예: https://hwarang.ai),

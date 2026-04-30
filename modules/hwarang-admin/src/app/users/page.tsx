@@ -58,9 +58,24 @@ export default function UsersPage() {
   const [adjustAmount, setAdjustAmount] = useState("");
   const [adjustReason, setAdjustReason] = useState("");
 
+  // 플랜 목록 (변경 dropdown 용)
+  const [plans, setPlans] = useState<{ id: string; name: string; displayName: string }[]>([]);
+
   useEffect(() => {
     fetchUsers();
   }, [search, planFilter]);
+
+  useEffect(() => {
+    // 플랜 목록 1회 로드
+    fetch(`/api/plans`, { headers: authHeaders() })
+      .then((r) => r.json())
+      .then((data) => {
+        if (Array.isArray(data)) {
+          setPlans(data.map((p: any) => ({ id: p.id, name: p.name, displayName: p.displayName })));
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   const fetchUsers = async () => {
     setLoading(true);
@@ -134,6 +149,25 @@ export default function UsersPage() {
       fetchUsers();
       if (detail?.id === userId) openDetail(userId);
     } catch {}
+  };
+
+  const handleChangePlan = async (userId: string, planId: string | null) => {
+    try {
+      const resp = await fetch(`/api/users/${userId}`, {
+        method: "PUT",
+        headers: authHeaders(),
+        body: JSON.stringify({ planId }),
+      });
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({}));
+        alert("플랜 변경 실패: " + (data.error || resp.statusText));
+        return;
+      }
+      fetchUsers();
+      if (detail?.id === userId) openDetail(userId);
+    } catch (e: any) {
+      alert("플랜 변경 실패: " + (e?.message || e));
+    }
   };
 
   const handleAdjustTokens = async () => {
@@ -312,7 +346,19 @@ export default function UsersPage() {
                 <div className="grid grid-cols-2 gap-3 mb-5">
                   <div className="rounded-xl p-3" style={{ background: "var(--muted)" }}>
                     <div className="text-xs" style={{ color: "var(--muted-foreground)" }}>플랜</div>
-                    <div className="text-sm font-semibold mt-0.5">{detail.plan?.displayName || "Free"}</div>
+                    <select
+                      className="text-sm font-semibold mt-0.5 w-full bg-transparent outline-none cursor-pointer"
+                      style={{ background: "transparent", color: "var(--foreground)" }}
+                      value={detail.plan?.id || ""}
+                      onChange={(e) => handleChangePlan(detail.id, e.target.value || null)}
+                    >
+                      <option value="">Free (플랜 없음)</option>
+                      {plans.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.displayName} ({p.name})
+                        </option>
+                      ))}
+                    </select>
                   </div>
                   <div className="rounded-xl p-3" style={{ background: "var(--muted)" }}>
                     <div className="text-xs" style={{ color: "var(--muted-foreground)" }}>역할</div>

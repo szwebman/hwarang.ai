@@ -68,6 +68,27 @@ interface Config {
   maxTokens: number;
 }
 
+/**
+ * 서버 에러 응답에서 사용자 친화적 메시지 추출.
+ * `{"error":"...","code":"...","detail":"..."}` 형식 → error 필드만 사용.
+ * 파싱 실패 시 raw 텍스트 일부만 표시.
+ */
+function extractErrorMessage(errText: string, fallback: string): string {
+  if (!errText) return fallback;
+  try {
+    const obj = JSON.parse(errText);
+    if (obj && typeof obj === "object") {
+      // 우선 error 필드, 없으면 message, 없으면 detail
+      const msg = obj.error || obj.message || obj.detail;
+      if (typeof msg === "string" && msg.trim()) return msg.trim();
+    }
+  } catch {
+    /* JSON 아님 — fall through */
+  }
+  // JSON 파싱 실패 시 첫 200자만
+  return errText.length > 200 ? errText.slice(0, 200) + "..." : errText;
+}
+
 export class LLMClient {
   private config: Config;
   private abortController: AbortController | null = null;
@@ -201,7 +222,7 @@ export class LLMClient {
 
     if (!resp.ok) {
       const errText = await resp.text();
-      throw new Error(`Hwarang API ${resp.status}: ${errText}`);
+      throw new Error(extractErrorMessage(errText, `요청 실패 (HTTP ${resp.status})`));
     }
 
     const data = (await resp.json()) as any;
@@ -246,7 +267,7 @@ export class LLMClient {
 
     if (!resp.ok) {
       const errText = await resp.text();
-      throw new Error(`Hwarang API ${resp.status}: ${errText}`);
+      throw new Error(extractErrorMessage(errText, `요청 실패 (HTTP ${resp.status})`));
     }
 
     yield* this.parseSSEStream(resp, signal);
@@ -493,7 +514,7 @@ export class LLMClient {
     });
     if (!resp.ok) {
       const errText = await resp.text();
-      throw new Error(`Hwarang API ${resp.status}: ${errText}`);
+      throw new Error(extractErrorMessage(errText, `요청 실패 (HTTP ${resp.status})`));
     }
 
     const data = (await resp.json()) as any;
@@ -564,7 +585,7 @@ export class LLMClient {
     });
     if (!resp.ok) {
       const errText = await resp.text();
-      throw new Error(`Hwarang API ${resp.status}: ${errText}`);
+      throw new Error(extractErrorMessage(errText, `요청 실패 (HTTP ${resp.status})`));
     }
     const data = (await resp.json()) as any;
     const meta = data._meta || {};

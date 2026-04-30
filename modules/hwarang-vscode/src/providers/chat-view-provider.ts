@@ -464,6 +464,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           // agent-loop 가 setWebview 로 주입한 onDidReceiveMessage 로 직접 수신함.
           // 여기서는 별도 처리 불필요 — case 만 두어 unknown type 경고 방지.
           break;
+        case "transcribeAudio":
+          await this.handleTranscribeAudio(message);
+          break;
       }
     });
 
@@ -500,6 +503,77 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.usageRefreshTimer = setInterval(() => {
       this.sendUsageToWebview();
     }, 30_000);
+  }
+
+  // ============================================================
+  // 음성 STT — webview 에서 받은 base64 음성 → /api/audio/transcribe
+  // ============================================================
+
+  private async handleTranscribeAudio(msg: {
+    fileName?: string;
+    fileType?: string;
+    base64?: string;
+    mode?: string;
+  }) {
+    const webview = this.webviewView?.webview;
+    if (!webview) return;
+    try {
+      if (!msg.base64) {
+        throw new Error("음성 데이터가 비어있습니다");
+      }
+      const apiUrl =
+        vscode.workspace.getConfiguration("hwarang").get<string>("apiUrl") ||
+        "https://hwarang.ai";
+      const apiKey = this.authManager.apiKey || "";
+
+      // base64 → Uint8Array → Blob (Node 18+ 글로벌 FormData/Blob 사용)
+      const buf = Buffer.from(msg.base64, "base64");
+      const formData = new FormData();
+      formData.append(
+        "file",
+        new Blob([buf], { type: msg.fileType || "audio/mpeg" }),
+        msg.fileName || "audio.mp3"
+      );
+      formData.append("language", "ko");
+
+      const headers: Record<string, string> = {};
+      if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
+
+      const resp = await fetch(`${apiUrl.replace(/\/$/, "")}/api/audio/transcribe`, {
+        method: "POST",
+        headers,
+        body: formData,
+      });
+
+      if (!resp.ok) {
+        const errText = await resp.text().catch(() => "");
+        let parsed = errText;
+        try {
+          const obj = JSON.parse(errText);
+          parsed = obj?.error || obj?.message || obj?.detail || errText;
+        } catch {
+          /* not JSON */
+        }
+        throw new Error(parsed || `HTTP ${resp.status}`);
+      }
+
+      const data = (await resp.json()) as {
+        text?: string;
+        language?: string;
+      };
+      webview.postMessage({
+        type: "transcribeResult",
+        text: data.text || "",
+        language: data.language,
+        mode: msg.mode || "prefill",
+      });
+    } catch (e: any) {
+      webview.postMessage({
+        type: "transcribeResult",
+        error: e?.message || String(e),
+        mode: msg.mode || "prefill",
+      });
+    }
   }
 
   // ============================================================
@@ -1305,6 +1379,8 @@ textarea {
   margin: 0;
   vertical-align: middle;
   display: block;
+  box-sizing: border-box;
+  min-height: 28px;
 }
 textarea::placeholder {
   color: rgba(255,255,255,0.25);
@@ -1569,6 +1645,9 @@ textarea::placeholder {
   justify-content: center;
   z-index: 1000;
   padding: 24px;
+}
+.batch-modal-backdrop[hidden] {
+  display: none !important;
 }
 .batch-modal {
   background: var(--vscode-editor-background);
@@ -1840,15 +1919,17 @@ textarea::placeholder {
         <option value="standard" selected>🛡️ 표준</option>
         <option value="strict">🔒 엄격</option>
       </select>
-      <label id="vision-pre-label" title="이미지를 메인 chat 직전에 Vision API 로 묘사 → 코드 변환 정확도 향상" style="display:inline-flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;padding:0 6px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;height:24px;">
-        <input type="checkbox" id="vision-pre-check" style="margin:0;">
-        <span>Vision 사전분석</span>
-      </label>
+      <select id="voice-mode" title="음성 입력 모드">
+        <option value="prefill" selected>🎤 채우기 (확인 후 전송)</option>
+        <option value="auto">🎤 자동 전송</option>
+      </select>
+      <button id="voice-btn" title="음성 파일 업로드 (mp3/wav/m4a/webm/ogg/flac)" type="button" onclick="document.getElementById('voice-input').click()">🎤</button>
       <span class="spacer"></span>
       <span id="usage-display" class="usage-chip empty" title="잔여 / 일일 한도"></span>
     </div>
 
     <input type="file" id="image-input" accept="image/*" multiple style="display:none;">
+    <input type="file" id="voice-input" accept="audio/*,.mp3,.wav,.m4a,.webm,.ogg,.flac" style="display:none;">
 
     <div class="input-hint">Enter 전송 · Shift+Enter 줄바꿈 · 이미지 붙여넣기/드래그 지원</div>
   </div>
@@ -1866,7 +1947,59 @@ const $imagePreview = document.getElementById('image-preview');
 const $modelSelect = document.getElementById('model-select');
 const $safetySelect = document.getElementById('safety-select');
 const $usageDisplay = document.getElementById('usage-display');
-const $visionPre = document.getElementById('vision-pre-check');
+const $voiceBtn = document.getElementById('voice-btn');
+const $voiceInput = document.getElementById('voice-input');
+const $voiceMode = document.getElementById('voice-mode');
+const ORIGINAL_INPUT_PLACEHOLDER = $input.placeholder;
+
+// ======== 음성 입력 (STT) ========
+
+if ($voiceInput) {
+  $voiceInput.addEventListener('change', async (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+
+    // 50MB 제한 (서버와 동일)
+    if (f.size > 50 * 1024 * 1024) {
+      showToast('음성 파일이 너무 큽니다 (최대 50MB)', 'failed');
+      $voiceInput.value = '';
+      return;
+    }
+
+    try {
+      // ArrayBuffer → base64 (Uint8Array 청크로 변환, 큰 파일에서 stack overflow 방지)
+      const buf = await f.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let bin = '';
+      const CHUNK = 0x8000;
+      for (let i = 0; i < bytes.length; i += CHUNK) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+      }
+      const base64 = btoa(bin);
+
+      vscode.postMessage({
+        type: 'transcribeAudio',
+        fileName: f.name,
+        fileType: f.type || 'audio/mpeg',
+        base64,
+        mode: $voiceMode ? $voiceMode.value : 'prefill',
+      });
+
+      // 같은 파일 재선택 가능하도록 reset
+      $voiceInput.value = '';
+
+      // UI: 변환 중 표시
+      $input.placeholder = '음성 변환 중...';
+      $input.disabled = true;
+      if ($voiceBtn) $voiceBtn.disabled = true;
+    } catch (err) {
+      showToast('음성 파일 읽기 실패: ' + (err && err.message ? err.message : err), 'failed');
+      $input.disabled = false;
+      $input.placeholder = ORIGINAL_INPUT_PLACEHOLDER;
+      if ($voiceBtn) $voiceBtn.disabled = false;
+    }
+  });
+}
 
 let busy = false;
 let curAI = null;       // 현재 AI 메시지의 .msg-text
@@ -1890,7 +2023,8 @@ function send() {
   // 옵션바 값
   const model = $modelSelect.value;
   const safety = $safetySelect.value;
-  const visionPreprocess = !!($visionPre && $visionPre.checked);
+  // 이미지 첨부 시 자동으로 Vision 사전분석 (사용자가 별도 체크할 필요 없음)
+  const visionPreprocess = hasImages;
   // 이미지 동봉 또는 모델/안전 명시 시 → directChat (옵션 모드/비전)
   const useDirect =
     hasImages || (model && model.length > 0) || (safety && safety !== 'standard');
@@ -1910,7 +2044,7 @@ function send() {
     images: attachedImages,
     model: useDirect ? model : '',
     safety: useDirect ? safety : '',
-    visionPreprocess: visionPreprocess && hasImages,
+    visionPreprocess,
   });
   attachedImages = [];
   renderImagePreview();
@@ -1950,8 +2084,13 @@ function onKey(e) {
 }
 
 function onInput(el) {
-  el.style.height = 'auto';
-  el.style.height = Math.min(el.scrollHeight, 140) + 'px';
+  // 비어있으면 CSS 기본 (min-height 28px = 1줄) 으로 reset
+  if (!el.value) {
+    el.style.height = '';
+  } else {
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 140) + 'px';
+  }
 
   const v = el.value;
   if (v.startsWith('/') && !v.includes(' ')) {
@@ -2573,6 +2712,31 @@ window.addEventListener('message', e => {
     case 'setWorkspace':
       const $ws = document.getElementById('workspaceName');
       if ($ws) $ws.textContent = m.name || '';
+      break;
+
+    case 'transcribeResult':
+      // STT 결과 — UI 복원 후 모드에 따라 prefill / auto 전송
+      $input.disabled = false;
+      $input.placeholder = ORIGINAL_INPUT_PLACEHOLDER;
+      if ($voiceBtn) $voiceBtn.disabled = false;
+      if (m.error) {
+        showToast('음성 변환 실패: ' + m.error, 'failed');
+        break;
+      }
+      const sttText = (m.text || '').trim();
+      if (!sttText) {
+        showToast('음성에서 텍스트를 추출하지 못했습니다', 'failed');
+        break;
+      }
+      if (m.mode === 'auto') {
+        $input.value = sttText;
+        send();
+      } else {
+        // 채우기 모드: 입력창에 표시 후 사용자 확인 대기
+        $input.value = sttText;
+        $input.focus();
+        onInput($input);  // textarea height auto-resize
+      }
       break;
 
     case 'restoreMessage':

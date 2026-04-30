@@ -19,6 +19,7 @@ from hwarang_api.grid.sharder import SHARD_DIR
 from hwarang_api.routers import (
     active_inference,
     admin,
+    audio,
     chat,
     cluster,
     cognitive,
@@ -170,6 +171,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(research.feedback_router, tags=["CodeFeedback"])
     app.include_router(realtime.router, tags=["Realtime"])
     app.include_router(vision.router, tags=["Vision/VLM"])
+    app.include_router(audio.router, tags=["Audio/STT"])
     app.include_router(options.router, tags=["Options"])
     app.include_router(cognitive.router, tags=["Cognitive"])
     app.include_router(self_modify.router, tags=["SelfModify"])

@@ -24,6 +24,8 @@ pypdf = "^4.0"             # arxiv PDF 텍스트 추출 (paper_parser)
 # P1 외부 연동
 pytesseract = "^0.3.10"   # 자격증 OCR (system tesseract 필요)
 pillow = "^10.0"          # OCR 이미지 로딩
+# 음성 STT — local Whisper (한국어 + 영어 혼용, OpenAI API 미사용)
+faster-whisper = "^1.0.0"
 web3 = {version = "^6.20", optional = true}  # PoH on-chain 조회 + HWR coin mint/anchor (선택)
 hwarang-shared = {path = "../../packages/hwarang-shared", develop = true}
 hwarang-core = {path = "../hwarang-core", develop = true}
