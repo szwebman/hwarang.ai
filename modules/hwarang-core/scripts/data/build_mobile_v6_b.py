@@ -525,7 +525,7 @@ SCENARIO_M4 = [gen_compose(random.choice(COMPOSE_PATTERNS)) for _ in range(350)]
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--out",
+        "--output",
         default="data/sft/mobile_v6_b.jsonl",
         help="출력 jsonl 경로 (cwd 기준)",
     )
@@ -534,15 +534,15 @@ def main():
     all_data = SCENARIO_M3 + SCENARIO_M4
     assert len(all_data) == 700, f"expected 700 samples, got {len(all_data)}"
 
-    out_dir = os.path.dirname(args.out)
+    out_dir = os.path.dirname(args.output)
     if out_dir and not os.path.exists(out_dir):
         os.makedirs(out_dir, exist_ok=True)
 
-    with open(args.out, "w", encoding="utf-8") as f:
+    with open(args.output, "w", encoding="utf-8") as f:
         for item in all_data:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
-    print(f"[OK] {args.out}: {len(all_data)} samples "
+    print(f"[OK] {args.output}: {len(all_data)} samples "
           f"(M-3 SwiftUI {len(SCENARIO_M3)} + M-4 Compose {len(SCENARIO_M4)})")
 
 

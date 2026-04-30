@@ -257,7 +257,7 @@ SCENARIO_M6 = [gen_ci(random.choice(CI_PATTERNS)) for _ in range(200)]
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--out",
+        "--output",
         default="data/sft/mobile_v6_c.jsonl",
         help="출력 JSONL 파일 경로",
     )
@@ -266,7 +266,7 @@ def main():
     all_data = SCENARIO_M5 + SCENARIO_M6
     assert len(all_data) == 400, f"Expected 400 samples, got {len(all_data)}"
 
-    out_path = args.out
+    out_path = args.output
     out_dir = os.path.dirname(out_path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
