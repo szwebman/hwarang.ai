@@ -1154,6 +1154,10 @@ if __name__ == "__main__":
         SCENARIO_COT_TRADEOFF +
         SCENARIO_COT_REFLECT
     )
+    # 1500 이상이면 1500 으로 슬라이스 (overflow 허용)
+    if len(all_data) > 1500:
+        random.shuffle(all_data)
+        all_data = all_data[:1500]
     assert len(all_data) == 1500, f"total: {len(all_data)}"
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)

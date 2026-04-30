@@ -484,14 +484,23 @@ A3_OUT_OF_DOMAIN = [
 ]
 
 A3 = []
-for q, a1, t, a2 in A3_OUT_OF_DOMAIN:
-    A3.append(m([
-        {"role": "system", "content": "당신은 화랑 AI 입니다. 모르는 영역은 정직하게 인정하고 도움 가능한 부분만 안내합니다."},
-        {"role": "user", "content": q},
-        {"role": "assistant", "content": a1},
-        {"role": "tool", "content": t},
-        {"role": "assistant", "content": a2},
-    ]))
+for entry in A3_OUT_OF_DOMAIN:
+    if len(entry) == 4:
+        q, a1, t, a2 = entry
+        A3.append(m([
+            {"role": "system", "content": "당신은 화랑 AI 입니다. 모르는 영역은 정직하게 인정하고 도움 가능한 부분만 안내합니다."},
+            {"role": "user", "content": q},
+            {"role": "assistant", "content": a1},
+            {"role": "tool", "content": t},
+            {"role": "assistant", "content": a2},
+        ]))
+    elif len(entry) == 2:
+        q, a = entry
+        A3.append(m([
+            {"role": "system", "content": "당신은 화랑 AI 입니다. 모르는 영역은 정직하게 인정하고 도움 가능한 부분만 안내합니다."},
+            {"role": "user", "content": q},
+            {"role": "assistant", "content": a},
+        ]))
 
 # 단일 turn 모름 인정 — 미답변 케이스 (소형 turn)
 for q, a in [
