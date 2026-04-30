@@ -12,8 +12,15 @@
 
 import * as vscode from "vscode";
 import { AgentLoop, AgentMessage } from "../tools/agent-loop";
+import { ToolExecutor } from "../tools/executor";
 import { LLMClient } from "./llm-client";
 import { AuthManager } from "./auth";
+import {
+  expandSlashCommand,
+  getSlashCommandList,
+  SlashCommandContext,
+} from "../commands/slash-commands";
+import { VisionClient } from "../utils/vision-client";
 
 interface StoredMessage {
   role: "user" | "assistant" | "tool_call" | "tool_result";
@@ -42,6 +49,7 @@ const NO_WORKSPACE_KEY = "__global__";
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   private webviewView?: vscode.WebviewView;
   private agentLoop: AgentLoop;
+  private toolExecutor: ToolExecutor | null = null;
   private context: vscode.ExtensionContext;
   private llmClient: LLMClient;
   private authManager: AuthManager;
@@ -58,12 +66,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     agentLoop: AgentLoop,
     context: vscode.ExtensionContext,
     llmClient: LLMClient,
-    authManager: AuthManager
+    authManager: AuthManager,
+    toolExecutor?: ToolExecutor
   ) {
     this.agentLoop = agentLoop;
     this.context = context;
     this.llmClient = llmClient;
     this.authManager = authManager;
+    this.toolExecutor = toolExecutor || null;
   }
 
   // ============================================================
@@ -386,8 +396,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     webviewView.webview.html = this.getWebviewContent();
 
+    // Tool executor 와 webview 를 연결 — todo / batch / bg task 알림 채널
+    if (this.toolExecutor) {
+      this.toolExecutor.setBridge({
+        postMessage: (msg) => webviewView.webview.postMessage(msg),
+      });
+    }
+
+    // Agent loop (Plan 모드) 와 webview 연결 — planApprovalRequest / planResponse
+    if (typeof (this.agentLoop as any).setWebview === "function") {
+      (this.agentLoop as any).setWebview({
+        postMessage: (msg: any) => webviewView.webview.postMessage(msg),
+        onDidReceiveMessage: (listener: (msg: any) => any) =>
+          webviewView.webview.onDidReceiveMessage(listener),
+      });
+    }
+
     webviewView.webview.onDidReceiveMessage(async (message) => {
       switch (message.type) {
+        case "batchApprovalResponse":
+          // webview 일괄 승인 응답
+          this.toolExecutor?.resolveBatchApproval(!!message.approved);
+          break;
         case "sendMessage":
           // 일반 텍스트(또는 첨부 이미지) — 옵션/이미지 파라미터 포함이면 directChat,
           // 없으면 기존 AgentLoop 흐름.
@@ -428,6 +458,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           break;
         case "slashCommand":
           await this.handleSlashCommand(message.command, message.args);
+          break;
+        case "planResponse":
+          // PlanModeManager (agent-loop.ts) 가 listen 중. webview 이벤트는
+          // agent-loop 가 setWebview 로 주입한 onDidReceiveMessage 로 직접 수신함.
+          // 여기서는 별도 처리 불필요 — case 만 두어 unknown type 경고 방지.
           break;
       }
     });
@@ -476,12 +511,39 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     images?: { base64: string; name: string; type: string }[];
     model?: string;
     safety?: string;
+    /** true 면 메인 chat 직전에 Vision API 로 description 추출 → user 메시지에 prepend */
+    visionPreprocess?: boolean;
   }) {
     const webview = this.webviewView?.webview;
     if (!webview) return;
-    const text = (msg.text || "").trim();
+    let text = (msg.text || "").trim();
     const images = msg.images || [];
     if (!text && images.length === 0) return;
+
+    // Vision 사전 처리 — 별도 endpoint (/api/vision/analyze) 로 description 받아
+    // 사용자 메시지에 prepend. 이 경로를 쓰면 일반 텍스트 모델이 받아도 이미지 내용을
+    // 코드/UI 컴포넌트로 변환할 수 있음.
+    if (msg.visionPreprocess && images.length > 0) {
+      try {
+        const apiUrl =
+          vscode.workspace.getConfiguration("hwarang").get<string>("apiUrl") ||
+          "https://hwarang.ai";
+        const apiKey = this.authManager.apiKey || "";
+        const visionClient = new VisionClient(apiUrl, apiKey);
+        const description = await visionClient.analyzeMany(
+          images.map((i) => ({ base64: i.base64, name: i.name })),
+          text || undefined
+        );
+        if (description) {
+          text = `${description}\n\n${text || "이 이미지를 코드/UI 로 변환해주세요."}`;
+        }
+      } catch (e: any) {
+        webview.postMessage({
+          type: "error",
+          text: `Vision 사전 분석 실패: ${e?.message || e}`,
+        });
+      }
+    }
 
     if (!this.currentConversationId) {
       this.currentConversationId = `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -650,6 +712,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.webviewView?.webview.postMessage({ type: "modeChanged", mode });
   }
 
+  /** extension.ts 의 팔레트 명령 → 슬래시 커맨드 실행 (webview 우회) */
+  async runSlashCommand(command: string, args: string) {
+    if (this.webviewView) {
+      this.webviewView.show?.(true);
+      this.webviewView.webview.postMessage({
+        type: "addUserMessage",
+        text: `/${command}${args ? " " + args : ""}`,
+      });
+    }
+    await this.handleSlashCommand(command, args);
+  }
+
   private async handleUserMessage(text: string) {
     const webview = this.webviewView?.webview;
     if (!webview) return;
@@ -720,25 +794,36 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       ? vscode.workspace.asRelativePath(editor.document.uri)
       : "";
 
-    const prompts: Record<string, string> = {
-      explain: "이 코드를 자세히 설명해줘:",
-      fix: "이 코드에서 버그를 찾아서 고쳐줘:",
-      refactor: "이 코드를 더 깔끔하게 리팩토링해줘:",
-      test: "이 코드의 유닛 테스트를 작성해줘:",
-      doc: "이 코드에 문서화 주석을 추가해줘:",
-      review: "이 코드를 리뷰하고 개선점을 제안해줘:",
+    const ctx: SlashCommandContext = {
+      activeFile: file || undefined,
+      selection: selection || undefined,
+      languageId: lang || undefined,
     };
 
-    const prompt = prompts[command] || args;
-    let fullPrompt = prompt;
-    if (selection) {
-      fullPrompt += `\n\n파일: ${file}\n언어: ${lang}\n\n\`\`\`${lang}\n${selection}\n\`\`\``;
-    }
-    if (args && prompts[command]) {
-      fullPrompt = `${prompt} ${args}`;
+    // commands/slash-commands.ts 의 중앙 레지스트리 사용
+    const expanded = expandSlashCommand(`/${command} ${args || ""}`.trim(), ctx);
+
+    if (expanded === null) {
+      // 등록되지 않은 명령 — 인자만 그대로 전송 (fallback)
+      const fallback = args
+        ? args
+        : `/${command} 명령은 정의되지 않았습니다.`;
+      await this.sendMessage(fallback);
+      return;
     }
 
-    await this.sendMessage(fullPrompt);
+    // 특수: /clear → 대화 초기화
+    if (expanded === "__CLEAR__") {
+      await this.newChat();
+      this.webviewView?.webview.postMessage({
+        type: "assistantChunk",
+        text: "(대화 history 가 초기화되었습니다)",
+      });
+      this.webviewView?.webview.postMessage({ type: "endResponse" });
+      return;
+    }
+
+    await this.sendMessage(expanded);
   }
 
   private async insertCodeToEditor(code: string) {
@@ -1399,6 +1484,207 @@ textarea::placeholder {
   margin-top: 6px;
   font-family: "SF Mono", Menlo, monospace;
 }
+
+/* === Todo 패널 (작업 진행) === */
+.todo-panel {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--vscode-sideBar-background, rgba(20,20,28,0.95));
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  padding: 8px 14px;
+  backdrop-filter: blur(6px);
+}
+.todo-header {
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0.75;
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.todo-progress {
+  font-size: 10px;
+  opacity: 0.5;
+  margin-left: auto;
+  font-family: "SF Mono", Menlo, monospace;
+}
+.todo-list { list-style: none; padding: 0; margin: 0; }
+.todo-item {
+  font-size: 12px;
+  padding: 2px 0 2px 18px;
+  position: relative;
+  line-height: 1.5;
+}
+.todo-item::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 6px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(255,255,255,0.25);
+}
+.todo-item.in_progress::before {
+  border-color: #60a5fa;
+  background: radial-gradient(circle, #60a5fa 30%, transparent 35%);
+  animation: todoPulse 1.2s ease-in-out infinite;
+}
+.todo-item.completed::before {
+  border-color: #22c55e;
+  background: #22c55e;
+}
+.todo-item.completed::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 9px;
+  width: 6px;
+  height: 3px;
+  border-left: 1.5px solid #fff;
+  border-bottom: 1.5px solid #fff;
+  transform: rotate(-45deg);
+}
+.todo-item.failed::before {
+  border-color: var(--vscode-errorForeground, #f87171);
+  background: var(--vscode-errorForeground, #f87171);
+}
+.todo-item.in_progress { color: var(--vscode-textLink-foreground, #60a5fa); font-weight: 500; }
+.todo-item.completed { color: rgba(255,255,255,0.45); text-decoration: line-through; }
+.todo-item.failed { color: var(--vscode-errorForeground, #f87171); }
+@keyframes todoPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* === Batch 승인 모달 === */
+.batch-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 24px;
+}
+.batch-modal {
+  background: var(--vscode-editor-background);
+  border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.1));
+  border-radius: 10px;
+  max-width: 720px;
+  width: 100%;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.batch-modal h3 {
+  padding: 14px 18px;
+  font-size: 14px;
+  font-weight: 600;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+.batch-actions {
+  display: flex;
+  gap: 8px;
+  padding: 12px 18px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+.batch-actions button {
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.08);
+  color: var(--vscode-foreground);
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.batch-actions button:hover { background: rgba(255,255,255,0.12); }
+.batch-actions button.primary {
+  background: linear-gradient(135deg, #7c3aed, #6d28d9);
+  border-color: #7c3aed;
+  color: #fff;
+}
+.batch-actions button.primary:hover { filter: brightness(1.1); }
+.batch-actions button.danger {
+  background: rgba(248, 113, 113, 0.15);
+  border-color: rgba(248, 113, 113, 0.4);
+  color: #f87171;
+}
+.batch-files {
+  overflow-y: auto;
+  padding: 12px 18px;
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 11px;
+}
+.batch-file {
+  margin-bottom: 14px;
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.batch-file-head {
+  padding: 6px 10px;
+  background: rgba(255,255,255,0.04);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+.batch-file-tool {
+  font-size: 10px;
+  background: rgba(124, 58, 237, 0.2);
+  border: 1px solid rgba(124, 58, 237, 0.4);
+  padding: 1px 6px;
+  border-radius: 3px;
+  text-transform: uppercase;
+}
+.batch-file-meta { font-size: 10px; opacity: 0.5; margin-left: auto; }
+.batch-file-diff {
+  padding: 8px 10px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 200px;
+  overflow-y: auto;
+  background: rgba(0,0,0,0.2);
+  line-height: 1.5;
+}
+.batch-file-diff .add { color: #4ade80; }
+.batch-file-diff .del { color: #f87171; }
+
+/* === 백그라운드 task 토스트 === */
+.toast-stack {
+  position: fixed;
+  bottom: 12px;
+  right: 12px;
+  z-index: 999;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  background: var(--vscode-notifications-background, rgba(40,40,55,0.95));
+  border: 1px solid var(--vscode-notifications-border, rgba(255,255,255,0.1));
+  color: var(--vscode-notifications-foreground, #fff);
+  padding: 8px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  max-width: 320px;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+  animation: toastIn 0.2s ease-out;
+}
+.toast.success { border-left: 3px solid #22c55e; }
+.toast.failed { border-left: 3px solid var(--vscode-errorForeground, #f87171); }
+@keyframes toastIn {
+  from { transform: translateX(20px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
 </style>
 </head>
 <body>
@@ -1414,6 +1700,43 @@ textarea::placeholder {
     <div style="display:flex; gap:6px;">
       <button class="topbar-btn" onclick="showHistory()" title="이전 대화 보기">이전 대화</button>
       <button class="topbar-btn" onclick="newChat()" title="새 대화 시작">새 대화</button>
+    </div>
+  </div>
+
+  <!-- 작업 진행 (todo 패널) -->
+  <div id="todoPanel" class="todo-panel" hidden>
+    <div class="todo-header">
+      <span>작업 진행</span>
+      <span id="todoProgress" class="todo-progress"></span>
+    </div>
+    <ul id="todoList" class="todo-list"></ul>
+  </div>
+
+  <!-- 백그라운드 task 토스트 -->
+  <div id="toastStack" class="toast-stack"></div>
+
+  <!-- Batch 승인 모달 -->
+  <div id="batchBackdrop" class="batch-modal-backdrop" hidden>
+    <div class="batch-modal">
+      <h3 id="batchTitle">파일 변경 제안</h3>
+      <div class="batch-actions">
+        <button class="primary" id="batchApprove">모두 적용</button>
+        <button class="danger" id="batchReject">거절</button>
+      </div>
+      <div id="batchFiles" class="batch-files"></div>
+    </div>
+  </div>
+
+  <!-- Plan 승인 모달 (group 1 PlanModeManager 가 listen) -->
+  <div id="planBackdrop" class="batch-modal-backdrop" hidden>
+    <div class="batch-modal" style="max-width:560px;">
+      <h3 id="planTitle">작업 계획</h3>
+      <ol id="planItems" style="padding:14px 18px 4px 36px; font-size:12.5px; line-height:1.7;"></ol>
+      <div class="batch-actions" style="border-top:1px solid rgba(255,255,255,0.06); border-bottom:none;">
+        <button class="primary" id="planApprove">진행</button>
+        <button id="planModify">수정</button>
+        <button class="danger" id="planCancel">취소</button>
+      </div>
     </div>
   </div>
 
@@ -1439,27 +1762,51 @@ textarea::placeholder {
     <div class="slash-popup" id="slashPopup">
       <div class="slash-item" onclick="pickSlash('explain')">
         <span class="slash-cmd">/explain</span>
-        <span class="slash-desc">코드 설명</span>
+        <span class="slash-desc">선택한 코드 설명</span>
       </div>
       <div class="slash-item" onclick="pickSlash('fix')">
         <span class="slash-cmd">/fix</span>
-        <span class="slash-desc">버그 찾아 수정</span>
+        <span class="slash-desc">현재 파일 버그 찾아 수정</span>
       </div>
       <div class="slash-item" onclick="pickSlash('refactor')">
         <span class="slash-cmd">/refactor</span>
-        <span class="slash-desc">리팩토링</span>
+        <span class="slash-desc">선택한 코드 리팩토링</span>
       </div>
       <div class="slash-item" onclick="pickSlash('test')">
         <span class="slash-cmd">/test</span>
-        <span class="slash-desc">테스트 코드 생성</span>
+        <span class="slash-desc">유닛 테스트 생성</span>
       </div>
       <div class="slash-item" onclick="pickSlash('doc')">
         <span class="slash-cmd">/doc</span>
-        <span class="slash-desc">문서화 주석 추가</span>
+        <span class="slash-desc">문서/주석 추가</span>
       </div>
       <div class="slash-item" onclick="pickSlash('review')">
         <span class="slash-cmd">/review</span>
         <span class="slash-desc">코드 리뷰</span>
+      </div>
+      <div class="slash-item" onclick="pickSlash('optimize')">
+        <span class="slash-cmd">/optimize</span>
+        <span class="slash-desc">성능 최적화 제안</span>
+      </div>
+      <div class="slash-item" onclick="pickSlash('translate')">
+        <span class="slash-cmd">/translate</span>
+        <span class="slash-desc">다른 언어로 변환 (예: /translate python)</span>
+      </div>
+      <div class="slash-item" onclick="pickSlash('diagnose')">
+        <span class="slash-cmd">/diagnose</span>
+        <span class="slash-desc">빌드/lint 에러 자동 분석</span>
+      </div>
+      <div class="slash-item" onclick="pickSlash('commit')">
+        <span class="slash-cmd">/commit</span>
+        <span class="slash-desc">git status 확인 후 자동 커밋</span>
+      </div>
+      <div class="slash-item" onclick="pickSlash('plan')">
+        <span class="slash-cmd">/plan</span>
+        <span class="slash-desc">Plan 모드 강제 진입</span>
+      </div>
+      <div class="slash-item" onclick="pickSlash('clear')">
+        <span class="slash-cmd">/clear</span>
+        <span class="slash-desc">대화 history 초기화</span>
       </div>
     </div>
     <!-- 이미지 미리보기 -->
@@ -1493,6 +1840,10 @@ textarea::placeholder {
         <option value="standard" selected>🛡️ 표준</option>
         <option value="strict">🔒 엄격</option>
       </select>
+      <label id="vision-pre-label" title="이미지를 메인 chat 직전에 Vision API 로 묘사 → 코드 변환 정확도 향상" style="display:inline-flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;padding:0 6px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;height:24px;">
+        <input type="checkbox" id="vision-pre-check" style="margin:0;">
+        <span>Vision 사전분석</span>
+      </label>
       <span class="spacer"></span>
       <span id="usage-display" class="usage-chip empty" title="잔여 / 일일 한도"></span>
     </div>
@@ -1515,6 +1866,7 @@ const $imagePreview = document.getElementById('image-preview');
 const $modelSelect = document.getElementById('model-select');
 const $safetySelect = document.getElementById('safety-select');
 const $usageDisplay = document.getElementById('usage-display');
+const $visionPre = document.getElementById('vision-pre-check');
 
 let busy = false;
 let curAI = null;       // 현재 AI 메시지의 .msg-text
@@ -1538,11 +1890,12 @@ function send() {
   // 옵션바 값
   const model = $modelSelect.value;
   const safety = $safetySelect.value;
+  const visionPreprocess = !!($visionPre && $visionPre.checked);
   // 이미지 동봉 또는 모델/안전 명시 시 → directChat (옵션 모드/비전)
   const useDirect =
     hasImages || (model && model.length > 0) || (safety && safety !== 'standard');
 
-  const slashRe = /^\\/([a-z]+)(?:\\s+(.*))?$/;
+  const slashRe = /^\\/([a-z]+)(?:\\s+([\\s\\S]*))?$/;
   const slashMatch = t.match(slashRe);
   if (slashMatch && !useDirect) {
     addUser(t);
@@ -1557,6 +1910,7 @@ function send() {
     images: attachedImages,
     model: useDirect ? model : '',
     safety: useDirect ? safety : '',
+    visionPreprocess: visionPreprocess && hasImages,
   });
   attachedImages = [];
   renderImagePreview();
@@ -1965,11 +2319,171 @@ function appendAnswerToOptions(messageId, content) {
   scroll();
 }
 
+// ======== Todo 패널 ========
+function renderTodos(plan) {
+  const panel = document.getElementById('todoPanel');
+  const list = document.getElementById('todoList');
+  const prog = document.getElementById('todoProgress');
+  if (!panel || !list) return;
+  if (!plan || !plan.length) {
+    panel.hidden = true;
+    list.innerHTML = '';
+    return;
+  }
+  panel.hidden = false;
+  const completed = plan.filter(t => t.status === 'completed').length;
+  if (prog) prog.textContent = completed + '/' + plan.length;
+
+  list.innerHTML = plan.map(t => {
+    const safeTitle = esc(t.title || '');
+    const safeStatus = (t.status || 'pending').replace(/[^a-z_]/gi, '');
+    return '<li class="todo-item ' + safeStatus + '">' + safeTitle + '</li>';
+  }).join('');
+}
+
+// ======== Batch 모달 ========
+let pendingBatchRequestId = null;
+
+function showBatchModal(payload) {
+  const backdrop = document.getElementById('batchBackdrop');
+  const title = document.getElementById('batchTitle');
+  const filesDiv = document.getElementById('batchFiles');
+  if (!backdrop || !title || !filesDiv) return;
+
+  pendingBatchRequestId = payload.requestId;
+  title.textContent = (payload.files?.length || 0) + '개 파일 변경 제안';
+
+  const html = (payload.files || []).map(f => {
+    const tool = f.tool === 'write_file' ? 'write' : 'edit';
+    const meta = f.oldLen + ' → ' + f.newLen + ' bytes';
+    const diffHtml = (f.diff || '').split('\\n').map(line => {
+      const safe = esc(line);
+      if (line.startsWith('+ ')) return '<div class="add">' + safe + '</div>';
+      if (line.startsWith('- ')) return '<div class="del">' + safe + '</div>';
+      return '<div>' + safe + '</div>';
+    }).join('');
+    return '<div class="batch-file">' +
+      '<div class="batch-file-head">' +
+        '<span class="batch-file-tool">' + tool + '</span>' +
+        '<span>' + esc(f.path) + '</span>' +
+        '<span class="batch-file-meta">' + meta + '</span>' +
+      '</div>' +
+      '<div class="batch-file-diff">' + (diffHtml || '(no preview)') + '</div>' +
+    '</div>';
+  }).join('');
+  filesDiv.innerHTML = html || '(no changes)';
+
+  backdrop.hidden = false;
+}
+
+function hideBatchModal() {
+  const backdrop = document.getElementById('batchBackdrop');
+  if (backdrop) backdrop.hidden = true;
+  pendingBatchRequestId = null;
+}
+
+document.getElementById('batchApprove')?.addEventListener('click', () => {
+  vscode.postMessage({ type: 'batchApprovalResponse', approved: true, requestId: pendingBatchRequestId });
+  hideBatchModal();
+});
+document.getElementById('batchReject')?.addEventListener('click', () => {
+  vscode.postMessage({ type: 'batchApprovalResponse', approved: false, requestId: pendingBatchRequestId });
+  hideBatchModal();
+});
+
+// ======== Plan 모달 (그룹 1 PlanModeManager) ========
+let pendingPlanRequestId = null;
+let pendingPlanItems = [];
+
+function showPlanModal(payload) {
+  const back = document.getElementById('planBackdrop');
+  const items = document.getElementById('planItems');
+  const title = document.getElementById('planTitle');
+  if (!back || !items) return;
+  pendingPlanRequestId = payload.requestId || null;
+  pendingPlanItems = Array.isArray(payload.plan) ? payload.plan : [];
+  if (title) title.textContent = '작업 계획 (' + pendingPlanItems.length + '단계)';
+  items.innerHTML = pendingPlanItems.map(function(p, i) {
+    const safeTitle = esc(p && p.title ? String(p.title) : ('Step ' + (i + 1)));
+    const desc = p && p.description ? '<div style="font-size:11px;opacity:0.55;margin-top:2px;">' + esc(String(p.description)) + '</div>' : '';
+    const risk = p && p.riskLevel === 'high' ? ' <span style="color:#f87171;font-size:10px;">[HIGH]</span>'
+      : p && p.riskLevel === 'medium' ? ' <span style="color:#fbbf24;font-size:10px;">[MED]</span>' : '';
+    return '<li style="margin-bottom:6px;">' + safeTitle + risk + desc + '</li>';
+  }).join('');
+  back.hidden = false;
+}
+
+function hidePlanModal() {
+  const back = document.getElementById('planBackdrop');
+  if (back) back.hidden = true;
+  pendingPlanRequestId = null;
+  pendingPlanItems = [];
+}
+
+document.getElementById('planApprove')?.addEventListener('click', function() {
+  vscode.postMessage({ type: 'planResponse', approved: true, requestId: pendingPlanRequestId });
+  hidePlanModal();
+});
+document.getElementById('planCancel')?.addEventListener('click', function() {
+  vscode.postMessage({ type: 'planResponse', approved: false, requestId: pendingPlanRequestId });
+  hidePlanModal();
+});
+document.getElementById('planModify')?.addEventListener('click', function() {
+  // 단순 prompt 기반 수정 — 줄 단위로 편집.
+  const initial = pendingPlanItems.map(function(p, i) { return (i + 1) + '. ' + (p.title || ''); }).join('\\n');
+  const edited = window.prompt('각 줄 = 한 단계입니다. 수정하세요:', initial);
+  if (edited === null) return; // 취소 시 modal 유지
+  const lines = edited.split('\\n').map(function(l) { return l.replace(/^\\s*\\d+[.)]\\s*/, '').trim(); }).filter(Boolean);
+  const modified = lines.map(function(line, i) {
+    const orig = pendingPlanItems[i] || {};
+    return {
+      id: String(orig.id || (i + 1)),
+      title: line,
+      description: orig.description,
+      estimatedTools: orig.estimatedTools || [],
+      riskLevel: orig.riskLevel || 'low',
+    };
+  });
+  vscode.postMessage({
+    type: 'planResponse',
+    approved: true,
+    requestId: pendingPlanRequestId,
+    modifiedPlan: modified,
+  });
+  hidePlanModal();
+});
+
+// ======== 토스트 ========
+function showToast(text, kind) {
+  const stack = document.getElementById('toastStack');
+  if (!stack) return;
+  const t = document.createElement('div');
+  t.className = 'toast ' + (kind || '');
+  t.textContent = text;
+  stack.appendChild(t);
+  setTimeout(() => t.remove(), 5500);
+}
+
 window.addEventListener('message', e => {
   const m = e.data;
   switch (m.type) {
     case 'addUserMessage':
       addUser(m.text);
+      break;
+    case 'todoUpdate':
+      renderTodos(m.plan || []);
+      break;
+    case 'batchApprovalRequest':
+      showBatchModal(m);
+      break;
+    case 'planApprovalRequest':
+      showPlanModal(m);
+      break;
+    case 'bgTaskComplete':
+      const sym = m.status === 'completed' ? '✓' : '✗';
+      const dur = m.durationMs ? ' (' + (m.durationMs / 1000).toFixed(1) + 's)' : '';
+      showToast(sym + ' ' + (m.command || m.taskId) + ' ' + m.status + dur,
+        m.status === 'completed' ? 'success' : 'failed');
       break;
     case 'options':
       removeThinking();

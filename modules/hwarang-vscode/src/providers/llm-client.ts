@@ -6,6 +6,7 @@
  */
 
 import * as vscode from "vscode";
+import { VisionClient, VisionResponse } from "../utils/vision-client";
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
@@ -152,6 +153,26 @@ export class LLMClient {
   /** Inject API key from AuthManager (avoids circular dependency) */
   setApiKey(key: string | null) {
     (this as any)._injectedApiKey = key;
+  }
+
+  // ================================================================
+  // Vision (Qwen2.5-VL) — /api/vision/analyze 사전 호출 helper
+  // ================================================================
+
+  /**
+   * 단일 이미지를 Vision API 로 묘사. 결과 description 을 메인 chat 의
+   * user/system 메시지에 prepend 해 코드 변환 정확도를 높이는 용도.
+   *
+   * @param imageBase64 base64 인코딩 문자열 (data URL prefix 허용 — 내부 strip)
+   * @param instruction 사용자 추가 프롬프트 (예: "이걸 React 컴포넌트로")
+   */
+  async analyzeImage(
+    imageBase64: string,
+    instruction?: string
+  ): Promise<VisionResponse> {
+    const apiKey = (this as any)._injectedApiKey || "";
+    const client = new VisionClient(this.config.apiUrl, apiKey);
+    return client.analyzeImage({ imageBase64, instruction });
   }
 
   private async chatHwarang(

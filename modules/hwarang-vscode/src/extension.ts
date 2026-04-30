@@ -11,6 +11,7 @@ import { LLMClient } from "./providers/llm-client";
 import { ToolExecutor } from "./tools/executor";
 import { AgentLoop } from "./tools/agent-loop";
 import { getMode, setMode, getModeLabel, getModeDescription, HwarangMode } from "./tools/mode";
+import { getSlashCommandList } from "./commands/slash-commands";
 
 let chatViewProvider: ChatViewProvider;
 let authManager: AuthManager;
@@ -41,7 +42,8 @@ export async function activate(context: vscode.ExtensionContext) {
     agentLoop,
     context,
     llmClient,
-    authManager
+    authManager,
+    toolExecutor
   );
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider("hwarang.chatView", chatViewProvider, {
@@ -190,6 +192,28 @@ export async function activate(context: vscode.ExtensionContext) {
         await inlineChat.handleInlineChat(editor, input);
         await authManager.refreshTokenBalance();
       }
+    }),
+
+    // === 슬래시 커맨드 팔레트 ===
+    vscode.commands.registerCommand("hwarang.runSlashCommand", async () => {
+      if (!(await requireAuth())) return;
+      const list = getSlashCommandList();
+      const pick = await vscode.window.showQuickPick(
+        list.map((c) => ({
+          label: `/${c.name}`,
+          description: c.description,
+          name: c.name,
+        })),
+        { placeHolder: "슬래시 커맨드 선택" }
+      );
+      if (!pick) return;
+      const args = await vscode.window.showInputBox({
+        prompt: `/${pick.name} 인자 (선택)`,
+        placeHolder: "비워두면 활성 파일/선택 영역만 사용",
+      });
+      // 채팅 뷰로 위임 — webview 가 직접 slashCommand 호출과 동일
+      vscode.commands.executeCommand("hwarang.chatView.focus");
+      chatViewProvider.runSlashCommand(pick.name, args || "");
     }),
 
     // === 모드 전환 (자동/수동/플랜) ===

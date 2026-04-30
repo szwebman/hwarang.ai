@@ -17,9 +17,13 @@ import * as vscode from "vscode";
 import { LLMClient, ChatMessage, ToolCall } from "../providers/llm-client";
 import { ToolExecutor, TOOL_DEFINITIONS } from "./executor";
 import { getMode, getSystemPromptAddition } from "./mode";
+import { detectWorkspaceContext, invalidateWorkspaceContextCache } from "../utils/workspace-context";
+import { PlanModeManager, PlanWebviewBridge } from "./plan-mode";
+import { ContextCompactor } from "./context-compact";
 
 const MAX_ITERATIONS = 12;
 const MAX_FALLBACK_SYNTH = 5; // run() 한 번에 fallback 합성 최대 횟수
+const MAX_SUBAGENT_ITERATIONS = 8; // sub-agent 의 자체 iteration 제한
 
 /**
  * 응답 signature — 코드블록/특수문자/숫자 제거 후 단어 set 만 추출.
@@ -430,11 +434,14 @@ STOP and call run_command instead.
 - write_file(path, content): 파일 생성/덮어쓰기
 - edit_file(path, oldString, newString, replaceAll?): 파일 부분 수정
 - delete_file(path): 파일/폴더 삭제
-- run_command(command, cwd?, timeout?): 쉘 명령 실행
+- run_command(command, cwd?, timeout?): 쉘 명령 실행 (기본 120초 타임아웃)
+- run_command_background(command, cwd?): 긴 명령 백그라운드 실행 (즉시 task_id 반환)
+- check_background_task(task_id): 백그라운드 task 상태/출력 확인
 - search_files(pattern, type="glob"|"grep"): 파일/코드 검색
 - list_directory(path, recursive?): 디렉토리 목록
 - get_diagnostics(path?, severity?): VS Code 에러/경고
 - get_workspace_info(): 워크스페이스 정보
+- write_todo(plan): 복잡한 작업을 step 으로 분할 — UI 에 진행 상황 표시
 
 ## Guidelines
 
@@ -459,13 +466,81 @@ STOP and call run_command instead.
 - /refactor — 리팩토링
 - /test — 유닛 테스트 생성
 - /doc — 문서 추가
-- /review — 코드 리뷰`;
+- /review — 코드 리뷰
+
+## TodoWrite 도구 사용 (중요)
+
+3개 이상 step 이 필요한 복잡한 작업을 받으면:
+1. 먼저 \`write_todo\` 로 plan 작성 (모든 status="pending" 으로 시작)
+2. 각 step 시작 시 \`write_todo\` 재호출 (해당 step status="in_progress")
+3. step 완료 시 \`write_todo\` 재호출 (status="completed")
+4. 실패 시 status="failed" 로 표시 후 다른 접근 시도
+
+예시:
+- 사용자: "결제 시스템 추가해줘"
+- 응답: write_todo([
+    {id:"1", title:"결제 모델 정의", status:"pending"},
+    {id:"2", title:"API 엔드포인트", status:"pending"},
+    {id:"3", title:"webhook 핸들러", status:"pending"},
+    {id:"4", title:"테스트 작성", status:"pending"},
+    {id:"5", title:"문서 갱신", status:"pending"},
+  ])
+- 이후 각 step 시작/종료 시 같은 plan 을 status 만 갱신해서 재호출
+
+단순 1-2 단계 작업이면 write_todo 호출하지 마세요.
+
+## 백그라운드 실행 (긴 작업)
+
+다음 명령은 \`run_command_background\` 를 사용하세요:
+- npm install / pnpm install / yarn install
+- npm run build / pnpm build / cargo build
+- 테스트 swept (npm test, pytest 등)
+
+즉시 task_id 가 반환됩니다. 이후 \`check_background_task\` 로 폴링하거나
+다른 작업을 진행하다가 사용자에게 결과를 알리세요.
+
+## 일괄 변경 (자동 batch)
+
+한 응답에서 여러 파일 변경 (write_file/edit_file 2개 이상) 이 필요하면
+순서대로 호출하기만 하면 됩니다 — 시스템이 자동으로 묶어서 한 번에 사용자 승인을 받습니다.
+
+## Plan 모드
+
+3 step 이상 또는 multi-file/multi-domain 작업 (예: "결제 시스템 추가",
+"전체 리팩토링", "DB 마이그레이션") 을 받으면 자동으로 plan 이 작성됩니다.
+사용자 승인 후 진행됩니다. 단순 작업 (단일 파일 수정 등) 은 plan 없이 바로 도구 호출하세요.
+
+승인된 plan 이 system 메시지로 주입되면, 각 step 마다 write_todo 로 진행 상황을 갱신하면서 실행하세요.
+
+## Subagent 위임 (delegate_subtask)
+
+큰 작업을 logical sub-task 로 나눠 위임 가능:
+- 사용 시점: 도메인이 다른 큰 작업 동시 진행 (예: "API 추가 + 프론트 + 테스트")
+- 단순 step 분할은 write_todo 사용 (delegate 아님)
+- 재귀 위임 금지 — sub-agent 안에서 또 delegate 하지 마세요
+- 한 메인 작업당 최대 5개까지
+
+## 컨텍스트 자동 압축
+
+대화가 길어지면 (30 메시지 이상 + 30K자 이상) 시스템이 자동으로 이전 대화를 요약합니다.
+이 동작은 투명하게 일어나며 별도 도구 호출이 필요 없습니다.`;
 
 export interface AgentMessage {
   role: "user" | "assistant" | "tool_call" | "tool_result";
   content: string;
   toolName?: string;
   toolCallId?: string;
+}
+
+/**
+ * Sub-agent 모드 옵션 — 메인 agent 가 delegate_subtask 로 호출 시 사용.
+ * - excludeTools: 도구 목록에서 제외할 이름들 (재귀 위임 차단용)
+ * - maxIterations: sub-agent 자체 iteration 한도
+ */
+interface SubagentOptions {
+  excludeTools?: string[];
+  maxIterations?: number;
+  isSubagent?: boolean;
 }
 
 export class AgentLoop {
@@ -475,9 +550,40 @@ export class AgentLoop {
   private abortController: AbortController | null = null;
   private _isRunning = false;
 
-  constructor(llm: LLMClient, tools: ToolExecutor) {
+  /** Plan 모드 / 압축에 쓰는 webview bridge — 외부에서 setWebview 로 주입 */
+  private planBridge: PlanWebviewBridge | null = null;
+  /** Plan 매니저 / 압축기 (싱글톤 인스턴스) */
+  private planMgr = new PlanModeManager();
+  private compactor = new ContextCompactor();
+
+  /** Sub-agent 인스턴스인지 — true 면 plan 모드/sub-agent 위임 비활성 */
+  private readonly isSubagent: boolean;
+  /** Sub-agent 일 때 도구 목록에서 제외할 이름들 */
+  private readonly excludedTools: Set<string>;
+  /** iteration 한도 (sub-agent 는 더 짧게) */
+  private readonly maxIterations: number;
+
+  constructor(llm: LLMClient, tools: ToolExecutor, opts?: SubagentOptions) {
     this.llm = llm;
     this.tools = tools;
+    this.isSubagent = !!opts?.isSubagent;
+    this.excludedTools = new Set(opts?.excludeTools || []);
+    this.maxIterations = opts?.maxIterations ?? MAX_ITERATIONS;
+
+    // Sub-agent 가 아닐 때만 위임 runner 등록 (재귀 차단)
+    if (!this.isSubagent) {
+      this.tools.setSubagentRunner(async (params) => {
+        return this.runSubagent(params);
+      });
+    }
+  }
+
+  /**
+   * Plan 모드 / batch 승인용 webview bridge 주입.
+   * chat-view-provider 에서 webview 생성 후 호출.
+   */
+  setWebview(bridge: PlanWebviewBridge | null) {
+    this.planBridge = bridge;
   }
 
   get isRunning(): boolean {
@@ -496,6 +602,8 @@ export class AgentLoop {
 
   clearHistory() {
     this.conversationHistory = [];
+    // 새 대화 시작 — 워크스페이스 컨텍스트도 새로 감지 (변경됐을 수 있음)
+    invalidateWorkspaceContextCache();
   }
 
   abort() {
@@ -512,22 +620,93 @@ export class AgentLoop {
     this._isRunning = true;
     this.abortController = new AbortController();
 
+    // 새 user turn 시작 — sub-agent 호출 카운터 리셋
+    if (!this.isSubagent) {
+      this.tools.resetSubagentCounter();
+    }
+
     // run() 한 번에 fallback 합성 한도 (무한 루프 방지)
     let fallbackSynthCount = 0;
     // 응답 중복 감지 (LLM 이 같은 답 반복 시 즉시 종료)
     let lastResponseSig: Set<string> = new Set();
     let repeatedResponseCount = 0;
 
+    // sub-agent 모드용 도구 정의 (delegate_subtask 등 제외)
+    const activeToolDefs = this.excludedTools.size
+      ? TOOL_DEFINITIONS.filter(
+          (t: any) => !this.excludedTools.has(t.function.name)
+        )
+      : TOOL_DEFINITIONS;
+
     try {
+      // ── Plan 모드 자동 진입 검사 (메인 agent 만, sub-agent 는 스킵) ──
+      if (
+        !this.isSubagent &&
+        this.planMgr.shouldEnterPlanMode(userMessage, this.conversationHistory)
+      ) {
+        yield { role: "assistant", content: "Plan 작성 중..." };
+        const plan = await this.planMgr.generatePlan(userMessage, this.llm);
+        if (plan.length > 0) {
+          const planText =
+            "다음과 같이 진행하겠습니다:\n" +
+            plan
+              .map(
+                (p, i) =>
+                  `${i + 1}. ${p.title}` +
+                  (p.description ? ` — ${p.description}` : "") +
+                  (p.riskLevel === "high" ? " (위험도: 높음)" : "")
+              )
+              .join("\n");
+          yield { role: "assistant", content: planText };
+
+          const approval = await this.planMgr.requestApproval(
+            plan,
+            this.planBridge
+          );
+          if (!approval.approved) {
+            yield { role: "assistant", content: "취소되었습니다." };
+            return;
+          }
+
+          // 승인된 plan 을 system 으로 주입 (history 맨 앞)
+          const finalPlan = approval.modifiedPlan || plan;
+          this.conversationHistory.unshift({
+            role: "system",
+            content:
+              `[Approved Plan]\n` +
+              finalPlan
+                .map((p, i) => `${i + 1}. ${p.title}`)
+                .join("\n") +
+              `\n\n각 step 마다 write_todo 로 진행 상황 갱신하면서 실행하세요.`,
+          });
+        }
+      }
+
       const context = await this.buildContext();
       const fullMessage = context ? `${context}\n\n${userMessage}` : userMessage;
 
       this.conversationHistory.push({ role: "user", content: fullMessage });
 
-      for (let i = 0; i < MAX_ITERATIONS; i++) {
+      for (let i = 0; i < this.maxIterations; i++) {
         if (this.abortController.signal.aborted) {
           yield { role: "assistant", content: "(Cancelled)" };
           return;
+        }
+
+        // ── 컨텍스트 자동 압축 검사 (메인 agent 만 — sub-agent 는 짧으니 스킵) ──
+        if (!this.isSubagent && this.compactor.shouldCompact(this.conversationHistory)) {
+          const beforeLen = this.conversationHistory.length;
+          try {
+            this.conversationHistory = await this.compactor.compact(
+              this.conversationHistory,
+              this.llm
+            );
+            console.log(
+              `[AgentLoop] 컨텍스트 압축 (${beforeLen} → ${this.conversationHistory.length})`
+            );
+          } catch (e) {
+            console.warn("[AgentLoop] 압축 실패 — 원본 유지:", e);
+          }
         }
 
         const currentMode = getMode();
@@ -536,7 +715,7 @@ export class AgentLoop {
           ...this.conversationHistory,
         ];
 
-        const response = await this.llm.chat(messages, TOOL_DEFINITIONS);
+        const response = await this.llm.chat(messages, activeToolDefs);
 
         if (this.abortController.signal.aborted) {
           yield { role: "assistant", content: "(Cancelled)" };
@@ -576,9 +755,22 @@ export class AgentLoop {
             yield { role: "assistant", content: response.content };
           }
 
+          // 자동 batch 모드: 한 turn 에서 write_file / edit_file 이 2개 이상이면
+          // 큐로 모아서 사용자에게 한 번에 승인 받음.
+          const fileMutationCount = response.toolCalls.filter(
+            (t) => t.function.name === "write_file" || t.function.name === "edit_file"
+          ).length;
+          const useBatch = fileMutationCount >= 2;
+          if (useBatch) {
+            this.tools.beginBatch();
+          }
+
           // Execute each tool
           for (const tc of response.toolCalls) {
-            if (this.abortController.signal.aborted) return;
+            if (this.abortController.signal.aborted) {
+              if (useBatch) await this.tools.commitBatch().catch(() => undefined);
+              return;
+            }
 
             const args = this.formatToolArgs(tc);
             yield {
@@ -606,6 +798,36 @@ export class AgentLoop {
               role: "tool",
               content: output,
               tool_call_id: tc.id,
+            });
+          }
+
+          // batch 커밋 — 모든 file mutation 호출이 큐에 들어왔으니 한 번에 적용
+          if (useBatch && this.tools.hasPendingBatch()) {
+            const pendingCount = this.tools.pendingBatchCount();
+            yield {
+              role: "tool_call",
+              content: `(batch_commit: ${pendingCount} files awaiting approval)`,
+              toolName: "batch_commit",
+              toolCallId: `batch-${Date.now()}`,
+            };
+            const batchResult = await this.tools.commitBatch();
+            const summary = batchResult.approved
+              ? `Batch applied: ${batchResult.appliedCount} file(s)` +
+                (batchResult.skipped.length
+                  ? `\nSkipped: ${batchResult.skipped.join(", ")}`
+                  : "")
+              : `Batch rejected by user (${pendingCount} file(s) not applied)`;
+            yield {
+              role: "tool_result",
+              content: summary,
+              toolName: "batch_commit",
+              toolCallId: `batch-result-${Date.now()}`,
+            };
+            // batch 결과를 마지막 tool 메시지로 추가 (LLM 이 인지하도록)
+            this.conversationHistory.push({
+              role: "tool",
+              content: summary,
+              tool_call_id: response.toolCalls[response.toolCalls.length - 1].id,
             });
           }
 
@@ -936,12 +1158,67 @@ export class AgentLoop {
 
       yield {
         role: "assistant",
-        content: "Reached maximum tool iterations (25). Please try breaking this into smaller steps.",
+        content: `Reached maximum tool iterations (${this.maxIterations}). Please try breaking this into smaller steps.`,
       };
     } finally {
       this._isRunning = false;
       this.abortController = null;
     }
+  }
+
+  /**
+   * Sub-agent 실행 — delegate_subtask 도구 호출 시 트리거.
+   *
+   * - 새 ToolExecutor 를 만들지 않고 기존 인스턴스 재활용 (UI/배치 일관성)
+   *   대신 sub-agent 인스턴스의 도구 목록에서 delegate_subtask 를 제외해 재귀 차단
+   * - sub-agent 의 history 는 격리 (메인 history 오염 방지)
+   * - 결과: 마지막 assistant 메시지 + tool_call 요약 3줄
+   */
+  private async runSubagent(params: {
+    title: string;
+    instructions: string;
+    expectedOutputs?: string[];
+  }): Promise<{ success: boolean; summary: string }> {
+    const sub = new AgentLoop(this.llm, this.tools, {
+      isSubagent: true,
+      excludeTools: ["delegate_subtask"],
+      maxIterations: MAX_SUBAGENT_ITERATIONS,
+    });
+
+    const expectedNote = params.expectedOutputs?.length
+      ? `\n\n예상 산출물:\n${params.expectedOutputs.map((o) => `- ${o}`).join("\n")}`
+      : "";
+
+    const subUserMsg = `[Sub-task: ${params.title}]\n${params.instructions}${expectedNote}`;
+
+    const lines: string[] = [];
+    let lastAssistant = "";
+    try {
+      for await (const msg of sub.run(subUserMsg)) {
+        if (msg.role === "assistant") {
+          lastAssistant = msg.content;
+          // 진행 상황 한 줄씩 누적 (요약용)
+          if (msg.content && msg.content.length < 400) {
+            lines.push(msg.content);
+          }
+        } else if (msg.role === "tool_call") {
+          lines.push(`[tool] ${msg.toolName || "?"}`);
+        }
+      }
+    } catch (e: any) {
+      return {
+        success: false,
+        summary: `Sub-agent 실행 중 오류: ${e?.message || e}`,
+      };
+    }
+
+    // 마지막 assistant + 마지막 tool_call 3개 정도만 요약
+    const tail = lines.slice(-5).join("\n");
+    const summary = lastAssistant
+      ? `${tail}\n\n최종: ${lastAssistant.slice(0, 600)}`
+      : tail || "(no output)";
+
+    return { success: true, summary };
   }
 
   /**
@@ -996,6 +1273,16 @@ export class AgentLoop {
 
   private async buildContext(): Promise<string> {
     const parts: string[] = [];
+
+    // 워크스페이스 자동 컨텍스트 (캐시 5분 TTL)
+    try {
+      const wsCtx = await detectWorkspaceContext();
+      if (wsCtx?.raw) {
+        parts.push(wsCtx.raw);
+      }
+    } catch {
+      /* 워크스페이스 컨텍스트 실패해도 진행 */
+    }
 
     // Active file info
     const editor = vscode.window.activeTextEditor;
