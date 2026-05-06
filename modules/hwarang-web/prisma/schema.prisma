@@ -159,7 +159,7 @@ model AIModel {
 
   // 컨텍스트 & 제약
   maxContextLength Int @default(32768)
-  maxOutputTokens  Int @default(4096)
+  maxOutputTokens  Int @default(16384) // 긴 코드 작성 시 잘림 방지 (이전 4096 → 16384)
 
   // 카테고리 & 태그 (도메인 라우팅 키)
   category String   @default("general") // "general", "coding", "legal", "tax", "medical", "reasoning"

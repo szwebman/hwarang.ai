@@ -115,7 +115,7 @@ export class LLMClient {
       openaiApiKey: cfg.get("openaiApiKey", ""),
       anthropicApiKey: cfg.get("anthropicApiKey", ""),
       temperature: cfg.get("temperature", 0.7),
-      maxTokens: cfg.get("maxTokens", 4096),
+      maxTokens: cfg.get("maxTokens", 16384),
     };
   }
 

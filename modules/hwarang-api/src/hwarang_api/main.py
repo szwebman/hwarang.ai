@@ -26,6 +26,7 @@ from hwarang_api.routers import (
     crawl,
     grid,
     health,
+    hwarang_protocol,
     knowledge,
     learning,
     models,
@@ -160,6 +161,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health.router, tags=["Health"])
     app.include_router(chat.router, prefix="/v1", tags=["Chat"])
     app.include_router(models.router, prefix="/v1", tags=["Models"])
+    # Hwarang Protocol (HP) v1.0 — DSL/Markup/Workflow 전용 엔드포인트
+    # prefix=/v1/hwarang 는 라우터 자체에 정의됨
+    app.include_router(hwarang_protocol.router)
     app.include_router(admin.router, prefix="/admin", tags=["Admin"])
     app.include_router(cluster.router, prefix="/admin", tags=["Cluster"])
     app.include_router(grid.router, tags=["Grid/HFL"])

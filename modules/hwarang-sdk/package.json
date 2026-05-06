@@ -1,0 +1,39 @@
+{
+  "name": "@hwarang/sdk",
+  "version": "1.0.0",
+  "description": "화랑 AI 공식 TypeScript SDK — OpenAI 호환 + HP 확장",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test dist/*.test.js",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "hwarang",
+    "ai",
+    "korean",
+    "llm",
+    "coding-assistant"
+  ],
+  "license": "MIT",
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/node": "^20.0.0"
+  }
+}

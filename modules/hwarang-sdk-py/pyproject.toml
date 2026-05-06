@@ -1,0 +1,35 @@
+[project]
+name = "hwarang-sdk"
+version = "1.0.0"
+description = "화랑 AI 공식 Python SDK — OpenAI 호환 + HP 확장"
+authors = [{name = "Perseismore"}]
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+dependencies = ["httpx>=0.25.0"]
+keywords = ["hwarang", "ai", "korean", "llm"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "License :: OSI Approved :: MIT License",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://hwarang.ai"
+Documentation = "https://hwarang.ai/docs/sdk"
+Repository = "https://github.com/perseismore/hwarang"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hwarang = ["py.typed"]

@@ -203,8 +203,8 @@
         },
         "hwarang.maxTokens": {
           "type": "number",
-          "default": 4096,
-          "description": "응답 최대 토큰 수"
+          "default": 16384,
+          "description": "응답 최대 토큰 수 (긴 코드 작성 시 응답 잘림 방지)"
         },
         "hwarang.autoApplyEdits": {
           "type": "boolean",
