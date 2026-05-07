@@ -122,7 +122,7 @@ export function MessageBubble({ message, onOptionSelect }: MessageBubbleProps) {
                       {/* 인트로 */}
                       {split.intro && (
                         <div className="text-sm prose prose-sm dark:prose-invert max-w-none">
-                          <MarkdownRenderer content={split.intro} />
+                          <MarkdownRenderer content={split.intro} messageId={message.id} />
                         </div>
                       )}
 
@@ -155,7 +155,7 @@ export function MessageBubble({ message, onOptionSelect }: MessageBubbleProps) {
                             ─── ✨ 답변 ───
                           </div>
                           <div className="text-sm prose prose-sm dark:prose-invert max-w-none">
-                            <MarkdownRenderer content={split.answer} />
+                            <MarkdownRenderer content={split.answer} messageId={message.id} />
                           </div>
                         </>
                       )}
@@ -165,7 +165,7 @@ export function MessageBubble({ message, onOptionSelect }: MessageBubbleProps) {
               </>
             ) : (
               <div className="text-sm prose prose-sm dark:prose-invert max-w-none">
-                <MarkdownRenderer content={text} />
+                <MarkdownRenderer content={text} messageId={message.id} />
               </div>
             )}
 

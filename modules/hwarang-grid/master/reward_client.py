@@ -130,6 +130,9 @@ class RewardClient:
         quality_score: float,
         gpu_tier: str = "standard",
         is_sleep_learning: bool = False,
+        task_type: str = "hfl_round",
+        streak_days: int = 0,
+        use_emission_api: bool = True,
     ) -> float:
         """리워드 금액 계산.
 
@@ -138,17 +141,59 @@ class RewardClient:
           품질 보너스 = 50 × 품질점수
           티어 배수 = lite:1.0, standard:1.5, full:3.0
           수면 학습 = ×0.5 (자동이므로 절반)
+
+        use_emission_api=True 면 hwarang-api의 /api/coin/emission-rate 를
+        조회하여 supply/demand/halving 계수까지 반영. 실패 시 로컬 공식만 사용.
         """
         tier_multiplier = {"lite": 1.0, "standard": 1.5, "full": 3.0}.get(gpu_tier, 1.0)
 
         base = 100 * contribution_weight
         quality_bonus = 50 * quality_score
-        total = (base + quality_bonus) * tier_multiplier
+        local_total = (base + quality_bonus) * tier_multiplier
 
         if is_sleep_learning:
-            total *= 0.5
+            local_total *= 0.5
 
+        if not use_emission_api:
+            return round(local_total, 2)
+
+        # /api/coin/emission-rate 호출 — 실패 시 로컬 값으로 폴백
+        global_mult = self._fetch_global_multiplier()
+        if global_mult is None:
+            return round(local_total, 2)
+
+        # 작업 배율 + 연속 보너스 적용 (특허 공식)
+        task_mult = {
+            "inference": 1.0, "sft_train": 2.0, "dpo_train": 2.5,
+            "feedback_verify": 0.5, "data_gen": 1.5, "hfl_round": 2.0,
+        }.get(task_type, 1.0)
+        streak_mult = 1.0 + 0.5 * min(1.0, max(0, streak_days) / 30.0)
+
+        total = local_total * global_mult * task_mult * streak_mult
         return round(total, 2)
+
+    def _fetch_global_multiplier(self) -> float | None:
+        """/api/coin/emission-rate 호출 → global_multiplier 반환.
+
+        네트워크 실패 / API 미배포 시 None.
+        """
+        try:
+            import httpx
+        except ImportError:
+            return None
+
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                resp = client.get(
+                    f"{self.api_url}/api/coin/emission-rate",
+                    headers={"Authorization": f"Bearer {self.api_key}"} if self.api_key else None,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return float(data.get("global_multiplier", 1.0))
+        except Exception as exc:
+            logger.debug(f"emission-rate 조회 실패 (폴백 사용): {exc}")
+        return None
 
     async def batch_reward(self, rewards: list[dict]) -> list[RewardRecord]:
         """여러 에이전트에 일괄 리워드."""

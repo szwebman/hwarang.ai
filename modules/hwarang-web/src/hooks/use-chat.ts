@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { parseSSEStream } from "@/lib/stream-parser";
 import { generateId } from "@/lib/utils";
 import type { AttachedImage, Message } from "@/types/chat";
+import { detectNegativePattern, sendImplicitFeedback } from "@/lib/feedback";
 
 interface UseChatOptions {
   model?: string;
@@ -70,6 +71,25 @@ export function useChat(options: UseChatOptions = {}) {
       opts?: { skipOptions?: boolean },
     ) => {
       setError(null);
+
+      // HSEE Phase 1 — implicit feedback: 새 user 메시지가 부정 패턴이면
+      // 직전 assistant 메시지에 negative 신호 (fire-and-forget).
+      // setMessages 안에서 prev 를 읽으면 stale 이슈가 적고, hook 의존성도 줄어듦.
+      if (detectNegativePattern(content)) {
+        setMessages((prev) => {
+          for (let i = prev.length - 1; i >= 0; i--) {
+            if (prev[i].role === "assistant" && prev[i].content) {
+              void sendImplicitFeedback({
+                kind: "negative_followup",
+                messageId: prev[i].id,
+                userMessage: content,
+              });
+              break;
+            }
+          }
+          return prev;
+        });
+      }
 
       // Add user message
       const userMessage: Message = {

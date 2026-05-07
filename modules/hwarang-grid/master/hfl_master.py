@@ -62,6 +62,10 @@ class AgentInfo:
     status: str = "idle"  # idle, training, uploading
     reputation: float = 0.5
     total_contributions: int = 0
+    # Phase 3: 도메인 선호 + 하드웨어 능력 신고
+    preferred_domains: list[str] = field(default_factory=list)  # ["coding","design",...]
+    bandwidth_mbps: float = 0.0
+    compute_score: float = 1.0  # 토큰/초 벤치마크 비율
 
 
 @dataclass
@@ -91,6 +95,8 @@ class TrainingRound:
     previous_score: float | None = None
     started_at: float = field(default_factory=time.time)
     completed_at: float | None = None
+    domain: str = "general"  # Phase 3: 도메인별 병렬 라운드
+    aggregation_method: str = "fedavg"  # 라운드별 합성 방식
 
 
 # ════════════════════════════════════════════════════════════════
@@ -108,10 +114,14 @@ class HFLMaster:
         storage_dir: str = "/mnt/nvme2/hwarang/hfl",
         min_participants: int = 2,
         max_rounds: int = 100,
+        aggregation_method: str = "fedavg",  # "fedavg" | "ties"
+        ties_trim_ratio: float = 0.2,         # TIES Trim: 절댓값 하위 비율 제거
     ):
         self.storage_dir = Path(storage_dir)
         self.min_participants = min_participants
         self.max_rounds = max_rounds
+        self.aggregation_method = aggregation_method
+        self.ties_trim_ratio = ties_trim_ratio
 
         # 디렉토리 구조
         self.lora_inbox = self.storage_dir / "inbox"       # 에이전트가 올린 LoRA
@@ -130,23 +140,45 @@ class HFLMaster:
         self.current_lora_path: str | None = None
         self.current_benchmark: float = 0.0
 
-        logger.info(f"HFL 마스터 초기화: {storage_dir}")
+        # 도메인별 병렬 라운드 — Phase 3: 학습 큐
+        # domain_id ("coding"|"design"|"mobile"|"ci") → TrainingRound
+        self.domain_rounds: dict[str, TrainingRound] = {}
+        self.domain_lora_paths: dict[str, str] = {}
+        self.domain_benchmarks: dict[str, float] = {}
+
+        logger.info(
+            f"HFL 마스터 초기화: {storage_dir} "
+            f"(aggregation={aggregation_method}, trim={ties_trim_ratio})"
+        )
 
     # ════════════════════════════════════════════════════════════
     # 에이전트 관리
     # ════════════════════════════════════════════════════════════
 
     def register_agent(self, agent_id: str, gpu_name: str,
-                        vram_gb: float, tier: str) -> dict:
-        """에이전트 등록."""
+                        vram_gb: float, tier: str,
+                        preferred_domains: list[str] | None = None,
+                        bandwidth_mbps: float = 0.0,
+                        compute_score: float = 1.0) -> dict:
+        """에이전트 등록.
+
+        Phase 3: GPU 사양 + 선호 도메인 + 대역폭을 함께 신고하면
+        마스터가 도메인별 라운드 매칭에 활용한다.
+        """
         agent = AgentInfo(
             agent_id=agent_id,
             gpu_name=gpu_name,
             vram_gb=vram_gb,
             tier=tier,
+            preferred_domains=list(preferred_domains or []),
+            bandwidth_mbps=float(bandwidth_mbps),
+            compute_score=float(compute_score),
         )
         self.agents[agent_id] = agent
-        logger.info(f"에이전트 등록: {agent_id} ({gpu_name}, {vram_gb}GB, {tier})")
+        logger.info(
+            f"에이전트 등록: {agent_id} ({gpu_name}, {vram_gb}GB, {tier}, "
+            f"domains={agent.preferred_domains}, bw={bandwidth_mbps}Mbps)"
+        )
 
         return {
             "status": "registered",
@@ -216,6 +248,7 @@ class HFLMaster:
             status=RoundStatus.TRAINING,
             config=config,
             participants=[a.agent_id for a in eligible],
+            aggregation_method=self.aggregation_method,
         )
 
         logger.info(f"라운드 {round_number} 시작: {len(eligible)}개 에이전트 참여")
@@ -230,7 +263,31 @@ class HFLMaster:
         }
 
     def get_round_task(self, agent_id: str) -> dict | None:
-        """에이전트에게 학습 작업 할당."""
+        """에이전트에게 학습 작업 할당.
+
+        Phase 3: 도메인별 병렬 라운드 우선 → 없으면 글로벌 라운드.
+        """
+        # 1) 도메인별 매칭: 에이전트 선호 도메인과 일치하는 활성 라운드
+        agent = self.agents.get(agent_id)
+        if agent and agent.preferred_domains:
+            for dom in agent.preferred_domains:
+                rnd = self.domain_rounds.get(dom)
+                if (
+                    rnd is not None
+                    and agent_id in rnd.participants
+                    and rnd.status == RoundStatus.TRAINING
+                ):
+                    return {
+                        "round_id": rnd.round_id,
+                        "task": "train_lora",
+                        "domain": rnd.domain,
+                        "config": rnd.config,
+                        "data_url": f"/hfl/data/{rnd.round_id}",
+                        "upload_url": f"/hfl/submit/{rnd.round_id}",
+                        "deadline": time.time() + 3600,
+                    }
+
+        # 2) 글로벌 라운드 폴백
         if not self.current_round:
             return None
         if agent_id not in self.current_round.participants:
@@ -241,11 +298,108 @@ class HFLMaster:
         return {
             "round_id": self.current_round.round_id,
             "task": "train_lora",
+            "domain": self.current_round.domain,
             "config": self.current_round.config,
             "data_url": f"/hfl/data/{self.current_round.round_id}",
             "upload_url": f"/hfl/submit/{self.current_round.round_id}",
             "deadline": time.time() + 3600,  # 1시간 내 완료
         }
+
+    # ════════════════════════════════════════════════════════════
+    # Phase 3: 도메인별 병렬 라운드 매니저
+    # ════════════════════════════════════════════════════════════
+
+    SUPPORTED_DOMAINS = ("coding", "design", "mobile", "ci", "general")
+
+    def start_domain_round(
+        self,
+        domain: str,
+        training_config: dict | None = None,
+        min_vram_gb: float = 8.0,
+        aggregation_method: str | None = None,
+    ) -> dict:
+        """도메인별 병렬 라운드 시작.
+
+        매칭 규칙:
+          - tier ∈ {standard, full}
+          - vram >= min_vram_gb
+          - preferred_domains 에 domain 포함 (없으면 'general' 라운드만 매칭)
+        """
+        if domain not in self.SUPPORTED_DOMAINS:
+            return {"error": f"지원되지 않는 도메인: {domain}"}
+
+        existing = self.domain_rounds.get(domain)
+        if existing and existing.status not in (
+            RoundStatus.COMPLETED, RoundStatus.FAILED
+        ):
+            return {"error": f"도메인 {domain} 라운드 진행 중"}
+
+        active = self.get_active_agents()
+        eligible = [
+            a for a in active
+            if a.tier in ("standard", "full")
+            and a.vram_gb >= min_vram_gb
+            and (domain in a.preferred_domains or domain == "general")
+        ]
+
+        if len(eligible) < self.min_participants:
+            return {
+                "error": "참가자 부족",
+                "domain": domain,
+                "eligible": len(eligible),
+                "required": self.min_participants,
+            }
+
+        round_number = len([
+            r for r in self.round_history if r.domain == domain
+        ]) + 1
+        round_id = f"{domain}_round_{round_number}_{int(time.time())}"
+
+        config = dict(training_config or {})
+        config.setdefault("domain", domain)
+        config.setdefault("base_model", "qwen2.5-32b")
+        config.setdefault("lora_r", 16)
+        config.setdefault("lora_alpha", 32)
+        config.setdefault("learning_rate", 2e-4)
+        config.setdefault("steps_per_round", 100)
+
+        rnd = TrainingRound(
+            round_id=round_id,
+            round_number=round_number,
+            status=RoundStatus.TRAINING,
+            config=config,
+            participants=[a.agent_id for a in eligible],
+            domain=domain,
+            aggregation_method=aggregation_method or self.aggregation_method,
+        )
+        self.domain_rounds[domain] = rnd
+
+        logger.info(
+            f"도메인 라운드 {domain}/{round_number} 시작: "
+            f"{len(eligible)}개 에이전트, agg={rnd.aggregation_method}"
+        )
+        return {
+            "status": "started",
+            "round_id": round_id,
+            "domain": domain,
+            "participants": len(eligible),
+            "config": config,
+            "aggregation_method": rnd.aggregation_method,
+        }
+
+    def list_domain_rounds(self) -> list[dict]:
+        """현재 진행 중인 도메인별 라운드 요약."""
+        result = []
+        for dom, rnd in self.domain_rounds.items():
+            result.append({
+                "domain": dom,
+                "round_id": rnd.round_id,
+                "status": rnd.status.value,
+                "participants": len(rnd.participants),
+                "submissions": len(rnd.submissions),
+                "aggregation_method": rnd.aggregation_method,
+            })
+        return result
 
     # ════════════════════════════════════════════════════════════
     # LoRA 수집 & 검증
@@ -265,14 +419,24 @@ class HFLMaster:
         if existing:
             return {"error": "이미 제출했습니다"}
 
-        # 파일 저장
+        # 파일 저장 — 압축 페이로드(gzip 매직 0x1f8b) 자동 분기
         file_hash = hashlib.sha256(lora_data).hexdigest()
         save_dir = self.lora_inbox / round_id / agent_id
         save_dir.mkdir(parents=True, exist_ok=True)
-        save_path = save_dir / "adapter_model.safetensors"
+
+        is_compressed = (
+            len(lora_data) >= 2 and lora_data[:2] == b"\x1f\x8b"
+        ) or bool(metadata.get("compressed"))
+
+        if is_compressed:
+            save_path = save_dir / "adapter_compressed.bin"
+        else:
+            save_path = save_dir / "adapter_model.safetensors"
         save_path.write_bytes(lora_data)
 
         # 메타데이터 저장
+        metadata = dict(metadata)
+        metadata["is_compressed"] = is_compressed
         (save_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
 
         # 검증
@@ -397,7 +561,9 @@ class HFLMaster:
         lora_paths = [s.lora_path for s in valid]
 
         try:
-            merged_path = self._merge_loras(lora_paths, weights)
+            # 라운드별 aggregation 방식 우선, 없으면 전역 설정
+            method = self.current_round.aggregation_method or self.aggregation_method
+            merged_path = self._merge_loras(lora_paths, weights, method=method)
             self.current_round.merged_lora_path = merged_path
             self.current_round.status = RoundStatus.VALIDATING
 
@@ -433,60 +599,209 @@ class HFLMaster:
         self.round_history.append(self.current_round)
 
     def _merge_loras(self, lora_paths: list[str],
-                      weights: dict[str, float]) -> str:
-        """여러 LoRA를 가중 평균으로 합성.
+                      weights: dict[str, float],
+                      method: str | None = None) -> str:
+        """여러 LoRA를 합성 (FedAvg 또는 TIES).
 
-        실제로는 safetensors 파일의 텐서를 로드해서
-        가중 평균을 계산합니다.
+        Args:
+            lora_paths: 각 에이전트 LoRA 디렉토리 경로
+            weights: agent_id → 가중치 (정규화 가정)
+            method: "fedavg" | "ties". None 이면 self.aggregation_method 사용
         """
+        method = method or self.aggregation_method
         output_dir = self.lora_merged / f"v{self.current_lora_version + 1}"
         output_dir.mkdir(parents=True, exist_ok=True)
 
         try:
             import torch
             from safetensors.torch import load_file, save_file
-
-            # 각 LoRA의 가중치 로드
-            all_weights = {}
-            for path in lora_paths:
-                adapter_file = Path(path) / "adapter_model.safetensors"
-                if adapter_file.exists():
-                    state_dict = load_file(str(adapter_file))
-                    agent_id = Path(path).name
-                    w = weights.get(agent_id, 1.0 / len(lora_paths))
-                    all_weights[agent_id] = (state_dict, w)
-
-            if not all_weights:
-                raise ValueError("로드 가능한 LoRA가 없습니다")
-
-            # 가중 평균 (FedAvg)
-            merged_state = {}
-            first_agent = list(all_weights.keys())[0]
-            first_state = all_weights[first_agent][0]
-
-            for key in first_state.keys():
-                weighted_sum = torch.zeros_like(first_state[key], dtype=torch.float32)
-                for agent_id, (state, w) in all_weights.items():
-                    if key in state:
-                        weighted_sum += state[key].float() * w
-                merged_state[key] = weighted_sum.to(first_state[key].dtype)
-
-            # 저장
-            save_file(merged_state, str(output_dir / "adapter_model.safetensors"))
-
-            # adapter_config.json 복사 (첫 번째 것 사용)
-            first_config = Path(lora_paths[0]) / "adapter_config.json"
-            if first_config.exists():
-                shutil.copy(first_config, output_dir / "adapter_config.json")
-
-            logger.info(f"LoRA 통합 완료: {output_dir}")
-            return str(output_dir)
-
         except ImportError:
             # torch 없으면 단순 복사 (테스트용)
             logger.warning("torch 없음 → 첫 번째 LoRA를 그대로 사용")
             shutil.copytree(lora_paths[0], str(output_dir), dirs_exist_ok=True)
             return str(output_dir)
+
+        # 각 LoRA의 가중치 로드 (압축 페이로드 자동 감지)
+        all_weights: dict[str, tuple[dict, float]] = {}
+        for path in lora_paths:
+            state_dict = self._load_submission_state(path)
+            if state_dict is None:
+                continue
+            agent_id = Path(path).name
+            w = weights.get(agent_id, 1.0 / len(lora_paths))
+            all_weights[agent_id] = (state_dict, w)
+
+        if not all_weights:
+            raise ValueError("로드 가능한 LoRA가 없습니다")
+
+        first_agent = list(all_weights.keys())[0]
+        first_state = all_weights[first_agent][0]
+
+        if method == "ties":
+            merged_state = self._ties_merge(all_weights, first_state)
+            logger.info(f"TIES 합성 완료: {len(all_weights)}개 LoRA")
+        else:
+            # FedAvg: 가중 평균
+            merged_state = {}
+            for key in first_state.keys():
+                weighted_sum = torch.zeros_like(first_state[key], dtype=torch.float32)
+                for _agent_id, (state, w) in all_weights.items():
+                    if key in state:
+                        weighted_sum += state[key].float() * w
+                merged_state[key] = weighted_sum.to(first_state[key].dtype)
+            logger.info(f"FedAvg 합성 완료: {len(all_weights)}개 LoRA")
+
+        # 저장
+        save_file(merged_state, str(output_dir / "adapter_model.safetensors"))
+
+        # adapter_config.json 복사 (첫 번째 디렉토리에 있을 때만)
+        first_config = Path(lora_paths[0]) / "adapter_config.json"
+        if first_config.exists():
+            shutil.copy(first_config, output_dir / "adapter_config.json")
+
+        logger.info(f"LoRA 통합 완료: {output_dir} (method={method})")
+        return str(output_dir)
+
+    # ════════════════════════════════════════════════════════════
+    # TIES Merge (Yadav et al. 2023)
+    # https://arxiv.org/abs/2306.01708
+    #   1) Trim   — 각 LoRA의 절댓값 하위 ties_trim_ratio 제거
+    #   2) Elect  — 파라미터별 부호 다수결 (가중치 합산 부호)
+    #   3) Disjoint Merge — 다수결 부호와 일치하는 값만 평균
+    # ════════════════════════════════════════════════════════════
+    def _ties_merge(self, all_weights: dict[str, tuple[dict, float]],
+                    reference_state: dict) -> dict:
+        """TIES 합성 — 부호 충돌 해결 + 잡음 trim.
+
+        주의: LoRA 의 경우 base 가 0(zero-init)이므로 task vector = adapter weight.
+        따라서 baseline 차감 없이 어댑터 텐서 자체를 task vector 로 사용.
+        """
+        import torch
+
+        merged: dict = {}
+        trim_ratio = max(0.0, min(0.95, self.ties_trim_ratio))
+
+        for key in reference_state.keys():
+            ref = reference_state[key]
+            target_dtype = ref.dtype
+
+            # ── 1) Trim: 각 task vector 의 절댓값 하위 trim_ratio 를 0 으로 ──
+            trimmed_tasks: list[tuple[torch.Tensor, float]] = []
+            for _agent_id, (state, w) in all_weights.items():
+                if key not in state:
+                    continue
+                t = state[key].float().clone()
+                if trim_ratio > 0 and t.numel() > 1:
+                    flat = t.abs().flatten()
+                    k = max(1, int(flat.numel() * (1.0 - trim_ratio)))
+                    if k < flat.numel():
+                        threshold = torch.kthvalue(flat, flat.numel() - k + 1).values
+                        t = torch.where(t.abs() >= threshold, t, torch.zeros_like(t))
+                trimmed_tasks.append((t, float(w)))
+
+            if not trimmed_tasks:
+                merged[key] = ref.clone()
+                continue
+
+            # ── 2) Elect Sign: 파라미터별 가중치 부호 합산 ──
+            sign_sum = torch.zeros_like(trimmed_tasks[0][0])
+            for t, w in trimmed_tasks:
+                sign_sum = sign_sum + torch.sign(t) * w
+            elected_sign = torch.sign(sign_sum)  # ±1 또는 0
+
+            # ── 3) Disjoint Merge: 다수결 부호와 일치하는 값만 평균 ──
+            #    weight_sum 로 정규화 (count 가 아닌 가중치 합 사용 — FedAvg 와 일관)
+            value_acc = torch.zeros_like(sign_sum)
+            weight_acc = torch.zeros_like(sign_sum)
+            for t, w in trimmed_tasks:
+                # 부호 일치 마스크
+                aligned = (torch.sign(t) == elected_sign) & (elected_sign != 0)
+                value_acc = value_acc + torch.where(aligned, t * w, torch.zeros_like(t))
+                weight_acc = weight_acc + torch.where(
+                    aligned, torch.full_like(t, w), torch.zeros_like(t)
+                )
+
+            # 0 으로 나눗셈 방지: 부호 합의가 없는 위치는 0 유지 (≈ baseline 변화 없음)
+            safe_weights = torch.where(
+                weight_acc > 0, weight_acc, torch.ones_like(weight_acc)
+            )
+            merged_value = torch.where(
+                weight_acc > 0,
+                value_acc / safe_weights,
+                torch.zeros_like(value_acc),
+            )
+            merged[key] = merged_value.to(target_dtype)
+
+        return merged
+
+    def _load_submission_state(self, path: str) -> dict | None:
+        """제출 디렉토리에서 state_dict 로드.
+
+        - adapter_model.safetensors 가 있으면 그대로 로드
+        - adapter_compressed.bin 이 있으면 5단계 압축 해제 (gunzip → INT8 역양자화 → sparse 복원)
+        """
+        adapter_file = Path(path) / "adapter_model.safetensors"
+        if adapter_file.exists():
+            try:
+                from safetensors.torch import load_file
+                return load_file(str(adapter_file))
+            except ImportError:
+                logger.warning("safetensors 미설치 — safetensors 파일 스킵")
+            except Exception as exc:
+                logger.warning(f"safetensors 로드 실패 ({path}): {exc}")
+
+        # 압축 페이로드 — torch+numpy 만 필요 (safetensors 불필요)
+        compressed_file = Path(path) / "adapter_compressed.bin"
+        if compressed_file.exists():
+            try:
+                return self._decompress_payload(compressed_file.read_bytes())
+            except Exception as exc:
+                logger.warning(f"압축 해제 실패 ({path}): {exc}")
+
+        return None
+
+    def _decompress_payload(self, compressed: bytes) -> dict:
+        """5단계 압축 페이로드 역변환:
+            gzip 해제 → INT8 역양자화 → sparse 복원 → 원본 dtype 텐서.
+
+        agent/modules/lora_compressor.py 의 LoRACompressor.compress() 와 짝.
+        """
+        import gzip as _gzip
+        import json as _json
+        import numpy as _np
+        import torch as _torch
+
+        json_bytes = _gzip.decompress(compressed)
+        payload = _json.loads(json_bytes)
+
+        layers = payload.get("layers", {})
+        state: dict = {}
+        for name, layer in layers.items():
+            shape = layer["shape"]
+            scale = layer["scale"]
+            zero_point = layer["zero_point"]
+            indices = layer["indices"]
+            values = layer["values"]
+
+            # INT8 역양자화 — (q - zero_point) * scale
+            float_values = [(v - zero_point) * scale for v in values]
+
+            dense = _np.zeros(int(_np.prod(shape)), dtype=_np.float32)
+            for idx, val in zip(indices, float_values):
+                if 0 <= idx < dense.size:
+                    dense[idx] = val
+
+            tensor = _torch.from_numpy(dense.reshape(shape))
+
+            dtype_map = {
+                "torch.float16": _torch.float16,
+                "torch.bfloat16": _torch.bfloat16,
+                "torch.float32": _torch.float32,
+            }
+            target_dtype = dtype_map.get(layer.get("dtype", ""), _torch.float32)
+            state[name] = tensor.to(target_dtype)
+
+        return state
 
     def _run_benchmark(self, lora_path: str) -> float:
         """통합된 LoRA 품질 벤치마크."""
@@ -639,9 +954,47 @@ try:
         gpu_name: str = Form(...),
         vram_gb: float = Form(...),
         tier: str = Form(...),
+        preferred_domains: str = Form("[]"),  # JSON list
+        bandwidth_mbps: float = Form(0.0),
+        compute_score: float = Form(1.0),
     ):
-        """에이전트 등록."""
-        return master.register_agent(agent_id, gpu_name, vram_gb, tier)
+        """에이전트 등록 (Phase 3: 도메인 + 대역폭 신고)."""
+        try:
+            domains = json.loads(preferred_domains)
+            if not isinstance(domains, list):
+                domains = []
+        except Exception:
+            domains = []
+        return master.register_agent(
+            agent_id, gpu_name, vram_gb, tier,
+            preferred_domains=domains,
+            bandwidth_mbps=bandwidth_mbps,
+            compute_score=compute_score,
+        )
+
+    @app.post("/hfl/round/domain/start")
+    async def start_domain_round(
+        domain: str = Form(...),
+        config: str = Form("{}"),
+        min_vram_gb: float = Form(8.0),
+        aggregation_method: str = Form(""),
+    ):
+        """도메인별 병렬 라운드 시작 (관리자용)."""
+        try:
+            cfg = json.loads(config) if config else {}
+        except Exception:
+            cfg = {}
+        return master.start_domain_round(
+            domain=domain,
+            training_config=cfg,
+            min_vram_gb=min_vram_gb,
+            aggregation_method=aggregation_method or None,
+        )
+
+    @app.get("/hfl/round/domains")
+    async def list_domain_rounds():
+        """현재 진행 중인 도메인별 라운드 목록."""
+        return {"domains": master.list_domain_rounds()}
 
     @app.post("/hfl/heartbeat")
     async def heartbeat(

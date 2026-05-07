@@ -72,6 +72,12 @@ class LocalFinetuneModule:
         lora_alpha: int = 16,
         lr: float = 2e-4,
         max_seq_length: int = 2048,
+        # Phase 3: 학습 완료 후 자동 업로드 옵션 (5단계 압축 적용)
+        auto_upload: bool = False,
+        master_url: str = "",
+        agent_id: str = "",
+        round_id: str = "",
+        previous_lora_path: str = "",
     ) -> dict:
         """로컬 LoRA 학습.
 
@@ -276,7 +282,27 @@ class LocalFinetuneModule:
             if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
                 torch.mps.empty_cache()
 
-            return {"status": "success", "path": output_dir, "loss": final_loss}
+            result = {"status": "success", "path": output_dir, "loss": final_loss}
+
+            # ── Phase 3: 학습 완료 후 5단계 압축 + 마스터 업로드 ──
+            if auto_upload and master_url:
+                try:
+                    from .lora_compressor import NetworkAdaptiveTransfer
+                    transport = NetworkAdaptiveTransfer()
+                    upload_result = transport.adaptive_upload(
+                        lora_path=output_dir,
+                        master_url=master_url,
+                        agent_id=agent_id,
+                        round_id=round_id,
+                        previous_path=previous_lora_path or None,
+                    )
+                    result["upload"] = upload_result
+                    logger.info(f"자동 업로드 결과: {upload_result.get('status')}")
+                except Exception as up_exc:
+                    logger.warning(f"자동 업로드 실패 (학습은 성공): {up_exc}")
+                    result["upload"] = {"status": "failed", "error": str(up_exc)}
+
+            return result
 
         except (torch.cuda.OutOfMemoryError if hasattr(torch, 'cuda') else RuntimeError) as oom_err:
             if "out of memory" in str(oom_err).lower() or "CUDA" in str(oom_err):

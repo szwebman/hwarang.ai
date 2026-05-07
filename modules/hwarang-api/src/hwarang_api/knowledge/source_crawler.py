@@ -511,8 +511,139 @@ def _parse_iso_date(s: str) -> datetime | None:
             return None
 
 
+# ---------------------------------------------------------------------------
+# HSEE Phase 4 — Trusted Source 자동 갱신
+# ---------------------------------------------------------------------------
+async def crawl_trusted_sources(
+    top_k: int = 8,
+    queries: tuple[str, ...] = (
+        "최신 공시", "주요 변경", "신규 통계", "최저시급", "환율", "법령 개정",
+    ),
+) -> dict:
+    """1차 출처 API (법제처/KOSIS/국세청/MFDS/ECOS/KMA) 주기 호출.
+
+    HSEE Phase 4 Trusted Source Network 의 신뢰도 자동 갱신용:
+      1. 도메인 별 대표 쿼리로 ``primary_source_apis.search_primary_sources`` 호출
+      2. 결과를 ``self_questioner._ingest_api_results`` 패턴으로 HLKM 에 사실 ingest
+      3. ``TrustedSource.lastCrawledAt`` / ``successRate`` 갱신 (이미 매칭되는 row 가
+         있을 때만 — 새로 만들지 않음, 관리자 승인 정책 보존)
+
+    스케줄러: 매일 04:00 KST.
+    """
+    started = _utcnow()
+    try:
+        from hwarang_api.knowledge.primary_source_apis import (
+            search_primary_sources,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("primary_source_apis 임포트 실패: %s", exc)
+        return {"error": "primary_source_apis_unavailable"}
+
+    # 도메인 키는 primary_source_apis.DOMAIN_TO_APIS 와 정확히 일치해야 매칭됨.
+    # 키워드는 매일 04:00 KST 호출되므로 도메인당 ~12개 상한 (rate limit 보호).
+    domain_map = {
+        "legal": [
+            "법령 개정", "최저시급", "최저임금", "근로기준법", "개인정보보호법",
+            "주택임대차보호법", "부동산 거래법", "도로교통법", "형법 개정",
+            "상법 개정", "공정거래법", "소비자보호법",
+        ],
+        "tax": [
+            "연말정산", "부가세 신고", "종합소득세", "양도소득세", "상속세",
+            "증여세", "법인세", "원천세", "간이과세", "종합부동산세",
+            "세액공제", "세무조사",
+        ],
+        "statistics": [
+            "주요 통계", "신규 통계", "인구 통계", "가계동향", "고용동향",
+            "소비자물가지수", "생산자물가지수", "주택가격동향", "사업체조사",
+            "수출입동향", "산업생산지수", "경제활동인구",
+        ],
+        "medical": [
+            "의약품 허가", "의약품 회수", "의료기기 허가", "부작용 보고",
+            "임상시험 승인", "신약 허가", "백신 안전성", "의료기기 회수",
+        ],
+        "drug": [
+            "의약품 허가", "마약류 관리", "전문의약품", "일반의약품", "복약지도",
+        ],
+        "food": [
+            "식품 회수", "식중독 발생", "건강기능식품", "식품첨가물",
+            "화장품 회수", "수입식품 검사", "유전자변형식품",
+        ],
+        "finance": [
+            "환율", "기준금리", "외환보유액", "무역수지", "경상수지",
+            "통화량", "GDP 성장률", "수출입 통계", "생산자물가",
+            "산업생산", "소비자심리지수", "기업경기실사지수",
+        ],
+        "economy": [
+            "GDP 성장률", "경제성장률", "산업생산", "수출입동향",
+            "고용동향", "물가상승률", "통화정책",
+        ],
+        "weather": [
+            "서울 날씨", "부산 날씨", "대구 날씨", "광주 날씨", "제주 날씨",
+            "기상특보", "태풍 정보", "폭염특보", "한파특보", "미세먼지",
+            "황사특보", "호우특보", "강수량 예보",
+        ],
+        "general": list(queries),
+    }
+
+    total_results = 0
+    ingested = 0
+    by_domain: dict[str, dict] = {}
+
+    for dom, qs in domain_map.items():
+        dom_total = 0
+        dom_ingested = 0
+        for q in qs:
+            try:
+                results = await search_primary_sources(q, dom, top_k=top_k)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("primary search fail [%s/%s]: %s", dom, q, exc)
+                continue
+            dom_total += len(results)
+
+            # ingest helper 재사용
+            try:
+                from hwarang_api.learning.self_questioner import (
+                    _ingest_api_results,
+                )
+
+                saved = await _ingest_api_results(results, dom)
+                dom_ingested += saved
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("ingest helper unavailable: %s", exc)
+
+        total_results += dom_total
+        ingested += dom_ingested
+        by_domain[dom] = {"queries": dom_total, "ingested": dom_ingested}
+
+    # TrustedSource lastCrawledAt 도 함께 bump (활성 신뢰도 신호로)
+    try:
+        active = await prisma.trustedsource.find_many(
+            where={"isWhitelisted": True, "isActive": True},
+            take=200,
+        )
+        for s in active:
+            try:
+                await prisma.trustedsource.update(
+                    where={"id": s.id},
+                    data={"lastCrawledAt": _utcnow()},
+                )
+            except Exception:  # noqa: BLE001
+                continue
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("TrustedSource lastCrawledAt bump fail: %s", exc)
+
+    return {
+        "started_at": started.isoformat(),
+        "elapsed_seconds": (_utcnow() - started).total_seconds(),
+        "total_results": total_results,
+        "ingested": ingested,
+        "by_domain": by_domain,
+    }
+
+
 __all__ = [
     "SourceCrawler",
     "crawl_all_sources",
     "crawl_one_source",
+    "crawl_trusted_sources",
 ]

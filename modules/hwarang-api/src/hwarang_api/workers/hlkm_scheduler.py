@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import socket
 from datetime import datetime, time, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
@@ -24,6 +25,23 @@ logger = logging.getLogger(__name__)
 KST = timezone(timedelta(hours=9))
 
 JobFn = Callable[[], Awaitable[Any]]
+
+
+def _is_scheduler_leader() -> bool:
+    """다중 인스턴스 배포 시 cron 잡을 1대만 돌리기 위한 가드.
+
+    환경변수 ``HWARANG_SCHEDULER_LEADER``:
+      * 미설정 → 기본 leader=True (단일 인스턴스 가정, 개발/소규모)
+      * "0"/"false"/"no"/"off" → leader=False (cron 비활성, API 만 서빙)
+      * 그 외 ("1"/"true"/...) → leader=True
+    수평확장 (k8s replicas>1, docker-compose scale 등) 운영 시
+    1 대만 ``HWARANG_SCHEDULER_LEADER=1``, 나머지는 ``=0`` 으로 설정해야
+    외부 API rate limit / 중복 LoRA 학습이 발생하지 않음.
+    """
+    raw = os.environ.get("HWARANG_SCHEDULER_LEADER")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in ("0", "false", "no", "off", "")
 
 
 # ---------------------------------------------------------------------------
@@ -78,12 +96,28 @@ class HLKMScheduler:
 
     # -- 수명 관리 ----------------------------------------------------------
     async def start(self) -> None:
-        """등록된 모든 잡을 백그라운드 태스크로 띄운다. 중복 호출 안전."""
+        """등록된 모든 잡을 백그라운드 태스크로 띄운다. 중복 호출 안전.
+
+        다중 인스턴스 배포에서는 ``HWARANG_SCHEDULER_LEADER=0`` 으로 설정한
+        인스턴스에서는 cron 잡을 띄우지 않는다 (API 라우터만 서빙).
+        """
         if self.running:
             logger.info("HLKMScheduler already running")
             return
+
+        if not _is_scheduler_leader():
+            logger.info(
+                "HLKMScheduler: this instance is NOT the scheduler leader "
+                "(HWARANG_SCHEDULER_LEADER=0) — cron jobs disabled. host=%s",
+                socket.gethostname(),
+            )
+            # running=False 유지 → API 만 서빙
+            return
+
         self.running = True
-        logger.info("HLKMScheduler starting...")
+        logger.info(
+            "HLKMScheduler starting (LEADER, host=%s)...", socket.gethostname()
+        )
 
         loop = asyncio.get_running_loop()
 
@@ -203,6 +237,20 @@ class HLKMScheduler:
                     "promote_validated", 24 * 3600, self._job_promote_validated
                 ),
                 name="hlkm.promote_validated",
+            ),
+            # ── HSEE Phase 4 — Trusted Source 자동 갱신 ───────────
+            # 매일 04:00 KST — 1차 출처 API (법제처/KOSIS/국세청/MFDS/ECOS/KMA)
+            # 도메인별 대표 쿼리 호출 → HLKM 에 사실 ingest + TrustedSource
+            # lastCrawledAt 갱신. 분산 크롤(_job_dispatch_crawls)과 별도로,
+            # 1차 출처의 "변경 감지 + 신뢰도 신호" 만 빠르게 채운다.
+            loop.create_task(
+                self._run_cron_job(
+                    "crawl_trusted_sources",
+                    4,
+                    0,
+                    self._job_crawl_trusted_sources_phase4,
+                ),
+                name="hlkm.crawl_trusted_sources",
             ),
             # ── HSEE Phase 5 — Self-Adversarial ──────────────────
             # 매일 04:00 KST (sleep_cycle 03:00 다음 단계) — 자기 답변 공격 + 약점 수집
@@ -426,6 +474,29 @@ class HLKMScheduler:
                 ),
                 name="hlkm.weekly_intent",
             ),
+            # ── HSEE Phase 2 — 주간 Continuous Learning ──────────
+            # 매주 일요일 03:00 KST — 7일치 RLHFFeedback (암묵 신호) → DPO 페어
+            # → identity_v3/v7 누적 → lora_train.py → eval_full.py → 게이트 통과
+            # 시 vLLM hot-swap + A/B 실험 시작.
+            loop.create_task(
+                self._run_weekly_job(
+                    "weekly_lora_train",
+                    weekday=6, hour=3, minute=0,
+                    job_fn=self._job_weekly_lora_train,
+                ),
+                name="hlkm.weekly_lora_train",
+            ),
+            # ── HSEE Phase 2 — A/B 자동 롤백 모니터 ──────────────
+            # 매 6 시간 — treatment 의 암묵 부정 신호가 control 대비 +20% 이상이면
+            # vLLM /v1/unload_lora_adapter 호출 + 실험 비활성화.
+            loop.create_task(
+                self._run_job(
+                    "ab_rollback_monitor",
+                    6 * 3600,
+                    self._job_ab_rollback_monitor,
+                ),
+                name="hlkm.ab_rollback_monitor",
+            ),
         ]
         logger.info("HLKMScheduler: %d jobs scheduled", len(self.tasks))
 
@@ -493,14 +564,49 @@ class HLKMScheduler:
                 return
             await self._invoke(name, job_fn)
 
+    # 잡별 분산 락 TTL (초). 학습/평가 잡은 길게.
+    # TTL 만료 시 다른 인스턴스가 takeover 가능 (인스턴스 크래시 대비).
+    _LOCK_TTL: dict[str, int] = {
+        "weekly_lora_train": 6 * 3600,        # 학습 1~3 시간
+        "halflife_retrain": 6 * 3600,
+        "ab_rollback_monitor": 30 * 60,
+        "crawl_trusted_sources_phase4": 30 * 60,
+        "sleep_cycle": 60 * 60,
+        "daily_verify": 60 * 60,
+        "gap_scanner": 30 * 60,
+        # 그 외는 _DEFAULT_LOCK_TTL
+    }
+    _DEFAULT_LOCK_TTL: int = 30 * 60
+
     async def _invoke(self, name: str, job_fn: JobFn) -> None:
-        """단일 실행을 감싸는 공통 로직 (로그 + 예외 + 스태츠)."""
+        """단일 실행을 감싸는 공통 로직 (로그 + 예외 + 스태츠 + 분산 락)."""
         # 설정에서 토글 확인 (이름 → 플래그 매핑). 설정 모듈 부재 시 무시.
         if not await self._is_enabled(name):
             logger.debug("job[%s] disabled by settings", name)
             return
 
-        logger.info("job[%s] run start", name)
+        # 분산 락 시도 — LEADER 가드의 백업 안전망.
+        # DB 미가용 / 테이블 없음 / 기타 예외 → True 반환 (fail-open: env 가드만 사용).
+        from hwarang_api.workers import scheduler_lock as _lock
+
+        ttl = self._LOCK_TTL.get(name, self._DEFAULT_LOCK_TTL)
+        host = socket.gethostname()
+        acquired = await _lock.try_acquire(name, ttl_seconds=ttl)
+        if not acquired:
+            logger.info(
+                "job[%s] skipped — held by another instance (DB lock). "
+                "this_host=%s",
+                name,
+                host,
+            )
+            return
+
+        logger.info(
+            "job[%s] run start (host=%s, db_lock=acquired, ttl=%ds)",
+            name,
+            host,
+            ttl,
+        )
         started = datetime.now(tz=timezone.utc)
         try:
             result = await job_fn()
@@ -508,13 +614,17 @@ class HLKMScheduler:
             self.last_run[name] = started
             self.last_result[name] = summary
             self.last_error.pop(name, None)
-            logger.info("job[%s] ok: %s", name, summary)
+            logger.info("job[%s] ok (host=%s): %s", name, host, summary)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
             self.last_run[name] = started
             self.last_error[name] = f"{type(exc).__name__}: {exc}"
             logger.exception("job[%s] failed: %s", name, exc)
+        finally:
+            # 다음 인스턴스가 즉시 픽업 가능하도록 즉시 해제.
+            # (실패해도 TTL 만료 후 자동 takeover)
+            await _lock.release(name)
 
     async def _is_enabled(self, name: str) -> bool:
         """스케줄러 토글 플래그 조회. 설정 모듈 미가용 시 기본 활성."""
@@ -524,6 +634,8 @@ class HLKMScheduler:
             "hrag_weather_sync": "hrag_weather_sync_enabled",
             "hrag_news_sync": "hrag_news_sync_enabled",
             "halflife_retrain": "halflife_retrain_enabled",
+            "weekly_lora_train": "weekly_lora_train_enabled",
+            "ab_rollback_monitor": "ab_rollback_monitor_enabled",
         }
         field = flag_map.get(name)
         if field is None:
@@ -691,6 +803,16 @@ class HLKMScheduler:
         )
 
         return await run_adversarial_self_play(samples=20)
+
+    async def _job_crawl_trusted_sources_phase4(self) -> dict:
+        """HSEE Phase 4 — 1차 출처 API 주기 호출 + Trusted Source 자동 갱신.
+
+        매일 04:00 KST. ``crawl_trusted_sources`` 가 도메인별 대표 쿼리로
+        primary_source_apis 를 호출하고, HLKM 사실 ingest + lastCrawledAt 갱신.
+        """
+        from hwarang_api.knowledge.source_crawler import crawl_trusted_sources
+
+        return await crawl_trusted_sources()
 
     async def _job_self_question(self) -> dict:
         """HSEE Phase 5.5 — 화랑이 자기 자신에게 5 패턴 질문을 던지고
@@ -1003,6 +1125,21 @@ class HLKMScheduler:
         from hwarang_api.cognitive.intent import declare_weekly_intent
 
         return await declare_weekly_intent()
+
+    # ── HSEE Phase 2 — 주간 Continuous Learning + 자동 롤백 ────
+    async def _job_weekly_lora_train(self) -> dict:
+        """매주 일요일 03:00 KST — 7일치 암묵 신호 → DPO → LoRA → A/B."""
+        from hwarang_api.learning.weekly_trainer import (
+            run_weekly_training_cycle,
+        )
+
+        return await run_weekly_training_cycle()
+
+    async def _job_ab_rollback_monitor(self) -> dict:
+        """매 6 시간 — A/B treatment 부정 신호 비율 검사 + 임계 시 unload."""
+        from hwarang_api.learning.auto_rollback import monitor_and_rollback
+
+        return await monitor_and_rollback()
 
     async def _job_master_fallback_crawl(self) -> dict:
         """에이전트가 안 가져간 작업을 마스터가 직접 처리 (fallback).

@@ -6,9 +6,11 @@ import { CodeBlock } from "./code-block";
 
 interface MarkdownRendererProps {
   content: string;
+  /** HSEE Phase 1 — code copy 신호를 추적할 메시지 id (assistant 메시지 한정) */
+  messageId?: string;
 }
 
-export function MarkdownRenderer({ content }: MarkdownRendererProps) {
+export function MarkdownRenderer({ content, messageId }: MarkdownRendererProps) {
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
@@ -29,6 +31,7 @@ export function MarkdownRenderer({ content }: MarkdownRendererProps) {
             <CodeBlock
               language={match[1]}
               code={String(children).replace(/\n$/, "")}
+              messageId={messageId}
             />
           );
         },

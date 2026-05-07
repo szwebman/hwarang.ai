@@ -2262,3 +2262,30 @@ model CliLoginRequest {
   @@index([expiresAt])
   @@index([status])
 }
+
+// ============================================================
+// 다중 인스턴스 cron job 분산 락 (HSEE Phase 1-4)
+//
+// 목적:
+//   HWARANG_SCHEDULER_LEADER 환경변수 가드의 백업 안전망.
+//   leader 가 2대 동시에 켜진 사고에서도 같은 잡이 동시에 실행되지 않도록
+//   PostgreSQL UPSERT 멱등성으로 보장.
+//
+// 동작:
+//   - 잡 시작 직전 INSERT ... ON CONFLICT (job_name)
+//     DO UPDATE WHERE expires_at < NOW() RETURNING host
+//   - RETURNING 이 본인 host = 획득, 빈 결과 = 다른 인스턴스 보유 → skip
+//   - 잡 종료 시 DELETE WHERE host = me → 즉시 해제
+//   - TTL 만료 시 자동 takeover (인스턴스 강제 종료 / 크래시 대비)
+//
+// 마이그레이션: `pnpm prisma migrate dev --name add_scheduler_lock`
+// ============================================================
+model SchedulerLock {
+  jobName    String   @id @map("job_name")
+  host       String
+  acquiredAt DateTime @default(now()) @map("acquired_at")
+  expiresAt  DateTime @map("expires_at")
+
+  @@index([expiresAt])
+  @@map("scheduler_lock")
+}

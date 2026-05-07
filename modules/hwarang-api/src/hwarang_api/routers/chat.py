@@ -14,6 +14,7 @@ Hwarang Protocol (HP) 통합:
 from __future__ import annotations
 
 import logging
+import os
 import time
 import uuid
 
@@ -33,6 +34,7 @@ from hwarang_shared.schemas.chat import (
     Usage,
 )
 
+from hwarang_api.middleware.patterns.ab_testing import ABTestManager
 from hwarang_api.protocol.dsl import (
     estimate_tokens_saved,
     merge_into_messages,
@@ -43,6 +45,51 @@ from hwarang_api.protocol.types import HwarangExtension
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+# ─────────────────────────────────────────────────────────────────
+# HSEE Phase 2 — A/B Test 라우팅
+# ─────────────────────────────────────────────────────────────────
+# weekly_trainer 가 새 LoRA 를 만들면 ABTestManager 에 실험 등록 → 여기서
+# user_id 기반으로 결정적 분기. control / treatment 두 LoRA 이름은 환경변수.
+ab_test_manager: ABTestManager = ABTestManager()
+AB_EXPERIMENT_ID = os.getenv("HWARANG_AB_EXPERIMENT_ID", "weekly_lora_ab")
+
+
+def _resolve_ab_variant(request: Request) -> tuple[str | None, str | None]:
+    """A/B 실험에 따라 (variant_name, lora_model_name) 반환.
+
+    실험이 없거나 비활성화면 (None, None) — chat 핸들러는 기존 동작 유지.
+    user_id 추출 우선순위:
+        1) request.state.user.id  (auth middleware 가 채움)
+        2) Authorization 헤더 해시
+        3) X-User-Id 헤더
+        4) client.host (마지막 폴백)
+    """
+    exp = ab_test_manager._experiments.get(AB_EXPERIMENT_ID)  # noqa: SLF001
+    if not exp or not exp.active:
+        return None, None
+
+    user = getattr(request.state, "user", None)
+    user_id = getattr(user, "id", None) if user else None
+    if not user_id:
+        user_id = request.headers.get("x-user-id")
+    if not user_id:
+        auth = request.headers.get("authorization", "")
+        if auth:
+            user_id = f"auth:{hash(auth) & 0xFFFFFFFF:08x}"
+    if not user_id:
+        user_id = (request.client.host if request.client else "anon")
+
+    variant = ab_test_manager.assign_variant(AB_EXPERIMENT_ID, user_id)
+    if variant is None:
+        return None, None
+
+    if variant == "control":
+        lora = os.getenv("HWARANG_LORA_CONTROL", "hwarang-v7")
+    else:
+        lora = os.getenv("HWARANG_LORA_TREATMENT", "hwarang-v8")
+    return variant, lora
 
 
 @router.post("/chat/completions")
@@ -87,6 +134,14 @@ async def chat_completions(request: Request):
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    # ── HSEE Phase 2 — A/B 분기 (결정적, user_id 해시) ──
+    variant, ab_lora = _resolve_ab_variant(request)
+    if ab_lora and not request_body.model:
+        # 모델 미지정 시에만 A/B 의 LoRA 로 라우팅 — 명시 모델은 존중.
+        request_body.model = ab_lora
+    elif ab_lora and request_body.model in ("auto", "hwarang"):
+        request_body.model = ab_lora
+
     # Check if distributed mode is available
     load_balancer = getattr(request.app.state, "load_balancer", None)
 
@@ -95,19 +150,51 @@ async def chat_completions(request: Request):
     else:
         response = await _local_chat(request_body, request)
 
+    # ── HSEE Phase 2 — A/B variant 헤더 추가 ──
+    extra_headers: dict[str, str] = {}
+    if variant:
+        extra_headers["X-Hwarang-Variant"] = variant
+        if ab_lora:
+            extra_headers["X-Hwarang-Lora"] = ab_lora
+
     # ── HP 응답 보강 (스트리밍이 아닌 경우만) ──
     # 스트리밍은 StreamingResponse 라 그대로 반환
     if isinstance(response, StreamingResponse):
+        for k, v in extra_headers.items():
+            response.headers[k] = v
         return response
 
     if hwarang_ext is None:
+        if extra_headers:
+            return _attach_headers(response, extra_headers)
         return response
 
-    return _enrich_with_hwarang(response, hwarang_ext)
+    return _enrich_with_hwarang(response, hwarang_ext, extra_headers=extra_headers)
+
+
+def _attach_headers(response, headers: dict[str, str]) -> JSONResponse:
+    """기존 응답에 헤더만 덧붙여 JSONResponse 로 변환.
+
+    response 가 Pydantic 모델 / dict / JSONResponse 어느 것이든 처리.
+    """
+    if isinstance(response, JSONResponse):
+        for k, v in headers.items():
+            response.headers[k] = v
+        return response
+    if hasattr(response, "model_dump"):
+        body = response.model_dump(mode="json")
+    elif isinstance(response, dict):
+        body = response
+    else:
+        # 알 수 없는 타입 — 그대로 반환 (헤더 부착 실패 감수)
+        return response
+    return JSONResponse(content=body, headers=headers)
 
 
 def _enrich_with_hwarang(
-    response: ChatCompletionResponse, ext: HwarangExtension
+    response: ChatCompletionResponse,
+    ext: HwarangExtension,
+    extra_headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     """Non-streaming 응답에 `@hwarang` 메타 추가.
 
@@ -160,10 +247,10 @@ def _enrich_with_hwarang(
         },
     }
 
-    return JSONResponse(
-        content=body,
-        headers={"X-Hwarang-Protocol": "1.0"},
-    )
+    headers: dict[str, str] = {"X-Hwarang-Protocol": "1.0"}
+    if extra_headers:
+        headers.update(extra_headers)
+    return JSONResponse(content=body, headers=headers)
 
 
 async def _local_chat(request_body: ChatCompletionRequest, request: Request):

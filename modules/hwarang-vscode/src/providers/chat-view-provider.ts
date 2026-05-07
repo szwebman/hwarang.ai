@@ -21,6 +21,7 @@ import {
   SlashCommandContext,
 } from "../commands/slash-commands";
 import { VisionClient } from "../utils/vision-client";
+import { FeedbackTracker } from "../utils/feedback-tracker";
 
 interface StoredMessage {
   role: "user" | "assistant" | "tool_call" | "tool_result";
@@ -60,6 +61,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   /** 옵션 카드를 보낸 마지막 메시지 ID — continueMessage 시 사용 */
   private lastOptionsMessageId: string | null = null;
   private usageRefreshTimer: NodeJS.Timer | null = null;
+  /** HSEE Phase 1 — implicit feedback (Apply / Copy / Reject + edit distance) */
+  private feedbackTracker: FeedbackTracker;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -74,6 +77,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.llmClient = llmClient;
     this.authManager = authManager;
     this.toolExecutor = toolExecutor || null;
+
+    this.feedbackTracker = new FeedbackTracker({
+      apiUrl:
+        vscode.workspace.getConfiguration("hwarang").get<string>("apiUrl") ||
+        "https://hwarang.ai",
+      getApiKey: () => this.authManager.apiKey,
+      getUserId: () => this.authManager.user?.id ?? null,
+    });
+    context.subscriptions.push({
+      dispose: () => this.feedbackTracker.dispose(),
+    });
   }
 
   // ============================================================
@@ -445,13 +459,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           break;
         case "insertCode":
           this.insertCodeToEditor(message.code);
+          this.feedbackTracker.recordCopy(message.messageId);
           break;
         case "applyDiff":
           this.applyCodeToFile(message.code, message.language);
+          // HSEE — Apply 클릭은 강한 positive 신호 + 30초 edit-distance 추적 시작
+          this.feedbackTracker.recordApply(message.messageId, message.code);
           break;
         case "copyCode":
           vscode.env.clipboard.writeText(message.code);
           vscode.window.showInformationMessage("클립보드에 복사됨");
+          this.feedbackTracker.recordCopy(message.messageId);
           break;
         case "openFile":
           this.openFileInEditor(message.path);
@@ -2256,6 +2274,8 @@ function startAI() {
   hideWelcome();
   const d = document.createElement('div');
   d.className = 'msg ai-msg';
+  // HSEE Phase 1 — implicit feedback 추적용 messageId (Apply/Copy 클릭 시 사용)
+  d.dataset.id = 'ai_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
   d.innerHTML =
     '<div class="msg-label"><span class="dot"></span>화랑</div>' +
     '<div class="msg-text"></div>';
@@ -2377,9 +2397,20 @@ function esc(s) {
 function getCode(btn) {
   return btn.closest('.codeblock').querySelector('code').textContent;
 }
-function doCopy(btn) { vscode.postMessage({ type: 'copyCode', code: getCode(btn) }); }
-function doInsert(btn) { vscode.postMessage({ type: 'insertCode', code: getCode(btn) }); }
-function doApply(btn, lang) { vscode.postMessage({ type: 'applyDiff', code: getCode(btn), language: lang }); }
+function getMsgId(btn) {
+  // HSEE Phase 1 — 코드블록이 속한 가장 가까운 ai-msg 의 id (없으면 빈 문자열)
+  const m = btn.closest('.msg.ai-msg');
+  return (m && m.dataset && m.dataset.id) ? m.dataset.id : '';
+}
+function doCopy(btn) {
+  vscode.postMessage({ type: 'copyCode', code: getCode(btn), messageId: getMsgId(btn) });
+}
+function doInsert(btn) {
+  vscode.postMessage({ type: 'insertCode', code: getCode(btn), messageId: getMsgId(btn) });
+}
+function doApply(btn, lang) {
+  vscode.postMessage({ type: 'applyDiff', code: getCode(btn), language: lang, messageId: getMsgId(btn) });
+}
 
 // ======== 메시지 수신 ========
 

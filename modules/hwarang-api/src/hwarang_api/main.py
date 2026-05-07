@@ -23,6 +23,7 @@ from hwarang_api.routers import (
     chat,
     cluster,
     cognitive,
+    coin,
     crawl,
     grid,
     health,
@@ -33,6 +34,7 @@ from hwarang_api.routers import (
     options,
     realtime,
     research,
+    scheduler,
     self_modify,
     self_play,
     sleep,
@@ -167,6 +169,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(admin.router, prefix="/admin", tags=["Admin"])
     app.include_router(cluster.router, prefix="/admin", tags=["Cluster"])
     app.include_router(grid.router, tags=["Grid/HFL"])
+    app.include_router(coin.router, tags=["Coin/Emission"])
     app.include_router(knowledge.router, tags=["Knowledge/HLKM"])
     app.include_router(learning.router, tags=["Learning/HSEE"])
     app.include_router(trusted_sources.router, tags=["TrustedSources"])
@@ -188,5 +191,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(self_play.router, tags=["SelfPlay"])
     # Sleep Cycle / Memory Consolidation (Phase 9.ι) — prefix /api/sleep 는 라우터 자체에 정의됨
     app.include_router(sleep.router, tags=["Sleep"])
+    # Scheduler 관리 (분산 락/잡 상태) — prefix /api/scheduler 는 라우터 자체에 정의됨
+    app.include_router(scheduler.router, tags=["Scheduler"])
 
     return app

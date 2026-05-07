@@ -112,6 +112,30 @@ class LoRACompressor:
                 "data": quantized,
             }
 
+        # 무결성 체크섬 (특허 5단계 中 1단계 산출물): 원본 safetensors SHA-256
+        try:
+            with open(adapter_file, "rb") as fh:
+                source_checksum = hashlib.sha256(fh.read()).hexdigest()
+        except Exception:
+            source_checksum = ""
+
+        # Progressive Sync 정렬 키: 레이어를 변화량 magnitude 내림차순 정렬
+        # → 시간 제한 환경에서 중요한 레이어가 앞에 위치 (특허 5단계 中 5단계)
+        # 정렬 기준: 보존된 값들의 양자화 후 절대 편차(=실제 정보량 근사)
+        def _layer_importance(kv: tuple) -> float:
+            data = kv[1]["data"]
+            scale = float(data.get("scale", 1.0)) or 1.0
+            zp = int(data.get("zero_point", 0))
+            vals = data.get("values", [])
+            if not vals:
+                return 0.0
+            # 역양자화한 값의 magnitude 합 — 클수록 중요
+            return -sum(abs((v - zp) * scale) for v in vals)
+
+        compressed_layers = dict(
+            sorted(compressed_layers.items(), key=_layer_importance)
+        )
+
         # 메타데이터
         metadata = {
             "version": 1,
@@ -120,6 +144,8 @@ class LoRACompressor:
             "skipped": skipped,
             "sparsity": self.sparsity_top_k,
             "quantize_bits": self.quantize_bits,
+            "source_checksum_sha256": source_checksum,
+            "progressive_sync": True,
             "timestamp": time.time(),
         }
 

@@ -1,19 +1,26 @@
 "use client";
 
 import { useState } from "react";
+import { sendImplicitFeedback } from "@/lib/feedback";
 
 interface CodeBlockProps {
   language: string;
   code: string;
+  /** HSEE Phase 1 — implicit feedback 추적용 (없으면 전송 skip) */
+  messageId?: string;
 }
 
-export function CodeBlock({ language, code }: CodeBlockProps) {
+export function CodeBlock({ language, code, messageId }: CodeBlockProps) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = async () => {
     await navigator.clipboard.writeText(code);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+    // HSEE — 코드 복사는 약 positive implicit 신호
+    if (messageId) {
+      void sendImplicitFeedback({ kind: "copy", messageId });
+    }
   };
 
   const lineCount = code.split("\n").length;
