@@ -16,7 +16,7 @@ SCRIPTS="$ROOT/scripts/data"
 
 mkdir -p "$DATA"
 
-echo "=== [1/4] v11 신규 빌더 실행 (10,000건) ==="
+echo "=== [1/4] v11 신규 빌더 실행 (6,000건) ==="
 python3 "$SCRIPTS/build_ko_prose_v11.py" --output "$DATA/ko_prose_v11.jsonl"
 
 echo
